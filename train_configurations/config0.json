@@ -1,0 +1,9 @@
+{
+    "batch size": 32,
+    "epochs": 50,
+    "batches per epoch": 100,
+    "val fraction": 0.2,
+    "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/",
+    "model type": "to be determined",
+    "debug mode": 1
+}
