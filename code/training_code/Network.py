@@ -24,9 +24,9 @@ class Network:
     class encoder_atrous(nn.Module):
         def __init__(self, img_size, num_base_filters, num_blocks,
                      kernel_size, dilation_rate, dropout):
-            super(Network.simple_network, self).__init__()
+            super(Network.encoder_atrous, self).__init__()
             layers = []
-            in_channels = img_size
+            in_channels = img_size[2]
             for block_idx in range(num_blocks):
                 out_channels = num_base_filters*(2**block_idx)
                 layers.append(nn.Conv2d(
@@ -122,10 +122,11 @@ class Network:
 
         def forward(self, x):
             return self.model(x)
-            
-    class simple_network:
+
+    class simple_network(nn.Module):
 
         def __init__(self, config, image_size, number_of_output_channels):
+            super(Network.simple_network, self).__init__()
             self.model_type = config['model type']
             self.image_size = image_size
             self.number_of_output_channels = number_of_output_channels

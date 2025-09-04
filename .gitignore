@@ -207,4 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 .vscode/
-code/training_code/train_outputs/debug_outputs
+train_output/debug_outputs/
