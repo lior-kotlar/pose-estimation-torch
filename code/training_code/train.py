@@ -4,6 +4,8 @@ import os
 import shutil
 import sys
 from datetime import date
+import preprocessor
+import Network
 
 class Trainer:
     def __init__(self, config_path):
@@ -17,10 +19,27 @@ class Trainer:
             self.base_output_path = config["base output directory"]
             self.model_type = config["model type"]
             self.debug_mode = bool(config["debug mode"])
+            self.preprocessor = preprocessor.Preprocessor(config)
+
+        if self.debug_mode:
+            self.batches_per_epoch = 1
 
         self.run_name = f"{self.model_type}_{date.today().strftime('%b %d')}"
         self.clean = False
-        run_path = self.create_run_folders()
+        self.run_path = self.create_run_folders()
+        self.save_configuration()
+
+        # Do preprocessing according to the model type
+        self.preprocessor.do_preprocess()
+        self.box, self.confmaps = self.preprocessor.get_box(), self.preprocessor.get_confmaps()
+
+        # Get the right CNN architecture
+        self.img_size = self.box.shape[1:]
+        self.number_of_input_channels = self.box.shape[-1]
+        self.num_output_channels = self.confmaps.shape[-1]
+        self.network = Network.Network(config, image_size=self.img_size,
+                                       number_of_output_channels=self.num_output_channels)
+        self.model = self.network.get_model()
 
     def create_run_folders(self):
         """ Creates folders necessary for outputs of vision. """
@@ -49,6 +68,9 @@ class Trainer:
                     print(f"Copied {full_file_name} to {code_dir_path}")
         return run_path
     
+    def save_configuration(self):
+        with open(f"{self.run_path}/configuration.json", 'w') as file:
+            json.dump(self.config, file, indent=4)
     
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")

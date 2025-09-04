@@ -1,0 +1,18 @@
+
+# MODEL TYPES
+HEAD_TAIL_PER_CAM = "HEAD_TAIL_PER_CAM"
+HEAD_TAIL_ALL_CAMS = "HEAD_TAIL_ALL_CAMS"
+HEAD_TAIL_PER_CAM_POINTS_LOSS = "HEAD_TAIL_PER_CAM_POINTS_LOSS"
+MODEL_18_POINTS_PER_WING = "MODEL_18_POINTS_PER_WING" # 18 points, 4 cameras
+MODEL_18_POINTS_PICK_3_BEST_CAMERAS = "MODEL_18_POINTS_3_GOOD_CAMERAS" #choose best 3 cameras out of 4
+MODEL_18_POINTS_3_CAMERAS_ONLY = "MODEL_18_POINTS_3_CAMERAS_ONLY" #there are only 3 cameras to begin with
+
+# general model types. only used for arguments in function like split_per_wing.
+# a model can't have these types, only the specific ones above.
+PER_WING_MODEL = 'PER_WING_MODEL'
+ALL_POINTS_MODEL = 'ALL_POINTS_MODEL'
+
+
+# SET TYPES
+MOVIE_TRAIN_SET = "MOVIE_TRAIN_SET"
+RANDOM_TRAIN_SET = "RANDOM_TRAIN_SET"
