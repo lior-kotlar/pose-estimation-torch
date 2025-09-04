@@ -6,6 +6,7 @@ from torchsummary import summary
 
 class Network:
     def __init__(self, config, image_size, number_of_output_channels):
+        self.config = config
         self.model_type = config['model type']
         self.image_size = image_size
         self.number_of_output_channels = number_of_output_channels
@@ -133,7 +134,7 @@ class Network:
             self.kernel_size = config["convolution kernel size"]
             self.num_base_filters = config["number of base filters"]
             self.learning_rate = config["learning rate"]
-            self.loss_function = config["loss_function"]
+            self.loss_function = config["loss function"]
             self.dilation_rate = config["dilation rate"]
             self.dropout = config["dropout ratio"]
             self.batches_per_epoch = config["batches per epoch"]
@@ -160,24 +161,28 @@ class Network:
             return x
 
     def config_model(self):
-        if self.model_type == ALL_CAMS or self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
-            model = self.all_4_cams()
-        elif self.model_type == ALL_CAMS_AND_3_GOOD_CAMS:
-            model = self.all_3_cams()
-        elif self.model_type == TWO_WINGS_TOGATHER:
-            model = self.two_wings_net()
-        elif self.model_type == HEAD_TAIL_ALL_CAMS:
-            model = self.head_tail_all_cams()
-        elif self.model_type == C2F_PER_WING:
-            model = self.C2F_per_wing()
-        elif self.model_type == COARSE_PER_WING:
-            model = self.coarse_per_wing()
-        elif self.model_type == MODEL_18_POINTS_PER_WING_VIT or self.model_type == ALL_POINTS_MODEL_VIT:
-            model = self.get_transformer()
-        elif self.model_type == RESNET_18_POINTS_PER_WING:
-            model = self.resnet50_encoder_shallow_decoder()
-        else:
-            model = self.simple_network()
+        
+        # if self.model_type == ALL_CAMS or self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
+        #     model = self.all_4_cams()
+        # elif self.model_type == ALL_CAMS_AND_3_GOOD_CAMS:
+        #     model = self.all_3_cams()
+        # elif self.model_type == TWO_WINGS_TOGATHER:
+        #     model = self.two_wings_net()
+        # elif self.model_type == HEAD_TAIL_ALL_CAMS:
+        #     model = self.head_tail_all_cams()
+        # elif self.model_type == C2F_PER_WING:
+        #     model = self.C2F_per_wing()
+        # elif self.model_type == COARSE_PER_WING:
+        #     model = self.coarse_per_wing()
+        # elif self.model_type == MODEL_18_POINTS_PER_WING_VIT or self.model_type == ALL_POINTS_MODEL_VIT:
+        #     model = self.get_transformer()
+        # elif self.model_type == RESNET_18_POINTS_PER_WING:
+        #     model = self.resnet50_encoder_shallow_decoder()
+        # else:
+        #     model = self.simple_network()
+
+
+        model = self.simple_network(self.config, self.image_size, self.number_of_output_channels)
         return model
 
     def get_model(self):

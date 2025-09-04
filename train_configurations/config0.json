@@ -46,7 +46,7 @@
     ],
     "interpolation order": 3,
     "// saving configurations //": 0,
-    "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output",
+    "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs",
     "clean": 0,
     "// callbacks parameters //": 0,
     "// ReduceLROnPlateau": 0,
