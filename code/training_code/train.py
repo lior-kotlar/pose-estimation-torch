@@ -6,6 +6,7 @@ import sys
 from datetime import date
 import preprocessor
 import Network
+import numpy as np
 
 class Trainer:
     def __init__(self, config_path):
@@ -16,7 +17,8 @@ class Trainer:
             self.num_epochs = config['epochs']
             self.batches_per_epoch = config['batches per epoch']
             self.val_fraction = config['val fraction']
-            self.base_output_path = config["base output directory"]
+            self.base_output_directory = config["base output directory"]
+            self.viz_idx = 1
             self.model_type = config["model type"]
             self.debug_mode = bool(config["debug mode"])
             self.preprocessor = preprocessor.Preprocessor(config)
@@ -41,9 +43,25 @@ class Trainer:
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
 
+        self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
+        self.validation = (self.val_box, self.val_confmap)
+        self.viz_sample = (self.val_box[self.viz_idx], self.val_confmap[self.viz_idx])
+        print("img_size:", self.img_size)
+        print("num_output_channels:", self.num_output_channels)
+
+    def train_val_split(self, shuffle=True):
+        """ Splits datasets into train and validation sets. """
+        val_size = int(np.round(len(self.box) * self.val_fraction))
+        idx = np.arange(len(self.box))
+        if shuffle:
+            np.random.shuffle(idx)
+        val_idx = idx[:val_size]
+        idx = idx[val_size:]
+        return self.box[idx], self.confmaps[idx], self.box[val_idx], self.confmaps[val_idx], idx, val_idx
+
     def create_run_folders(self):
         """ Creates folders necessary for outputs of vision. """
-        run_path = os.path.join(self.base_output_path, self.run_name)
+        run_path = os.path.join(self.base_output_directory, self.run_name)
         if not self.clean:
             initial_run_path = run_path
             i = 1
