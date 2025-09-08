@@ -5,8 +5,12 @@ import shutil
 import sys
 from datetime import date
 import preprocessor
+from Datasets import *
 import Network
 import numpy as np
+from torch.utils.data import DataLoader
+from utils import *
+
 
 class Trainer:
     def __init__(self, config_path):
@@ -49,6 +53,17 @@ class Trainer:
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
 
+        test_sample = self.train_box[0]
+        test_label = self.train_confmap[0]
+
+
+    def train(self):
+        augmentor = Augmentor(self.config)
+        train_set = Dataset(self.train_box, self.train_confmap, augmentor.get_transforms())
+        val_set = Dataset(self.val_box, self.val_confmap)
+        train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True)
+        val_loader = DataLoader(val_set, batch_size=self.batch_size, shuffle=False)
+        
     def train_val_split(self, shuffle=True):
         """ Splits datasets into train and validation sets. """
         val_size = int(np.round(len(self.box) * self.val_fraction))
@@ -89,11 +104,13 @@ class Trainer:
     def save_configuration(self):
         with open(f"{self.run_path}/configuration.json", 'w') as file:
             json.dump(self.config, file, indent=4)
-    
+
+
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
     print(f"Using config file: {config_path}")
     trainer = Trainer(config_path)
+    trainer.train()
 
 
 if __name__ == "__main__":

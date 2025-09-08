@@ -1,9 +1,9 @@
 import numpy as np
 from constants import *
+from utils import *
 from skimage.morphology import disk, erosion, dilation
 import h5py
-from scipy.ndimage import binary_dilation, binary_closing, distance_transform_edt
-from utils import *
+from scipy.ndimage import binary_dilation, binary_closing
 
 class Preprocessor:
     def __init__(self, config):
@@ -264,8 +264,8 @@ class Preprocessor:
         left_peaks = np.zeros((num_frames, num_cams, 2, num_pts_per_wing))
         right_peaks = np.zeros((num_frames, num_cams, 2, num_pts_per_wing))
         for cam in range(num_cams):
-            l_p = Preprocessor.find_peaks(left_wing_confmaps[:, cam, :, :, :])[:, :2, :]
-            r_p = Preprocessor.find_peaks(right_wing_confmaps[:, cam, :, :, :])[:, :2, :]
+            l_p = find_peaks(left_wing_confmaps[:, cam, :, :, :])[:, :2, :]
+            r_p = find_peaks(right_wing_confmaps[:, cam, :, :, :])[:, :2, :]
             left_peaks[:, cam, :, :] = l_p
             right_peaks[:, cam, :, :] = r_p
 

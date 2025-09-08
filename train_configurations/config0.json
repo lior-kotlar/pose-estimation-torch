@@ -31,20 +31,21 @@
     "mix with test": 0,
     "mask dilation": 1,
     "single time channel": 0,
+
     "// augmentations parameters //": 0,
     "custom": 0,
-    "augmentation shift x y": 10,
+    "xy shift": 10,
     "rotation range": 180,
     "seed": 36,
     "horizontal flip": 1,
     "vertical flip": 1,
     "shear range": 30,
-    "// augmentations using keras ImageGenerator": 0,
     "zoom range": [
         0.7,
         1.3
     ],
     "interpolation order": 3,
+
     "// saving configurations //": 0,
     "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs",
     "clean": 0,
