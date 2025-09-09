@@ -5,6 +5,7 @@ from torchvision import transforms
 from scipy.ndimage import rotate, shift, zoom, affine_transform
 
 
+
 class Dataset(Dataset):
     def __init__(self, input_samples, confmap, transforms=None):
         super().__init__()
@@ -29,8 +30,8 @@ class Augmentor():
         self.rotation_range = config["rotation range"]
         self.seed = config["seed"]
         self.zoom_range = config["zoom range"]
-        self.horizontal_flip = bool(config["horizontal flip"])
-        self.vertical_flip = bool(config["vertical flip"])
+        self.HorizontalFlip = bool(config["horizontal flip"])
+        self.VerticalFlip = bool(config["vertical flip"])
         self.shift = config["xy shift"]
         self.debug_mode = bool(config["debug mode"])
         self.batch_size = config["batch size"] if not self.debug_mode else 1
@@ -39,25 +40,35 @@ class Augmentor():
     def config_augmentations(self):
         augmentations = []
         if self.rotation_range > 0:
-            augmentations.append(Augmentor.rotating(rotation_range=self.rotation_range))
+            augmentations.append(Augmentor.Rotation(rotation_range=self.rotation_range))
         if self.zoom_range is not None:
-            augmentations.append(Augmentor.scaling(scale_range=self.zoom_range))
-        if self.horizontal_flip:
-            augmentations.append(Augmentor.horizontal_flip())
-        if self.vertical_flip:
-            augmentations.append(Augmentor.vertical_flip())
+            augmentations.append(Augmentor.Scale(scale_range=self.zoom_range))
+        if self.HorizontalFlip:
+            augmentations.append(Augmentor.HorizontalFlip())
+        if self.VerticalFlip:
+            augmentations.append(Augmentor.VerticalFlip())
         if self.shift > 0:
-            augmentations.append(Augmentor.shifting(shift=self.shift))
+            augmentations.append(Augmentor.Shift(shift=self.shift))
         
         return augmentations
     
     def get_transforms(self):
-        return transforms.Compose(self.augmentations)
+        double_compose = self.ComposeDouble(self.augmentations)
+        return double_compose
     
     def get_augmentations(self):
         return self.augmentations
-        
-    class horizontal_flip:
+    
+    class ComposeDouble:
+        def __init__(self, transforms):
+            self.transforms = transforms
+
+        def __call__(self, sample, confmap):
+            for t in self.transforms:
+                sample, confmap = t(sample, confmap)
+            return sample, confmap
+
+    class HorizontalFlip:
         def __init__(self, p=0.5):
             self.p = p
         
@@ -71,7 +82,7 @@ class Augmentor():
             else:
                 return sample, label
         
-    class vertical_flip:
+    class VerticalFlip:
         def __init__(self, p=0.5):
             self.p = p
         
@@ -85,7 +96,7 @@ class Augmentor():
             else:
                 return sample, label
             
-    class rotating:
+    class Rotation:
         def __init__(self, rotation_range=None, angle=None):
             if rotation_range is None and angle is None:
                 exit("rotration transform must receive an argument")
@@ -108,7 +119,7 @@ class Augmentor():
 
             return rotated_sample, rotated_label
         
-    class shifting:
+    class Shift:
         def __init__(self, shift=10, range=True):
             self.range = range
             self.shift = shift
@@ -133,7 +144,7 @@ class Augmentor():
 
             return shifted_sample, shifted_label
 
-    class scaling:
+    class Scale:
         def __init__(self, scale_range=(0.8, 1.2)):
             """
             Random scaling transform for image + confidence maps.

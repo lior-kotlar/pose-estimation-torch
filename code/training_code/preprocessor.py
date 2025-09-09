@@ -202,6 +202,7 @@ class Preprocessor:
                                    shape=[self.confmaps.shape[0] * self.confmaps.shape[1],
                                              self.confmaps.shape[2], self.confmaps.shape[3],
                                              self.confmaps.shape[4]])
+        
         self.num_samples = self.box.shape[0]
     
     def load_dataset(self, data_path):

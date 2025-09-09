@@ -10,6 +10,7 @@ import Network
 import numpy as np
 from torch.utils.data import DataLoader
 from utils import *
+from Callbacks import ModelCallbacks
 
 
 class Trainer:
@@ -21,6 +22,14 @@ class Trainer:
             self.num_epochs = config['epochs']
             self.batches_per_epoch = config['batches per epoch']
             self.val_fraction = config['val fraction']
+            self.loss_function = loss_from_string[config["loss function"]]()
+            self.learning_rate = config["learning rate"]
+            self.optimizer_as_string = config["optimizer"]
+            self.reduce_lr_factor = config["reduce lr factor"]
+            self.reduce_lr_patience = config["reduce lr patience"]
+            self.reduce_lr_min_delta = config["reduce lr min delta"]
+            self.reduce_lr_cooldown = config["reduce lr cooldown"]
+            self.reduce_lr_min_lr = config["reduce lr min lr"]
             self.base_output_directory = config["base output directory"]
             self.viz_idx = 1
             self.model_type = config["model type"]
@@ -47,15 +56,43 @@ class Trainer:
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
 
+        self.optimizer = optimizer_from_string[self.optimizer_as_string](
+            self.model.parameters(),
+            lr=self.learning_rate
+            )
+
         self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
         self.validation = (self.val_box, self.val_confmap)
         self.viz_sample = (self.val_box[self.viz_idx], self.val_confmap[self.viz_idx])
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
 
-        test_sample = self.train_box[0]
-        test_label = self.train_confmap[0]
+        self.callbacks = ModelCallbacks(config, self.run_path, self.viz_sample, (self.val_box, self.val_confmap))
 
+    def do_one_epoch(self, epoch_number, train_loader):
+        self.callbacks.on_epoch_begin(epoch=epoch_number)
+
+        running_loss = 0.0
+        last_loss = 0.0
+        for i, data in enumerate(train_loader, 0):
+            inputs, labels = data
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs)
+            loss = self.loss_function(outputs, labels)
+            loss.backward()
+            self.optimizer.step()
+            running_loss += loss.item()
+            if i % 100 == 99:
+                last_loss = running_loss / 100
+                print(f"[{i + 1}, {self.batches_per_epoch}] loss: {last_loss:.9f}")
+                running_loss = 0.0
+
+        logs = {
+            'loss': running_loss / len(train_loader),
+        }
+        self.callbacks.on_epoch_end(epoch=epoch_number, model=self.model, logs=logs)
+
+        return last_loss
 
     def train(self):
         augmentor = Augmentor(self.config)
@@ -63,6 +100,22 @@ class Trainer:
         val_set = Dataset(self.val_box, self.val_confmap)
         train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True)
         val_loader = DataLoader(val_set, batch_size=self.batch_size, shuffle=False)
+        
+        for epoch in range(self.num_epochs):
+            self.model.train()
+            average_loss = self.do_one_epoch(epoch_number=epoch, train_loader=train_loader)
+            running_val_loss = 0.0
+            self.model.eval()
+            with torch.no_grad():
+                for i, data in enumerate(val_loader):
+                    inputs, labels = data
+                    outputs = self.model(inputs)
+                    loss = self.loss_function(outputs, labels)
+                    running_val_loss += loss.item()
+            
+            average_val_loss = running_val_loss / (i + 1)
+
+            
         
     def train_val_split(self, shuffle=True):
         """ Splits datasets into train and validation sets. """

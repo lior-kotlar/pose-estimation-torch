@@ -3,6 +3,19 @@ import matplotlib.pyplot as plt
 import os
 from Datasets import *
 
+loss_from_string = {
+    "MSE": torch.nn.MSELoss,
+    "BCE": torch.nn.BCELoss,
+    "BCEWithLogits": torch.nn.BCEWithLogitsLoss,
+    "CrossEntropy": torch.nn.CrossEntropyLoss,
+}
+
+optimizer_from_string = {
+    "Adam": torch.optim.Adam,
+    "SGD": torch.optim.SGD,
+    "RMSprop": torch.optim.RMSprop,
+}
+
 def find_peaks(x):
         
         b, h, w, c = x.shape
