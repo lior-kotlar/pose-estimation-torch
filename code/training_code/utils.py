@@ -16,8 +16,8 @@ optimizer_from_string = {
     "RMSprop": torch.optim.RMSprop,
 }
 
-def find_peaks(x):
-        
+def tf_format_find_peaks(x):
+
         b, h, w, c = x.shape
 
         flattened = x.reshape(b, h * w, c)
@@ -36,12 +36,46 @@ def find_peaks(x):
 
         return pred
 
+def find_peaks(x):
+    """
+    Find peak locations in confidence maps.
+
+    Args:
+        x: np.ndarray of shape (B, C, H, W)
+
+    Returns:
+        pred: np.ndarray of shape (B, 3, C), where for each channel:
+              [0,:] = x-coords (cols),
+              [1,:] = y-coords (rows),
+              [2,:] = peak values.
+    """
+    b, c, h, w = x.shape
+
+    # Flatten spatial dimensions: (B, C, H*W)
+    flattened = x.reshape(b, c, h * w)
+
+    # Indices of maxima along spatial dim
+    idx = np.argmax(flattened, axis=2)  # [B, C]
+
+    # Convert flat index back to (row, col)
+    rows = idx // w
+    cols = idx % w
+
+    # Max values per channel
+    vals = np.max(flattened, axis=2)  # [B, C]
+
+    # Stack results → shape (B, 3, C)
+    pred = np.stack([cols.astype(float), rows.astype(float), vals], axis=1)
+
+    return pred
+    
+
 def show_sample_channels(sample, save_directory, filename="sample_channels.png", cmap="gray"):
     """
-    Show the 4 channels of a single sample (192,192,4).
+    Show the 4 channels of a single sample (4, H, W).
     
     Args:
-        sample: numpy array or torch tensor of shape (H, W, 4)
+        sample: numpy array or torch tensor of shape (4, H, W)
         cmap: colormap for visualization (default: gray)
     """
     file_path = os.path.join(save_directory, filename)
@@ -49,11 +83,11 @@ def show_sample_channels(sample, save_directory, filename="sample_channels.png",
     if hasattr(sample, "detach"):
         sample = sample.detach().cpu().numpy()
     
-    assert sample.shape[-1] == 4, "Expected shape (H, W, 4)"
+    assert sample.shape[0] == 4, "Expected shape (4, H, W)"
     
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
     for i in range(4):
-        axes[i].imshow(sample[:, :, i], cmap=cmap)
+        axes[i].imshow(sample[i, :, :], cmap=cmap)
         axes[i].set_title(f"Channel {i+1}")
         axes[i].axis("off")
     
@@ -62,56 +96,38 @@ def show_sample_channels(sample, save_directory, filename="sample_channels.png",
     plt.close()
     print(f"Sample channels saved to {file_path}")
 
-def show_interest_points(sample, label, save_directory, filename="interest_points.png"):
-    file_path = os.path.join(save_directory, filename)
-    
-    # Add batch dimension so find_peaks can process [B,H,W,C]
-    label_batch = label[None]  # shape (1,H,W,C)
-
-    # Find peaks -> shape [B,3,C]
-    peaks = find_peaks(label_batch)  # (x, y, val)
-    coords = peaks[:, :2, :].transpose(0, 2, 1)[0]  # shape (num_points, 2)
-
-    # Select the second channel of the sample as background
-    frame = sample[:, :, 1]  
-
-    # Plot
-    plt.figure(figsize=(6, 6))
-    plt.imshow(frame, cmap="gray")
-    plt.scatter(coords[:, 0], coords[:, 1], c="red", s=40, marker="x")
-    plt.title("Interest Points")
-
-    # Save figure
-    plt.savefig(file_path)
-    plt.close()
-    print(f"Interest points plot saved to {file_path}")
-
 def show_interest_points_with_index(sample, label, save_directory, filename="interest_points_index.png"):
     """
     Save a plot showing the peaks of confidence maps on the second channel of the sample.
     Each peak is plotted in a different color with its index next to it.
 
     Args:
-        sample: np.ndarray of shape (H, W, 4)
-        label: np.ndarray of shape (H, W, num_points)
-        save_path: str, path to save the plot
+        sample: np.ndarray or torch.Tensor of shape (4, H, W)
+        label: np.ndarray or torch.Tensor of shape (num_points, H, W)
     """
     file_path = os.path.join(save_directory, filename)
-    # Add batch dim for find_peaks
-    label_batch = label[None]  # shape (1,H,W,C)
+
+    # Convert torch tensors to numpy
+    if hasattr(sample, "detach"):
+        sample = sample.detach().cpu().numpy()
+    if hasattr(label, "detach"):
+        label = label.detach().cpu().numpy()
+
+    # Add batch dimension for find_peaks -> (1, num_points, H, W)
+    label_batch = label[None]
 
     # Find peaks -> shape [B,3,C]
-    peaks = find_peaks(label_batch)  # returns (x, y, val)
+    peaks = find_peaks(label_batch)  # (x, y, val)
     coords = peaks[:, :2, :].transpose(0, 2, 1)[0]  # shape (num_points, 2)
 
-    H, W, _ = sample.shape
+    _, H, W = sample.shape
     num_points = coords.shape[0]
 
-    # Second channel of sample as background
-    frame = sample[:, :, 1]
+    # Use the 2nd channel (index 1) of sample as background
+    frame = sample[1, :, :]
 
     # Generate a distinct color for each point
-    colors = plt.cm.get_cmap('tab10', num_points).colors  # tab10 has 10 distinct colors
+    colors = plt.cm.get_cmap('tab10', num_points).colors
 
     plt.figure(figsize=(6, 6))
     plt.imshow(frame, cmap='gray')
@@ -124,8 +140,6 @@ def show_interest_points_with_index(sample, label, save_directory, filename="int
     plt.title("Interest Points with Indices")
     plt.axis('off')
     plt.tight_layout()
-
-    # Ensure directory exists
 
     plt.savefig(file_path)
     plt.close()

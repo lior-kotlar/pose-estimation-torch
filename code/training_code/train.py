@@ -12,11 +12,15 @@ from torch.utils.data import DataLoader
 from utils import *
 from Callbacks import ModelCallbacks
 
+N = 0
+C = 1
+H = 2
+W = 3
 
 class Trainer:
     def __init__(self, config_path):
-        with open(config_path) as C:
-            config = json.load(C)
+        with open(config_path) as CF:
+            config = json.load(CF)
             self.config = config
             self.batch_size = config['batch size']
             self.num_epochs = config['epochs']
@@ -49,9 +53,9 @@ class Trainer:
         self.box, self.confmaps = self.preprocessor.get_box(), self.preprocessor.get_confmaps()
 
         # Get the right CNN architecture
-        self.img_size = self.box.shape[1:]
-        self.number_of_input_channels = self.box.shape[-1]
-        self.num_output_channels = self.confmaps.shape[-1]
+        self.img_size = (self.box.shape[C], self.box.shape[H], self.box.shape[W])
+        self.number_of_input_channels = self.box.shape[C]
+        self.num_output_channels = self.confmaps.shape[C]
         self.network = Network.Network(config, image_size=self.img_size,
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
@@ -66,6 +70,8 @@ class Trainer:
         self.viz_sample = (self.val_box[self.viz_idx], self.val_confmap[self.viz_idx])
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
+
+        test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [Augmentor.Scale((0.4,1.6))])
 
         self.callbacks = ModelCallbacks(config, self.run_path, self.viz_sample, (self.val_box, self.val_confmap))
 

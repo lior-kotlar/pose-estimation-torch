@@ -62,12 +62,12 @@ class ModelCallbacks:
     def on_epoch_begin(self, epoch):
         for callback in self.model_callbacks:
             if hasattr(callback, 'on_epoch_begin'):
-                callback.on_epoch_begin(epoch)
+                callback.on_epoch_begin(epoch=epoch)
 
     def on_epoch_end(self, epoch, model, logs=None):
         for callback in self.model_callbacks:
             if hasattr(callback, 'on_epoch_end'):
-                callback.on_epoch_end(epoch, model, logs)
+                callback.on_epoch_end(epoch=epoch, model=model, logs=logs)
 
     class TrainingLogger:
         def __init__(self, log_interval=10):
@@ -79,7 +79,7 @@ class ModelCallbacks:
             self.epoch_start_time = time()
             logging.info(f"Epoch {epoch + 1} starting.")
 
-        def on_epoch_end(self, epoch, logs=None):
+        def on_epoch_end(self, epoch, model, logs=None):
             elapsed_time = time() - self.epoch_start_time
             logging.info(f"Epoch {epoch + 1} finished in {elapsed_time:.2f} seconds.")
             logs['epoch_time'] = elapsed_time  # Add epoch time to logs
@@ -96,7 +96,7 @@ class ModelCallbacks:
             self.box, self.confmaps = validation_data
             self.base_run_directory = base_run_directory
 
-        def on_epoch_end(self, epoch, model, n_bins=20):
+        def on_epoch_end(self, epoch, model, n_bins=20,  logs=None):
 
             model.eval()
             device = next(model.parameters()).device
@@ -104,35 +104,54 @@ class ModelCallbacks:
             # ---- Predictions ----
             with torch.no_grad():
                 x_val = torch.tensor(self.box, dtype=torch.float32).to(device)
-                true_confmaps = torch.tensor(self.confmaps, dtype=torch.float32).to(device)
                 preds = model(x_val)
 
-            pred_peaks = find_peaks(preds)
-            pred_peaks = pred_peaks[:, :2, :].permute(0, 2, 1)
+            preds = preds.cpu().numpy()
+            pred_peaks = find_peaks(preds)[:, :2, :]  # (B, 2, C)
+            gt_peaks   = find_peaks(self.confmaps)[:, :2, :]  # (B, 2, C)
 
-            gt_peaks = find_peaks(true_confmaps)
-            gt_peaks = gt_peaks[:, :2, :].permute(0, 2, 1)
-
-            pred_peaks = pred_peaks.numpy()
-            gt_peaks = gt_peaks.numpy()
+            # Transpose to (B, C, 2)
             pred_peaks = np.transpose(pred_peaks, (0, 2, 1))
-            gt_peaks = np.transpose(gt_peaks, (0, 2, 1))
+            gt_peaks   = np.transpose(gt_peaks, (0, 2, 1))
+
+            # ---- L2 distances per joint ----
+            # shape: (B, C) → then transpose to (C, B) for plotting per joint
+            l2_per_point_dists = np.linalg.norm(pred_peaks - gt_peaks, axis=-1).T  
+
+            # Handle case when joints are grouped (e.g. 4 cameras)
             num_joints = gt_peaks.shape[1]
-            l2_per_point_dists = np.linalg.norm(pred_peaks - gt_peaks, axis=-1).T
             if num_joints > 20:
                 cam1, cam2, cam3, cam4 = np.array_split(l2_per_point_dists, 4)
                 l2_per_point_dists = np.concatenate((cam1, cam2, cam3, cam4), axis=1)
+
             num_points = l2_per_point_dists.shape[0]
-            histogram_path = os.path.join(self.base_run_directory, 'l2_histograms_per_point', f'validation_epoch_{epoch + 1}.png')
+
+            # ---- Plot histograms ----
+            histogram_path = os.path.join(
+                self.base_run_directory,
+                "l2_histograms_per_point",
+                f"validation_epoch_{epoch + 1}.png"
+            )
+            os.makedirs(os.path.dirname(histogram_path), exist_ok=True)
+
             fig, axs = plt.subplots(num_points, 1, figsize=(12, 4 * num_points))
+
+            # If only one point, axs is not an array
+            if num_points == 1:
+                axs = [axs]
+
             for i in range(num_points):
                 ax = axs[i]
-                ax.hist(l2_per_point_dists[i], bins=n_bins, edgecolor='black')
+                ax.hist(l2_per_point_dists[i], bins=n_bins, edgecolor="black")
                 mean_val = np.mean(l2_per_point_dists[i])
                 std_val = np.std(l2_per_point_dists[i])
-                ax.set_title(f'Histogram for Point {i + 1} - Mean: {mean_val:.2f}, Std: {std_val:.2f}', fontsize=12)
-                ax.set_xlabel('L2 distance in pixels', fontsize=10)
-                ax.set_ylabel('Frequency', fontsize=10)
+                ax.set_title(
+                    f"Histogram for Point {i + 1} - Mean: {mean_val:.2f}, Std: {std_val:.2f}",
+                    fontsize=12
+                )
+                ax.set_xlabel("L2 distance in pixels", fontsize=10)
+                ax.set_ylabel("Frequency", fontsize=10)
+
             plt.tight_layout(pad=3.0)
             plt.savefig(histogram_path)
             plt.close(fig)
@@ -150,39 +169,44 @@ class ModelCallbacks:
             # ---- Predictions ----
             with torch.no_grad():
                 x_val = torch.tensor(self.box, dtype=torch.float32).to(device)
-                true_confmaps = torch.tensor(self.confmaps, dtype=torch.float32).to(device)
-
                 preds = model(x_val)
 
             # ---- Find peaks ----
-            pred_peaks = find_peaks(preds)
-            pred_peaks = pred_peaks[:, :2, :].permute(0, 2, 1)  # [B, C, 2]
-            gt_peaks   = find_peaks(true_confmaps)
-            gt_peaks   = gt_peaks[:, :2, :].permute(0, 2, 1)    # [B, C, 2]
+            preds = preds.cpu().numpy()
+            pred_peaks = find_peaks(preds)[:, :2, :]  # shape: (B, 2, C)
+            pred_peaks = np.transpose(pred_peaks, (0, 2, 1))  # (B, C, 2)
 
-            # ---- L2 distances ----
-            l2_distances = torch.sqrt(torch.sum((pred_peaks - gt_peaks) ** 2, dim=2))  # [B, C]
-            l2_loss = torch.mean(l2_distances)
+            gt_peaks = find_peaks(self.confmaps)[:, :2, :]
+            gt_peaks = np.transpose(gt_peaks, (0, 2, 1))  # (B, C, 2)
+
+            # ---- L2 distances (using numpy) ----
+            l2_distances = np.sqrt(np.sum((pred_peaks - gt_peaks) ** 2, axis=2))  # [B, C]
+            l2_loss_value = np.mean(l2_distances)
 
             # ---- Statistics ----
-            l2_numpy = l2_distances.cpu().numpy().flatten()
+            l2_numpy = l2_distances.flatten()
             std = np.std(l2_numpy)
 
             if logs is not None:
-                logs['val_l2_loss'] = l2_loss.item()
+                logs['val_l2_loss'] = float(l2_loss_value)
 
             # ---- Plot histogram ----
             plt.figure(figsize=(10, 6))
             plt.hist(l2_numpy, bins=30, alpha=0.75)
-            plt.title(f"L2 Distance Histogram - Epoch {epoch + 1}\n"
-                    f"Validation L2 loss: {l2_loss.item():.4f} std: {std:.4f}")
+            plt.title(
+                f"L2 Distance Histogram - Epoch {epoch + 1}\n"
+                f"Validation L2 loss: {l2_loss_value:.4f} std: {std:.4f}"
+            )
             plt.xlabel("L2 Distance")
             plt.ylabel("Frequency")
 
-            histogram_path = os.path.join(self.base_run_directory, "histograms", f"l2_histogram_epoch_{epoch + 1}.png")
+            histogram_path = os.path.join(
+                self.base_run_directory, "histograms", f"l2_histogram_epoch_{epoch + 1}.png"
+            )
             os.makedirs(os.path.dirname(histogram_path), exist_ok=True)
             plt.savefig(histogram_path)
             plt.close()
+
 
     class EarlyStopping:
         def __init__(self, patience=3):
@@ -207,7 +231,7 @@ class ModelCallbacks:
             self.save_directory = save_directory
             os.makedirs(save_directory, exist_ok=True)
 
-        def on_epoch_end(self, epoch, model):
+        def on_epoch_end(self, epoch, model, logs=None):
             save_path = os.path.join(self.save_directory, f"model_epoch_{epoch + 1}.pt")
             torch.save(model.state_dict(), save_path)
             logging.info(f"Model saved to {save_path}")

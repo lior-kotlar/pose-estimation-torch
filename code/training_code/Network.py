@@ -24,7 +24,7 @@ class Network:
                      kernel_size, dilation_rate, dropout):
             super(Network.encoder_atrous, self).__init__()
             layers = []
-            in_channels = img_size[2]
+            in_channels = img_size[0]
             for block_idx in range(num_blocks):
                 out_channels = num_base_filters*(2**block_idx)
                 layers.append(nn.Conv2d(
@@ -85,9 +85,9 @@ class Network:
                 layers.append(nn.ConvTranspose2d(
                     in_channels,
                     out_channels,
-                    kernel_size,
+                    kernel_size=4,
                     stride=2,
-                    padding='same'))
+                    padding=1))
                 
                 layers.append(nn.LeakyReLU(inplace=True))
 
@@ -95,7 +95,7 @@ class Network:
                     out_channels,
                     out_channels,
                     kernel_size,
-                    padding='same'))
+                    padding=1))
                 
                 layers.append(nn.LeakyReLU(inplace=True))
 
@@ -103,17 +103,17 @@ class Network:
                     out_channels,
                     out_channels,
                     kernel_size,
-                    padding='same'))
+                    padding=1))
                 
                 layers.append(nn.LeakyReLU(inplace=True))
 
                 in_channels = out_channels
 
-            layers.append(nn.ConvTranspose2d(
-                in_channels, output_channels,
-                kernel_size,
-                stride=2,
-                padding='same'))
+            layers.append(nn.Conv2d(
+                in_channels,
+                10,          # fixed output channels
+                kernel_size=1
+            ))
 
             self.model = nn.Sequential(*layers)
 

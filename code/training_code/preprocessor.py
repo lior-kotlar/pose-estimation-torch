@@ -202,9 +202,10 @@ class Preprocessor:
                                    shape=[self.confmaps.shape[0] * self.confmaps.shape[1],
                                              self.confmaps.shape[2], self.confmaps.shape[3],
                                              self.confmaps.shape[4]])
-        
+        self.box = self.box.transpose(0, 3, 1, 2)
+        self.confmaps = self.confmaps.transpose(0, 3, 1, 2)
         self.num_samples = self.box.shape[0]
-    
+
     def load_dataset(self, data_path):
         """ Loads and normalizes datasets. """
         # Load
@@ -265,8 +266,8 @@ class Preprocessor:
         left_peaks = np.zeros((num_frames, num_cams, 2, num_pts_per_wing))
         right_peaks = np.zeros((num_frames, num_cams, 2, num_pts_per_wing))
         for cam in range(num_cams):
-            l_p = find_peaks(left_wing_confmaps[:, cam, :, :, :])[:, :2, :]
-            r_p = find_peaks(right_wing_confmaps[:, cam, :, :, :])[:, :2, :]
+            l_p = tf_format_find_peaks(left_wing_confmaps[:, cam, :, :, :])[:, :2, :]
+            r_p = tf_format_find_peaks(right_wing_confmaps[:, cam, :, :, :])[:, :2, :]
             left_peaks[:, cam, :, :] = l_p
             right_peaks[:, cam, :, :] = r_p
 

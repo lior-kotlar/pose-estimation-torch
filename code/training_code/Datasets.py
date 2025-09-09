@@ -9,8 +9,8 @@ from scipy.ndimage import rotate, shift, zoom, affine_transform
 class Dataset(Dataset):
     def __init__(self, input_samples, confmap, transforms=None):
         super().__init__()
-        self.input_samples = torch.tensor(input_samples)
-        self.confmap = torch.tensor(confmap)
+        self.input_samples = torch.tensor(input_samples, dtype=torch.float32)
+        self.confmap = torch.tensor(confmap, dtype=torch.float32)
         self.transform = transforms
 
     def __len__(self):
@@ -164,7 +164,7 @@ class Augmentor():
             """
             # Random scale factor
             scale_factor = np.random.uniform(self.scale_range[0], self.scale_range[1])
-            H, W = sample.shape[:2]
+            H, W = sample.shape[1:]
             center_y, center_x = H / 2, W / 2
 
             # Coordinates in the output image
@@ -179,8 +179,15 @@ class Augmentor():
             x_src_clipped = np.clip(x_src, 0, W - 1).astype(int)
 
             # Apply scaling
-            scaled_sample = sample[y_src_clipped, x_src_clipped]
-            scaled_label = label[y_src_clipped, x_src_clipped]
+            scaled_sample = np.stack([
+                sample[c, y_src_clipped, x_src_clipped]
+                for c in range(sample.shape[0])
+            ], axis=0)
+            
+            scaled_label = np.stack([
+                label[c, y_src_clipped, x_src_clipped]
+                for c in range(label.shape[0])
+            ], axis=0)
 
             return scaled_sample, scaled_label
     
