@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from scipy.ndimage import rotate, shift, zoom, affine_transform
 
-
+SAMPLE_CHANNEL_SHAPE = np.array((192, 192), dtype=np.int32)  # (H, W)
 
 class Dataset(Dataset):
     def __init__(self, input_samples, confmap, transforms=None):
@@ -30,8 +30,8 @@ class Augmentor():
         self.rotation_range = config["rotation range"]
         self.seed = config["seed"]
         self.zoom_range = config["zoom range"]
-        self.HorizontalFlip = bool(config["horizontal flip"])
-        self.VerticalFlip = bool(config["vertical flip"])
+        self.horizontal_flip = bool(config["horizontal flip"])
+        self.vertical_flip = bool(config["vertical flip"])
         self.shift = config["xy shift"]
         self.debug_mode = bool(config["debug mode"])
         self.batch_size = config["batch size"] if not self.debug_mode else 1
@@ -43,9 +43,9 @@ class Augmentor():
             augmentations.append(Augmentor.Rotation(rotation_range=self.rotation_range))
         if self.zoom_range is not None:
             augmentations.append(Augmentor.Scale(scale_range=self.zoom_range))
-        if self.HorizontalFlip:
+        if self.horizontal_flip:
             augmentations.append(Augmentor.HorizontalFlip())
-        if self.VerticalFlip:
+        if self.vertical_flip:
             augmentations.append(Augmentor.VerticalFlip())
         if self.shift > 0:
             augmentations.append(Augmentor.Shift(shift=self.shift))
@@ -143,9 +143,9 @@ class Augmentor():
             ], axis=2)
 
             return shifted_sample, shifted_label
-
+        
     class Scale:
-        def __init__(self, scale_range=(0.8, 1.2)):
+        def __init__(self, scale_range=(0.75, 1.25)):
             """
             Random scaling transform for image + confidence maps.
 
@@ -154,40 +154,36 @@ class Augmentor():
             """
             self.scale_range = scale_range
 
-        def __call__(self, sample, label):
-            """
-            Args:
-                sample: np.ndarray, shape (H, W, C)
-                label: np.ndarray, shape (H, W, num_points)
-            Returns:
-                scaled_sample, scaled_label
-            """
-            # Random scale factor
-            scale_factor = np.random.uniform(self.scale_range[0], self.scale_range[1])
-            H, W = sample.shape[1:]
-            center_y, center_x = H / 2, W / 2
-
-            # Coordinates in the output image
-            y_indices, x_indices = np.indices((H, W))
-
-            # Map output coordinates to input coordinates (centered scaling)
-            y_src = (y_indices - center_y) / scale_factor + center_y
-            x_src = (x_indices - center_x) / scale_factor + center_x
-
-            # Clip to input boundaries
-            y_src_clipped = np.clip(y_src, 0, H - 1).astype(int)
-            x_src_clipped = np.clip(x_src, 0, W - 1).astype(int)
-
-            # Apply scaling
-            scaled_sample = np.stack([
-                sample[c, y_src_clipped, x_src_clipped]
-                for c in range(sample.shape[0])
-            ], axis=0)
+        def scale_image(self, image, scale_factor):
             
-            scaled_label = np.stack([
-                label[c, y_src_clipped, x_src_clipped]
-                for c in range(label.shape[0])
-            ], axis=0)
+            H, W = image.shape[1:]
 
+            zoomed_image = zoom(image, zoom=(1, scale_factor, scale_factor), order=3, mode='nearest', cval=0.0, grid_mode=True)
+
+            zoomed_image = np.clip(zoomed_image, 0.0, 1.0)
+
+            print(f'image shape: {image.shape}, zoomed shape: {zoomed_image.shape}, scale factor: {scale_factor}')
+            return zoomed_image
+
+        def center_images(self, scaled, scale_factor):
+            center_original = (SAMPLE_CHANNEL_SHAPE // 2).astype(np.int32)
+            scaled_center = (center_original * scale_factor).astype(np.int32)
+            if scale_factor > 1.0:
+                start = scaled_center - center_original
+                end = start + SAMPLE_CHANNEL_SHAPE
+                centered_scaled = scaled[:, start[0]:end[0], start[1]:end[1]]
+                return centered_scaled
+            
+            else:
+                padding_width = int((SAMPLE_CHANNEL_SHAPE[0] - scaled.shape[1])//2)
+                centered_scaled = np.pad(scaled, ((0,0), (padding_width, padding_width), (padding_width, padding_width)), mode='edge')
+                return centered_scaled
+
+
+        def __call__(self, sample, label):
+            scale_factor = np.random.uniform(self.scale_range[0], self.scale_range[1])
+            scaled_sample = self.scale_image(sample, scale_factor)
+            scaled_sample = self.center_images(scaled_sample, scale_factor)
+            scaled_label = self.scale_image(label, scale_factor)
+            scaled_label = self.center_images(scaled_label, scale_factor)
             return scaled_sample, scaled_label
-    

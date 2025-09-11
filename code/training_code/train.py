@@ -12,6 +12,15 @@ from torch.utils.data import DataLoader
 from utils import *
 from Callbacks import ModelCallbacks
 
+# Select device: GPU if available, else CPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Log what device is being used
+if torch.cuda.is_available():
+    print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+else:
+    print("⚠️ GPU not available, using CPU instead.")
+
 N = 0
 C = 1
 H = 2
@@ -71,7 +80,7 @@ class Trainer:
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
 
-        test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [Augmentor.Scale((0.4,1.6))])
+        test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [Augmentor.Scale()])
 
         self.callbacks = ModelCallbacks(config, self.run_path, self.viz_sample, (self.val_box, self.val_confmap))
 
