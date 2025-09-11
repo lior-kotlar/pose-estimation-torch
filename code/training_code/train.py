@@ -80,7 +80,7 @@ class Trainer:
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
 
-        test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [Augmentor.Scale()])
+        # test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [Augmentor.Rotation2(rotation_range=37)])
 
         self.callbacks = ModelCallbacks(config, self.run_path, self.viz_sample, (self.val_box, self.val_confmap))
 

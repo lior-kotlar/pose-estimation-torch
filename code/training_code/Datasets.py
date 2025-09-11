@@ -95,7 +95,7 @@ class Augmentor():
                 return flipped_sample, flipped_label
             else:
                 return sample, label
-            
+
     class Rotation:
         def __init__(self, rotation_range=None, angle=None):
             if rotation_range is None and angle is None:
@@ -105,20 +105,14 @@ class Augmentor():
         
         def __call__(self, sample, label):
             angle = self.angle if self.angle is not None else np.random.uniform(-self.rotation_range, self.rotation_range)
-            # Rotate sample and label
-            rotated_sample = np.stack([
-                rotate(sample[:, :, c], angle, reshape=False, order=1, mode='nearest')
-                for c in range(sample.shape[2])
-            ], axis=2)
 
-            # Rotate all channels of label (confidence maps)
-            rotated_label = np.stack([
-                rotate(label[:, :, c], angle, reshape=False, order=1, mode='nearest')
-                for c in range(label.shape[2])
-            ], axis=2)
+            rotated_sample = rotate(sample, angle, axes=(1,2), reshape=False, order=2, mode='nearest')
+            rotated_sample = np.clip(rotated_sample, 0.0, 1.0)
+            rotated_label = rotate(label, angle, axes=(1,2), reshape=False, order=2, mode='nearest')
+            rotated_label = np.clip(rotated_label, 0.0, 1.0)
 
             return rotated_sample, rotated_label
-        
+
     class Shift:
         def __init__(self, shift=10, range=True):
             self.range = range
