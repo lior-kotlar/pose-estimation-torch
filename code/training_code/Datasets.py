@@ -75,8 +75,8 @@ class Augmentor():
         def __call__(self, sample, label):
             if np.random.rand() < self.p:
                 # Flip width axis (horizontal flip)
-                flipped_sample = np.flip(sample, axis=1).copy()
-                flipped_label = np.flip(label, axis=1).copy()
+                flipped_sample = np.flip(sample, axis=2).copy()
+                flipped_label = np.flip(label, axis=2).copy()
 
                 return flipped_sample, flipped_label
             else:
@@ -89,8 +89,8 @@ class Augmentor():
         def __call__(self, sample, label):
             if np.random.rand() < self.p:
                 # Flip height axis (vertical flip)
-                flipped_sample = np.flip(sample, axis=0).copy()
-                flipped_label = np.flip(label, axis=0).copy()
+                flipped_sample = np.flip(sample, axis=1).copy()
+                flipped_label = np.flip(label, axis=1).copy()
 
                 return flipped_sample, flipped_label
             else:
@@ -124,22 +124,27 @@ class Augmentor():
             x_shift = np.random.uniform(-self.shift, self.shift) if self.range else self.shift
             y_shift = np.random.uniform(-self.shift, self.shift) if self.range else self.shift
 
-            # Shift all channels of sample
-            shifted_sample = np.stack([
-                shift(sample[:, :, c], shift=(y_shift, x_shift), order=1, mode='nearest')
-                for c in range(sample.shape[2])
-            ], axis=2)
+            # # Shift all channels of sample
+            # shifted_sample = np.stack([
+            #     shift(sample[:, :, c], shift=(y_shift, x_shift), order=1, mode='nearest')
+            #     for c in range(sample.shape[2])
+            # ], axis=2)
 
-            # Shift all channels of label (confidence maps)
-            shifted_label = np.stack([
-                shift(label[:, :, c], shift=(y_shift, x_shift), order=1, mode='nearest')
-                for c in range(label.shape[2])
-            ], axis=2)
+            # # Shift all channels of label (confidence maps)
+            # shifted_label = np.stack([
+            #     shift(label[:, :, c], shift=(y_shift, x_shift), order=1, mode='nearest')
+            #     for c in range(label.shape[2])
+            # ], axis=2)
+
+            shifted_sample = shift(sample, shift=(0, y_shift, x_shift), mode='nearest')
+            shifted_label = shift(label, shift=(0, y_shift, x_shift), mode='nearest')
+            shifted_sample = np.clip(shifted_sample, 0.0, 1.0)
+            shifted_label = np.clip(shifted_label, 0.0, 1.0)
 
             return shifted_sample, shifted_label
         
     class Scale:
-        def __init__(self, scale_range=(0.75, 1.25)):
+        def __init__(self, scale_range=(0.4, 1.6)):
             """
             Random scaling transform for image + confidence maps.
 
@@ -150,14 +155,21 @@ class Augmentor():
 
         def scale_image(self, image, scale_factor):
             
-            H, W = image.shape[1:]
-
             zoomed_image = zoom(image, zoom=(1, scale_factor, scale_factor), order=3, mode='nearest', cval=0.0, grid_mode=True)
-
             zoomed_image = np.clip(zoomed_image, 0.0, 1.0)
-
             print(f'image shape: {image.shape}, zoomed shape: {zoomed_image.shape}, scale factor: {scale_factor}')
             return zoomed_image
+        
+        def scale_example(self, sample, label, scale_factor):
+            
+            zoomed_sample = zoom(sample, zoom=(1, scale_factor, scale_factor), order=3, mode='nearest', cval=0.0, grid_mode=True)
+            zoomed_sample = np.clip(zoomed_sample, 0.0, 1.0)
+
+            zoomed_label = zoom(label, zoom=(1, scale_factor, scale_factor), order=3, mode='nearest', cval=0.0, grid_mode=True)
+            zoomed_label = np.clip(zoomed_label, 0.0, 1.0)
+
+            print(f'sample shape: {sample.shape}, zoomed shape: {zoomed_sample.shape}, scale factor: {scale_factor}')
+            return zoomed_sample, zoomed_label
 
         def center_images(self, scaled, scale_factor):
             center_original = (SAMPLE_CHANNEL_SHAPE // 2).astype(np.int32)
@@ -172,12 +184,30 @@ class Augmentor():
                 padding_width = int((SAMPLE_CHANNEL_SHAPE[0] - scaled.shape[1])//2)
                 centered_scaled = np.pad(scaled, ((0,0), (padding_width, padding_width), (padding_width, padding_width)), mode='edge')
                 return centered_scaled
+            
+        def center_example(self, scaled_sample, scaled_label, scale_factor):
+            center_original = (SAMPLE_CHANNEL_SHAPE // 2).astype(np.int32)
+            scaled_center = (center_original * scale_factor).astype(np.int32)
+            if scale_factor > 1.0:
+                start = scaled_center - center_original
+                end = start + SAMPLE_CHANNEL_SHAPE
+                centered_scaled_sample = scaled_sample[:, start[0]:end[0], start[1]:end[1]]
+                centered_scaled_label = scaled_label[:, start[0]:end[0], start[1]:end[1]]
+            
+            else:
+                padding_width = int((SAMPLE_CHANNEL_SHAPE[0] - scaled_sample.shape[1])//2)
+                centered_scaled_sample = np.pad(scaled_sample,
+                                                ((0,0), (padding_width, padding_width), (padding_width, padding_width)),
+                                                mode='edge')
+                centered_scaled_label = np.pad(scaled_label,
+                                                ((0,0), (padding_width, padding_width), (padding_width, padding_width)),
+                                                mode='constant')
+            
+            return centered_scaled_sample, centered_scaled_label
 
 
         def __call__(self, sample, label):
             scale_factor = np.random.uniform(self.scale_range[0], self.scale_range[1])
-            scaled_sample = self.scale_image(sample, scale_factor)
-            scaled_sample = self.center_images(scaled_sample, scale_factor)
-            scaled_label = self.scale_image(label, scale_factor)
-            scaled_label = self.center_images(scaled_label, scale_factor)
+            scaled_sample, scaled_label = self.scale_example(sample, label, scale_factor)
+            scaled_sample, scaled_label = self.center_example(scaled_sample, scaled_label, scale_factor)
             return scaled_sample, scaled_label

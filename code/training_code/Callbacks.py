@@ -81,13 +81,10 @@ class ModelCallbacks:
 
         def on_epoch_end(self, epoch, model, logs=None):
             elapsed_time = time() - self.epoch_start_time
-            logging.info(f"Epoch {epoch + 1} finished in {elapsed_time:.2f} seconds.")
+            logging.info(f"Epoch {epoch + 1} finished in {elapsed_time:.2f} seconds with Loss = {logs['loss']:.4f}.")
             logs['epoch_time'] = elapsed_time  # Add epoch time to logs
             self.training_logs.append(logs)  # Collect training logs
 
-        def on_batch_end(self, batch, logs=None):
-            if (batch + 1) % self.log_interval == 0:
-                logging.info(f"Batch {batch + 1}: Loss = {logs['loss']:.4f}, Accuracy = {logs['accuracy']:.4f}")
 
     class L2PerPointLossCallback(Callback):
 
