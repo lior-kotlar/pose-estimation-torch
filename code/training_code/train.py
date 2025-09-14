@@ -9,6 +9,8 @@ from Datasets import *
 import Network
 import numpy as np
 from torch.utils.data import DataLoader
+import torch.optim.lr_scheduler as lr_scheduler
+import torch.nn as nn
 from utils import *
 from Callbacks import ModelCallbacks
 
@@ -73,6 +75,15 @@ class Trainer:
             self.model.parameters(),
             lr=self.learning_rate
             )
+        
+        self.lr_scheduler = lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=0.5,
+            patience=2,
+            cooldown=2,
+            threshold=0.01
+        )
 
         self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
         self.validation = (self.val_box, self.val_confmap)
@@ -80,16 +91,16 @@ class Trainer:
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
 
-        test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [
-            Augmentor.Scale(scale_range=(0.4, 1.6))
-        ])
+        # test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [
+        #     Augmentor.Scale(scale_range=(0.4, 1.6))
+        # ])
 
-        self.callbacks = ModelCallbacks(config, self.run_path, self.viz_sample, (self.val_box, self.val_confmap))
+        self.callbacks = ModelCallbacks(config, self.model, self.run_path, self.viz_sample, (self.val_box, self.val_confmap))
 
-    def do_one_epoch(self, epoch_number, train_loader):
+    def do_one_epoch(self, epoch_number, train_loader, val_loader):
         self.callbacks.on_epoch_begin(epoch=epoch_number)
 
-        running_loss = 0.0
+        running_trainig_loss = 0.0
         last_loss = 0.0
         for i, data in enumerate(train_loader, 0):
             inputs, labels = data
@@ -98,18 +109,33 @@ class Trainer:
             loss = self.loss_function(outputs, labels)
             loss.backward()
             self.optimizer.step()
-            running_loss += loss.item()
+            running_trainig_loss += loss.item()
             if i % 100 == 99:
-                last_loss = running_loss / 100
-                print(f"[{i + 1}, {self.batches_per_epoch}] loss: {last_loss:.9f}")
-                running_loss = 0.0
+                last_loss = running_trainig_loss / 100
+                print(f"[{i + 1}, {self.batches_per_epoch}] training loss: {last_loss:.9f}")
+                running_trainig_loss = 0.0
+
+        average_train_loss = running_trainig_loss / len(train_loader)
+
+        running_val_loss = 0.0
+        self.model.eval()
+        with torch.no_grad():
+            for i, data in enumerate(val_loader):
+                inputs, labels = data
+                outputs = self.model(inputs)
+                loss = self.loss_function(outputs, labels)
+                running_val_loss += loss.item()
+        
+        average_val_loss = running_val_loss / (i + 1)
+
+        self.lr_scheduler.step(average_val_loss)
 
         logs = {
-            'loss': running_loss / len(train_loader),
+            'train loss': average_train_loss,
+            'validation loss': average_val_loss,
+            'lr': self.lr_scheduler.get_last_lr()[0]
         }
-        self.callbacks.on_epoch_end(epoch=epoch_number, model=self.model, logs=logs)
-
-        return last_loss
+        self.callbacks.on_epoch_end(epoch=epoch_number, logs=logs)
 
     def train(self):
         augmentor = Augmentor(self.config)
@@ -118,21 +144,11 @@ class Trainer:
         train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True)
         val_loader = DataLoader(val_set, batch_size=self.batch_size, shuffle=False)
         
+        self.callbacks.on_train_start()
         for epoch in range(self.num_epochs):
             self.model.train()
-            average_loss = self.do_one_epoch(epoch_number=epoch, train_loader=train_loader)
-            running_val_loss = 0.0
-            self.model.eval()
-            with torch.no_grad():
-                for i, data in enumerate(val_loader):
-                    inputs, labels = data
-                    outputs = self.model(inputs)
-                    loss = self.loss_function(outputs, labels)
-                    running_val_loss += loss.item()
-            
-            average_val_loss = running_val_loss / (i + 1)
+            self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
 
-            
         
     def train_val_split(self, shuffle=True):
         """ Splits datasets into train and validation sets. """

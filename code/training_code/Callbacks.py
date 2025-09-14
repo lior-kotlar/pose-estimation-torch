@@ -4,20 +4,21 @@ from utils import *
 import matplotlib.pyplot as plt
 import os
 import h5py
+import csv
 import logging
 from time import time
+from scipy.io import savemat
 
 
 class ModelCallbacks:
-    def __init__(self, config, base_directory, viz_sample, validation):
+    def __init__(self, config, model, base_directory, viz_sample, validation):
         # self.model = model
         self.save_every_epoch = bool(config["save every epoch"])
         self.data_path = config["data path"]
         self.validation = validation
         self.base_directory = base_directory
         self.viz_sample = viz_sample
-
-        self.model_callbacks = self.config_callbacks()
+        self.model_callbacks = self.config_callbacks(model)
         
         # self.camera_matrices = h5py.File(self.data_path, "r")['/cameras_dlt_array'][:].T
         # self.l2_loss_callback = L2LossCallback(validation, run_path)
@@ -45,16 +46,24 @@ class ModelCallbacks:
         #                                                                                        "viz_pred", "pred_%03d.png" % epoch),
         #                                                                                    show_figure=False))
 
-    def config_callbacks(self):
+    def config_callbacks(self, model):
         callbacks = []
         callbacks.append(self.TrainingLogger(log_interval=10))
         callbacks.append(self.EarlyStopping(patience=5))
-        callbacks.append(self.L2LossCallback(self.validation, self.base_directory))
-        callbacks.append(self.L2PerPointLossCallback(self.validation, self.base_directory))
+        callbacks.append(self.L2LossCallback(self.validation, self.base_directory, model))
+        callbacks.append(self.L2PerPointLossCallback(self.validation, self.base_directory, model))
         if self.save_every_epoch:
-            callbacks.append(self.ModelPeriodicSaver(os.path.join(self.base_directory, "weights")))
+            callbacks.append(self.ModelPeriodicSaver(os.path.join(self.base_directory, "weights"), model))
 
+        
+        
+        callbacks.append(self.LossHistory(self.base_directory))
         return callbacks
+    
+    def on_train_start(self):
+        for callback in self.model_callbacks:
+            if hasattr(callback, 'on_train_start'):
+                callback.on_train_start()
 
     def get_model_callbacks(self):
         return self.model_callbacks
@@ -64,10 +73,10 @@ class ModelCallbacks:
             if hasattr(callback, 'on_epoch_begin'):
                 callback.on_epoch_begin(epoch=epoch)
 
-    def on_epoch_end(self, epoch, model, logs=None):
+    def on_epoch_end(self, epoch, logs=None):
         for callback in self.model_callbacks:
             if hasattr(callback, 'on_epoch_end'):
-                callback.on_epoch_end(epoch=epoch, model=model, logs=logs)
+                callback.on_epoch_end(epoch=epoch, logs=logs)
 
     class TrainingLogger:
         def __init__(self, log_interval=10):
@@ -79,29 +88,29 @@ class ModelCallbacks:
             self.epoch_start_time = time()
             logging.info(f"Epoch {epoch + 1} starting.")
 
-        def on_epoch_end(self, epoch, model, logs=None):
+        def on_epoch_end(self, epoch, logs=None):
             elapsed_time = time() - self.epoch_start_time
-            logging.info(f"Epoch {epoch + 1} finished in {elapsed_time:.2f} seconds with Loss = {logs['loss']:.4f}.")
+            logging.info(f"Epoch {epoch + 1} finished in {elapsed_time:.2f}s. train loss = {logs['train loss']:.10f}, val loss = {logs['validation loss']:.10f}, lr = {logs['lr']:.10f}.")
             logs['epoch_time'] = elapsed_time  # Add epoch time to logs
             self.training_logs.append(logs)  # Collect training logs
 
 
-    class L2PerPointLossCallback(Callback):
+    class L2PerPointLossCallback():
 
-        def __init__(self, validation_data, base_run_directory):
-            super().__init__()
+        def __init__(self, validation_data, base_run_directory, model):
             self.box, self.confmaps = validation_data
             self.base_run_directory = base_run_directory
+            self.model = model
 
-        def on_epoch_end(self, epoch, model, n_bins=20,  logs=None):
+        def on_epoch_end(self, epoch, n_bins=20,  logs=None):
 
-            model.eval()
-            device = next(model.parameters()).device
+            self.model.eval()
+            device = next(self.model.parameters()).device
 
             # ---- Predictions ----
             with torch.no_grad():
                 x_val = torch.tensor(self.box, dtype=torch.float32).to(device)
-                preds = model(x_val)
+                preds = self.model(x_val)
 
             preds = preds.cpu().numpy()
             pred_peaks = find_peaks(preds)[:, :2, :]  # (B, 2, C)
@@ -153,20 +162,20 @@ class ModelCallbacks:
             plt.savefig(histogram_path)
             plt.close(fig)
 
-    class L2LossCallback(Callback):
-        def __init__(self, validation_data, base_run_directory):
-            super().__init__()
+    class L2LossCallback():
+        def __init__(self, validation_data, base_run_directory, model):
             self.box, self.confmaps = validation_data
             self.base_run_directory = base_run_directory
+            self.model = model
 
-        def on_epoch_end(self, epoch, model, logs=None):
-            model.eval()
-            device = next(model.parameters()).device
+        def on_epoch_end(self, epoch, logs=None):
+            self.model.eval()
+            device = next(self.model.parameters()).device
 
             # ---- Predictions ----
             with torch.no_grad():
                 x_val = torch.tensor(self.box, dtype=torch.float32).to(device)
-                preds = model(x_val)
+                preds = self.model(x_val)
 
             # ---- Find peaks ----
             preds = preds.cpu().numpy()
@@ -205,14 +214,14 @@ class ModelCallbacks:
             plt.close()
 
 
-    class EarlyStopping:
+    class EarlyStopping():
         def __init__(self, patience=3):
             self.patience = patience
             self.counter = 0
             self.best_loss = None
 
-        def on_epoch_end(self, epoch, model, logs=None):
-            current_loss = logs['loss']
+        def on_epoch_end(self, epoch, logs=None):
+            current_loss = logs['validation loss']
             if self.best_loss is None or current_loss < self.best_loss:
                 self.best_loss = current_loss
                 self.counter = 0
@@ -223,12 +232,59 @@ class ModelCallbacks:
                     return True
             return False
 
-    class ModelPeriodicSaver:
-        def __init__(self, save_directory):
+    class ModelPeriodicSaver():
+        def __init__(self, save_directory, model):
+            self.model = model
             self.save_directory = save_directory
             os.makedirs(save_directory, exist_ok=True)
 
-        def on_epoch_end(self, epoch, model, logs=None):
+        def on_epoch_end(self, epoch, logs=None):
             save_path = os.path.join(self.save_directory, f"model_epoch_{epoch + 1}.pt")
-            torch.save(model.state_dict(), save_path)
+            torch.save(self.model.state_dict(), save_path)
             logging.info(f"Model saved to {save_path}")
+
+    class LossHistory():
+        def __init__(self, save_diretory):
+            self.save_directory = save_diretory
+
+        def plot_history(self, history, save_path=None, show_figure=False):
+            """ Plots the vision history. """
+
+            loss = [x["train loss"] for x in history]
+            val_loss = [x["validation loss"] for x in history]
+
+            plt.figure(figsize=(8, 4))
+            plt.plot(loss)
+            plt.plot(val_loss)
+            plt.semilogy()
+            plt.grid()
+            plt.xlabel("Epochs")
+            plt.ylabel("Loss")
+            plt.legend(["Training", "Validation"])
+
+            if save_path is not None:
+                plt.savefig(save_path)
+            if show_figure:
+                plt.show()
+            else:
+                plt.close()
+
+        def on_train_start(self):
+            self.history = []
+            self.csv_file_path = os.path.join(self.save_directory, "history.csv")
+            with open(self.csv_file_path, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(['epoch', 'train loss', 'val loss'])
+        
+        def on_epoch_end(self, epoch, logs=None):
+            self.history.append(logs.copy())
+            savemat(os.path.join(self.save_directory, "history.mat"),
+                    {k: [x[k] for x in self.history] for k in self.history[0].keys()})
+
+            with open(self.csv_file_path, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([epoch, logs['train loss'], logs.get('validation loss')])
+
+            save_path = os.path.join(self.save_directory, "history.png")
+            print(f'save path = {save_path}')
+            self.plot_history(self.history, save_path=save_path)

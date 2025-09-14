@@ -152,13 +152,6 @@ class Augmentor():
                 scale_range: tuple (min_scale, max_scale), scaling factor range
             """
             self.scale_range = scale_range
-
-        def scale_image(self, image, scale_factor):
-            
-            zoomed_image = zoom(image, zoom=(1, scale_factor, scale_factor), order=3, mode='nearest', cval=0.0, grid_mode=True)
-            zoomed_image = np.clip(zoomed_image, 0.0, 1.0)
-            print(f'image shape: {image.shape}, zoomed shape: {zoomed_image.shape}, scale factor: {scale_factor}')
-            return zoomed_image
         
         def scale_example(self, sample, label, scale_factor):
             
@@ -168,22 +161,8 @@ class Augmentor():
             zoomed_label = zoom(label, zoom=(1, scale_factor, scale_factor), order=3, mode='nearest', cval=0.0, grid_mode=True)
             zoomed_label = np.clip(zoomed_label, 0.0, 1.0)
 
-            print(f'sample shape: {sample.shape}, zoomed shape: {zoomed_sample.shape}, scale factor: {scale_factor}')
+            # print(f'sample shape: {sample.shape}, zoomed shape: {zoomed_sample.shape}, scale factor: {scale_factor}')
             return zoomed_sample, zoomed_label
-
-        def center_images(self, scaled, scale_factor):
-            center_original = (SAMPLE_CHANNEL_SHAPE // 2).astype(np.int32)
-            scaled_center = (center_original * scale_factor).astype(np.int32)
-            if scale_factor > 1.0:
-                start = scaled_center - center_original
-                end = start + SAMPLE_CHANNEL_SHAPE
-                centered_scaled = scaled[:, start[0]:end[0], start[1]:end[1]]
-                return centered_scaled
-            
-            else:
-                padding_width = int((SAMPLE_CHANNEL_SHAPE[0] - scaled.shape[1])//2)
-                centered_scaled = np.pad(scaled, ((0,0), (padding_width, padding_width), (padding_width, padding_width)), mode='edge')
-                return centered_scaled
             
         def center_example(self, scaled_sample, scaled_label, scale_factor):
             center_original = (SAMPLE_CHANNEL_SHAPE // 2).astype(np.int32)
@@ -195,14 +174,22 @@ class Augmentor():
                 centered_scaled_label = scaled_label[:, start[0]:end[0], start[1]:end[1]]
             
             else:
-                padding_width = int((SAMPLE_CHANNEL_SHAPE[0] - scaled_sample.shape[1])//2)
+                padding_width1 = int((SAMPLE_CHANNEL_SHAPE[0] - scaled_sample.shape[1])//2)
+                padding_width2 = padding_width1
+                fixed_width = scaled_sample.shape[1] + 2*padding_width1
+                addition = SAMPLE_CHANNEL_SHAPE[0] - fixed_width
+                if addition > 1:
+                    exit("something is wrong with the scale size calculation")
+                if addition == 1:
+                    padding_width2 += 1
                 centered_scaled_sample = np.pad(scaled_sample,
-                                                ((0,0), (padding_width, padding_width), (padding_width, padding_width)),
+                                                ((0,0), (padding_width1, padding_width2), (padding_width1, padding_width2)),
                                                 mode='edge')
                 centered_scaled_label = np.pad(scaled_label,
-                                                ((0,0), (padding_width, padding_width), (padding_width, padding_width)),
+                                                ((0,0), (padding_width1, padding_width2), (padding_width1, padding_width2)),
                                                 mode='constant')
             
+            # print(f'centered sample and label are of shape: {centered_scaled_sample.shape}, {centered_scaled_label.shape}')
             return centered_scaled_sample, centered_scaled_label
 
 
