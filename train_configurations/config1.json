@@ -1,5 +1,6 @@
 {
     "debug mode": 0,
+
     "// training parameters //": 0,
     "batch size": 50,
     "epochs": 50,
@@ -9,6 +10,8 @@
     "epochs pointwise loss": 0,
     "val fraction": 0.1,
     "learning rate": 0.001,
+    "resume training path": "",
+
     "// Network parameters //": 0,
     "dropout ratio": 0.5,
     "dilation rate": 2,
@@ -17,12 +20,14 @@
     "number of encoder decoder blocks": 2,
     "convolution kernel size": 3,
     "do attention": 1,
+
     "// VIT parameters //": 0,
     "patch size": 16,
     "projection dim": 256,
     "num heads": 8,
     "transformer layers": 8,
     "fully connected expand": 4,
+
     "// preprocess parameters //": 0,
     "rank wing size": 2,
     "model type": "MODEL_18_POINTS_PER_WING",

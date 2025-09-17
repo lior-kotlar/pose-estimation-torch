@@ -46,6 +46,7 @@ class Config:
             self.box_orig = None
             self.data_path = config['data path']
             self.test_path = config['test path']
+            self.resume_training_checkpoint_path = config["resume training path"]
             
             # preprocessing configuration
             self.mix_with_test = bool(config['mix with test'])
@@ -109,6 +110,9 @@ class Config:
             self.kernel_size,\
             self.dilation_rate,\
             self.dropout
+    
+    def get_resume_training_checkpoint_path(self):
+        return self.resume_training_checkpoint_path
 
 def tf_format_find_peaks(x):
 

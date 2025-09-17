@@ -41,6 +41,15 @@ class Trainer:
         self.val_fraction = general_configuration.get_val_fraction()
         self.gpu_id = gpu_id
         self.preprocessor = Preprocessor(general_configuration)
+        self.best_val_loss = float("inf")
+        self.start_epoch = 0
+        self.checkpoint_load_path = general_configuration.get_resume_training_checkpoint_path()
+        if len(self.checkpoint_load_path) > 0 and not os.path.exists(self.checkpoint_load_path):
+            raise FileNotFoundError(
+                f"Checkpoint file not found at: {self.checkpoint_load_path}"
+            )
+
+
         # Do preprocessing according to the model type
         self.preprocessor.do_preprocess()
         self.box, self.confmaps = self.preprocessor.get_box(), self.preprocessor.get_confmaps()
@@ -71,6 +80,9 @@ class Trainer:
             min_lr=general_configuration.reduce_lr_min_lr
         )
 
+        if self.checkpoint_load_path:
+            self._load_checkpoint(self.checkpoint_load_path)
+
         self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
         self.validation = (self.val_box, self.val_confmap)
         self.viz_sample = (self.val_box[general_configuration.viz_idx], self.val_confmap[general_configuration.viz_idx])
@@ -89,12 +101,38 @@ class Trainer:
                                         )
         self.general_configuration = general_configuration
 
-    def _save_checkpoint(self, epoch):
-        ckp = self.model.module.state_dict()
+    def _save_checkpoint(self, epoch, best=False):
+        # ckp = self.model.module.state_dict()
+
+        ckp = {
+            "model": self.model.module.state_dict() if hasattr(self.model, "module") else self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.lr_scheduler.state_dict(),
+            "epoch": epoch,
+            "best_val_loss": self.best_val_loss,
+        }
+
         save_directory = os.path.join(self.base_run_directory, 'weights')
-        save_path = os.path.join(save_directory, f"model_epoch_{epoch + 1}.pt")
+        file_name = f"best_model.pt" if best else f"model_epoch_{epoch + 1}.pt"
+        save_path = os.path.join(save_directory, file_name)
         torch.save(ckp, save_path)
-        print(f'Epoch {epoch} - Training checkpoint was save to {save_path}')
+        print(f'Epoch {epoch+1} - Training checkpoint was save to {save_path}')
+
+    def _load_checkpoint(self, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
+        if hasattr(self.model, "module"):
+            self.model.module.load_state_dict(checkpoint["model"])
+        else:
+            self.model.load_state_dict(checkpoint["model"])
+
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        self.lr_scheduler.load_state_dict(checkpoint["scheduler"])
+
+        self.start_epoch = checkpoint["epoch"] + 1
+        self.best_val_loss = checkpoint.get("best_val_loss", float("inf"))
+
+        print(f"Loaded checkpoint from {checkpoint_path} (epoch {checkpoint['epoch']+1})")
+        
 
     def do_one_epoch(self, epoch_number, train_loader, val_loader):
         self.callbacks.on_epoch_begin(epoch=epoch_number)
@@ -132,6 +170,11 @@ class Trainer:
         
         average_val_loss = running_val_loss / (i + 1)
 
+        if average_val_loss < self.best_val_loss:
+            self.best_val_loss = average_val_loss
+            if self.gpu_id == 0:
+                self._save_checkpoint(epoch=epoch_number, best=True)
+
         self.lr_scheduler.step(average_val_loss)
 
         logs = {
@@ -149,7 +192,7 @@ class Trainer:
         val_loader = prepare_dataloader(val_set, self.general_configuration.batch_size)
         
         self.callbacks.on_train_start()
-        for epoch in range(self.general_configuration.num_epochs):
+        for epoch in range(self.start_epoch, self.general_configuration.num_epochs):
             self.model.train()
             self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
             if self.gpu_id == 0 and self.general_configuration.save_every > 0 and epoch % self.general_configuration.save_every == 0:
