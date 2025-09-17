@@ -3,7 +3,6 @@ from torchtnt.framework.callback import Callback
 from utils import *
 import matplotlib.pyplot as plt
 import os
-import h5py
 import csv
 import logging
 from time import time
@@ -11,10 +10,7 @@ from scipy.io import savemat
 
 
 class ModelCallbacks:
-    def __init__(self, config, model, base_directory, viz_sample, validation):
-        # self.model = model
-        self.save_every_epoch = bool(config["save every epoch"])
-        self.data_path = config["data path"]
+    def __init__(self, model, base_directory, viz_sample, validation):
         self.validation = validation
         self.base_directory = base_directory
         self.viz_sample = viz_sample
@@ -52,11 +48,6 @@ class ModelCallbacks:
         callbacks.append(self.EarlyStopping(patience=5))
         callbacks.append(self.L2LossCallback(self.validation, self.base_directory, model))
         callbacks.append(self.L2PerPointLossCallback(self.validation, self.base_directory, model))
-        if self.save_every_epoch:
-            callbacks.append(self.ModelPeriodicSaver(os.path.join(self.base_directory, "weights"), model))
-
-        
-        
         callbacks.append(self.LossHistory(self.base_directory))
         return callbacks
     
@@ -231,17 +222,6 @@ class ModelCallbacks:
                     logging.info("Early stopping triggered.")
                     return True
             return False
-
-    class ModelPeriodicSaver():
-        def __init__(self, save_directory, model):
-            self.model = model
-            self.save_directory = save_directory
-            os.makedirs(save_directory, exist_ok=True)
-
-        def on_epoch_end(self, epoch, logs=None):
-            save_path = os.path.join(self.save_directory, f"model_epoch_{epoch + 1}.pt")
-            torch.save(self.model.state_dict(), save_path)
-            logging.info(f"Model saved to {save_path}")
 
     class LossHistory():
         def __init__(self, save_diretory):

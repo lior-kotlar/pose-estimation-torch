@@ -6,24 +6,22 @@ import h5py
 from scipy.ndimage import binary_dilation, binary_closing
 
 class Preprocessor:
-    def __init__(self, config):
+    def __init__(self, general_configuration: Config):
         self.confmaps_orig = None
         self.box_orig = None
-        self.data_path = config['data path']
-        self.test_path = config['test path']
-        self.mix_with_test = bool(config['mix with test'])
-        self.model_type = config['model type']
-        self.mask_dilation = config['mask dilation']
-        self.debug_mode = bool(config['debug mode'])
-        self.wing_size_rank = config["rank wing size"]
-        self.do_curriculum_learning = config["do curriculum learning"]
-        self.single_time_channel = bool(config["single time channel"])
-        self.box, self.confmaps = self.load_dataset(self.data_path)
+        self.mix_with_test = general_configuration.get_mix_with_test()
+        self.mask_dilation = general_configuration.get_mask_dilation()
+        # self.debug_mode = bool(config['debug mode'])
+        # self.wing_size_rank = config["rank wing size"]
+        # self.do_curriculum_learning = config["do curriculum learning"]
+        # self.single_time_channel = bool(config["single time channel"])
+        self.model_type = general_configuration.get_model_type()
+        self.box, self.confmaps = self.load_dataset(general_configuration.get_data_path())
 
         if self.model_type == HEAD_TAIL_PER_CAM:
             self.box = self.box[:, :, :, :, :3]
 
-        if self.single_time_channel:
+        if general_configuration.get_single_time_channel():
             self.box = self.box[..., [1, -2, -1]]
         self.num_frames = self.box.shape[0]
         self.num_channels = self.box.shape[-1]
@@ -45,7 +43,7 @@ class Preprocessor:
         self.num_samples = None
         if self.model_type == HEAD_TAIL_ALL_CAMS or self.model_type == HEAD_TAIL_PER_CAM:
             self.mix_with_test = False
-        if self.debug_mode:
+        if general_configuration.get_debug_mode():
             if self.num_dims == 5:
                 self.box = self.box[:10, :, :, :, :]
                 self.confmaps = self.confmaps[:10, :, :, :, :]
@@ -56,8 +54,8 @@ class Preprocessor:
             self.mix_with_test = False
 
         self.body_masks, self.body_sizes = self.get_body_masks()
-        self.retrieve_points_3D()
-        self.retrieve_cropzone_from_file()
+        self.retrieve_points_3D(general_configuration.get_data_path())
+        self.retrieve_cropzone_from_file(general_configuration.get_data_path())
 
     def get_box(self): 
             return self.box
@@ -86,8 +84,8 @@ class Preprocessor:
         return body_masks, body_sizes
     
 
-    def retrieve_points_3D(self):
-        self.points_3D = h5py.File(self.data_path, "r")["/points_3D"][:]
+    def retrieve_points_3D(self, data_path):
+        self.points_3D = h5py.File(data_path, "r")["/points_3D"][:]
         self.points_3D = np.transpose(self.points_3D, [1, 2, 0])[:self.box.shape[0]]
         self.num_points = self.points_3D.shape[1]
         self.num_wing_points = self.num_points - 2
@@ -99,8 +97,8 @@ class Preprocessor:
         self.points_3D_per_wing = np.concatenate((left_wing, right_wing), axis=0)
         self.points_3D_per_camera = np.repeat(np.expand_dims(self.points_3D, axis=1), self.box.shape[1], axis=1)
 
-    def retrieve_cropzone_from_file(self):
-        self.cropzone = h5py.File(self.data_path, "r")["/cropZone"][:]
+    def retrieve_cropzone_from_file(self, data_path):
+        self.cropzone = h5py.File(data_path, "r")["/cropZone"][:]
 
     def get_preprocess_function(self):
         if self.model_type == HEAD_TAIL_ALL_CAMS:

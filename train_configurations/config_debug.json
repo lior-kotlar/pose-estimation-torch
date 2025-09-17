@@ -56,5 +56,5 @@
     "reduce lr min delta": 1e-05,
     "reduce lr cooldown": 0,
     "reduce lr min lr": 1e-10,
-    "save every epoch": 1
+    "save every": 1
 }

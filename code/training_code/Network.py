@@ -1,22 +1,13 @@
 import torch.nn as nn
-import torch.nn.functional as F
-from torchsummary import summary
+from utils import Config
 
 
 class Network:
-    def __init__(self, config, image_size, number_of_output_channels):
-        self.config = config
-        self.model_type = config['model type']
+    def __init__(self, general_configuration: Config, image_size, number_of_output_channels):
+        self.model_type = general_configuration.get_model_type()
         self.image_size = image_size
         self.number_of_output_channels = number_of_output_channels
-        self.num_base_filters = config["number of base filters"]
-        self.num_blocks = config["number of encoder decoder blocks"]
-        self.kernel_size = config["convolution kernel size"]
-        self.num_base_filters = config["number of base filters"]
-        self.dilation_rate = config["dilation rate"]
-        self.dropout = config["dropout ratio"]
-        self.batches_per_epoch = config["batches per epoch"]
-        self.model = self.config_model()
+        self.model = self.config_model(general_configuration=general_configuration)
 
     class encoder_atrous(nn.Module):
         def __init__(self, img_size, num_base_filters, num_blocks,
@@ -122,33 +113,32 @@ class Network:
 
     class simple_network(nn.Module):
 
-        def __init__(self, config, image_size, number_of_output_channels):
+        def __init__(self, general_configuration, image_size, number_of_output_channels):
             super(Network.simple_network, self).__init__()
-            self.model_type = config['model type']
-            self.image_size = image_size
-            self.number_of_output_channels = number_of_output_channels
-            self.num_base_filters = config["number of base filters"]
-            self.num_blocks = config["number of encoder decoder blocks"]
-            self.kernel_size = config["convolution kernel size"]
-            self.num_base_filters = config["number of base filters"]
-            self.dilation_rate = config["dilation rate"]
-            self.dropout = config["dropout ratio"]
-            self.batches_per_epoch = config["batches per epoch"]
+            image_size = image_size
+            number_of_output_channels = number_of_output_channels
+
+            num_base_filters,\
+            num_blocks,\
+            kernel_size,\
+            dilation_rate,\
+            dropout = general_configuration.get_network_configuration()
+            
             self.encoder = Network.encoder_atrous(
-                img_size=(self.image_size[0], self.image_size[1], self.image_size[2]),
-                num_base_filters=self.num_base_filters,
-                num_blocks=self.num_blocks,
-                kernel_size=self.kernel_size,
-                dilation_rate=self.dilation_rate,
-                dropout=self.dropout
+                img_size=(image_size[0], image_size[1], image_size[2]),
+                num_base_filters=num_base_filters,
+                num_blocks=num_blocks,
+                kernel_size=kernel_size,
+                dilation_rate=dilation_rate,
+                dropout=dropout
             )
-            encoder_out_channels = self.num_base_filters * (2 ** self.num_blocks)
+            encoder_out_channels = num_base_filters * (2 ** num_blocks)
             self.decoder = Network.decoder(
                 input_channels=encoder_out_channels,
-                output_channels=self.number_of_output_channels,
-                num_base_filters=self.num_base_filters,
-                num_blocks=self.num_blocks,
-                kernel_size=self.kernel_size
+                output_channels=number_of_output_channels,
+                num_base_filters=num_base_filters,
+                num_blocks=num_blocks,
+                kernel_size=kernel_size
             )
 
         def forward(self, x):
@@ -156,7 +146,7 @@ class Network:
             x = self.decoder(x)
             return x
 
-    def config_model(self):
+    def config_model(self, general_configuration: Config):
         
         # if self.model_type == ALL_CAMS or self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
         #     model = self.all_4_cams()
@@ -178,7 +168,10 @@ class Network:
         #     model = self.simple_network()
 
 
-        model = self.simple_network(self.config, self.image_size, self.number_of_output_channels)
+        model = self.simple_network(
+            general_configuration=general_configuration,
+            image_size=self.image_size,
+            number_of_output_channels=self.number_of_output_channels)
         return model
 
     def get_model(self):

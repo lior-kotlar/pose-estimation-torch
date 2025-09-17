@@ -1,8 +1,10 @@
 import torch
 import numpy as np
 from torch.utils.data import Dataset
-from torchvision import transforms
-from scipy.ndimage import rotate, shift, zoom, affine_transform
+from scipy.ndimage import rotate, shift, zoom
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from utils import Config
 
 SAMPLE_CHANNEL_SHAPE = np.array((192, 192), dtype=np.int32)  # (H, W)
 
@@ -26,15 +28,12 @@ class Dataset(Dataset):
 
 class Augmentor():
     def __init__(self,
-                 config):
-        self.rotation_range = config["rotation range"]
-        self.seed = config["seed"]
-        self.zoom_range = config["zoom range"]
-        self.horizontal_flip = bool(config["horizontal flip"])
-        self.vertical_flip = bool(config["vertical flip"])
-        self.shift = config["xy shift"]
-        self.debug_mode = bool(config["debug mode"])
-        self.batch_size = config["batch size"] if not self.debug_mode else 1
+                 general_configuration: Config):
+        self.rotation_range,\
+        self.zoom_range,\
+        self.horizontal_flip,\
+        self.vertical_flip,\
+        self.shift = general_configuration.get_augmentation_configuration()
         self.augmentations = self.config_augmentations()
 
     def config_augmentations(self):
@@ -198,3 +197,12 @@ class Augmentor():
             scaled_sample, scaled_label = self.scale_example(sample, label, scale_factor)
             scaled_sample, scaled_label = self.center_example(scaled_sample, scaled_label, scale_factor)
             return scaled_sample, scaled_label
+        
+def prepare_dataloader(dataset, batch_size):
+    return DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        pin_memory=True,
+        shuffle=False,
+        sampler=DistributedSampler(dataset=dataset)
+    )
