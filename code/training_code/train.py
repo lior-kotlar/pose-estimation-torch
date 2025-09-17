@@ -27,6 +27,16 @@ def ddp_setup(rank, world_size, use_gpu):
     backend = 'nccl' if use_gpu else "gloo"
     init_process_group(backend=backend, rank=rank, world_size=world_size)
 
+def arrange_loaded_checkpoint(general_configuration: Config):
+    file = general_configuration.get_resume_training_checkpoint_path()
+    directory = general_configuration.get_resume_training_directory()
+    if (file and not directory) or (directory and not file):
+        exit("resume training directory, checkpoint file only one of them is missing")
+    if file and directory:
+        both_exist = os.path.exists(file) and os.path.exists(directory)
+        if not both_exist:
+            exit("resume training directory or checkpoint file doesn't exist")
+    return directory
 
 class Trainer:
     def __init__(self,
@@ -44,7 +54,7 @@ class Trainer:
         self.best_val_loss = float("inf")
         self.start_epoch = 0
         self.checkpoint_load_path = general_configuration.get_resume_training_checkpoint_path()
-        if len(self.checkpoint_load_path) > 0 and not os.path.exists(self.checkpoint_load_path):
+        if self.checkpoint_load_path and len(self.checkpoint_load_path) > 0 and not os.path.exists(self.checkpoint_load_path):
             raise FileNotFoundError(
                 f"Checkpoint file not found at: {self.checkpoint_load_path}"
             )
@@ -195,7 +205,9 @@ class Trainer:
         for epoch in range(self.start_epoch, self.general_configuration.num_epochs):
             self.model.train()
             self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
-            if self.gpu_id == 0 and self.general_configuration.save_every > 0 and epoch % self.general_configuration.save_every == 0:
+            if self.gpu_id == 0 and \
+                self.general_configuration.save_every > 0 and \
+                    epoch % self.general_configuration.save_every == 0:
                 self._save_checkpoint(epoch=epoch)
 
         
@@ -229,11 +241,15 @@ def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
     print(f"Using config file: {config_path}")
     general_configuration = Config(config_path=config_path)
-    run_name = f"{general_configuration.model_type}_{date.today().strftime('%b %d')}"
-    base_output_directory = create_run_folders(
-        base_output_directory=general_configuration.get_base_output_directory(),
-        run_name=run_name,
-        original_config_file=general_configuration.get_config_file())
+
+    base_output_directory = arrange_loaded_checkpoint(general_configuration=general_configuration)
+
+    if not base_output_directory:
+        run_name = f"{general_configuration.model_type}_{date.today().strftime('%b %d')}"
+        base_output_directory = create_run_folders(
+            base_output_directory=general_configuration.get_base_output_directory(),
+            run_name=run_name,
+            original_config_file=general_configuration.get_config_file())
     
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
