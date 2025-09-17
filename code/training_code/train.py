@@ -1,64 +1,46 @@
-
-import json
 import os
-import shutil
 import sys
 from datetime import date
-import preprocessor
+from preprocessor import Preprocessor
 from Datasets import *
+from utils import *
 import Network
 import numpy as np
-from torch.utils.data import DataLoader
 import torch.optim.lr_scheduler as lr_scheduler
-import torch.nn as nn
 from utils import *
 from Callbacks import ModelCallbacks
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
 
 # Select device: GPU if available, else CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Log what device is being used
-if torch.cuda.is_available():
-    print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-else:
-    print("⚠️ GPU not available, using CPU instead.")
 
 N = 0
 C = 1
 H = 2
 W = 3
 
-class Trainer:
-    def __init__(self, config_path):
-        with open(config_path) as CF:
-            config = json.load(CF)
-            self.config = config
-            self.batch_size = config['batch size']
-            self.num_epochs = config['epochs']
-            self.batches_per_epoch = config['batches per epoch']
-            self.val_fraction = config['val fraction']
-            self.loss_function = loss_from_string[config["loss function"]]()
-            self.learning_rate = config["learning rate"]
-            self.optimizer_as_string = config["optimizer"]
-            self.reduce_lr_factor = config["reduce lr factor"]
-            self.reduce_lr_patience = config["reduce lr patience"]
-            self.reduce_lr_min_delta = config["reduce lr min delta"]
-            self.reduce_lr_cooldown = config["reduce lr cooldown"]
-            self.reduce_lr_min_lr = config["reduce lr min lr"]
-            self.base_output_directory = config["base output directory"]
-            self.viz_idx = 1
-            self.model_type = config["model type"]
-            self.debug_mode = bool(config["debug mode"])
-            self.preprocessor = preprocessor.Preprocessor(config)
+def ddp_setup(rank, world_size, use_gpu):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    backend = 'nccl' if use_gpu else "gloo"
+    init_process_group(backend=backend, rank=rank, world_size=world_size)
 
-        if self.debug_mode:
+
+class Trainer:
+    def __init__(self,
+                 general_configuration: Config,
+                 base_run_directory,
+                 gpu_id):
+
+        if general_configuration.debug_mode:
             self.batches_per_epoch = 1
 
-        self.run_name = f"{self.model_type}_{date.today().strftime('%b %d')}"
-        self.clean = False
-        self.run_path = self.create_run_folders()
-        self.save_configuration()
-
+        self.base_run_directory = base_run_directory
+        self.val_fraction = general_configuration.get_val_fraction()
+        self.gpu_id = gpu_id
+        self.preprocessor = Preprocessor(general_configuration)
         # Do preprocessing according to the model type
         self.preprocessor.do_preprocess()
         self.box, self.confmaps = self.preprocessor.get_box(), self.preprocessor.get_confmaps()
@@ -67,27 +49,31 @@ class Trainer:
         self.img_size = (self.box.shape[C], self.box.shape[H], self.box.shape[W])
         self.number_of_input_channels = self.box.shape[C]
         self.num_output_channels = self.confmaps.shape[C]
-        self.network = Network.Network(config, image_size=self.img_size,
+        self.network = Network.Network(general_configuration, image_size=self.img_size,
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
+        self.model.to(device)
+        self.model = DDP(self.model, device_ids=[self.gpu_id])
 
-        self.optimizer = optimizer_from_string[self.optimizer_as_string](
+        self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
+        self.optimizer = optimizer_from_string[general_configuration.optimizer_as_string](
             self.model.parameters(),
-            lr=self.learning_rate
+            lr=general_configuration.learning_rate
             )
         
         self.lr_scheduler = lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
-            factor=0.5,
-            patience=2,
-            cooldown=2,
-            threshold=0.01
+            factor=general_configuration.reduce_lr_factor,
+            patience=general_configuration.reduce_lr_patience,
+            cooldown=general_configuration.reduce_lr_cooldown,
+            threshold=0.01,
+            min_lr=general_configuration.reduce_lr_min_lr
         )
 
         self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
         self.validation = (self.val_box, self.val_confmap)
-        self.viz_sample = (self.val_box[self.viz_idx], self.val_confmap[self.viz_idx])
+        self.viz_sample = (self.val_box[general_configuration.viz_idx], self.val_confmap[general_configuration.viz_idx])
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
 
@@ -95,7 +81,20 @@ class Trainer:
         #     Augmentor.Scale(scale_range=(0.4, 1.6))
         # ])
 
-        self.callbacks = ModelCallbacks(config, self.model, self.run_path, self.viz_sample, (self.val_box, self.val_confmap))
+        self.callbacks = ModelCallbacks(
+                                        model=self.model,
+                                        base_directory=base_run_directory,
+                                        viz_sample=self.viz_sample,
+                                        validation=(self.val_box, self.val_confmap)
+                                        )
+        self.general_configuration = general_configuration
+
+    def _save_checkpoint(self, epoch):
+        ckp = self.model.module.state_dict()
+        save_directory = os.path.join(self.base_run_directory, 'weights')
+        save_path = os.path.join(save_directory, f"model_epoch_{epoch + 1}.pt")
+        torch.save(ckp, save_path)
+        print(f'Epoch {epoch} - Training checkpoint was save to {save_path}')
 
     def do_one_epoch(self, epoch_number, train_loader, val_loader):
         self.callbacks.on_epoch_begin(epoch=epoch_number)
@@ -104,8 +103,11 @@ class Trainer:
         last_loss = 0.0
         for i, data in enumerate(train_loader, 0):
             inputs, labels = data
+            inputs = inputs.to(device)
+            labels = labels.to(device)
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
+            # outputs = outputs.to(device)
             loss = self.loss_function(outputs, labels)
             loss.backward()
             self.optimizer.step()
@@ -122,6 +124,8 @@ class Trainer:
         with torch.no_grad():
             for i, data in enumerate(val_loader):
                 inputs, labels = data
+                inputs = inputs.to(device)
+                labels = labels.to(device)
                 outputs = self.model(inputs)
                 loss = self.loss_function(outputs, labels)
                 running_val_loss += loss.item()
@@ -138,16 +142,18 @@ class Trainer:
         self.callbacks.on_epoch_end(epoch=epoch_number, logs=logs)
 
     def train(self):
-        augmentor = Augmentor(self.config)
+        augmentor = Augmentor(self.general_configuration)
         train_set = Dataset(self.train_box, self.train_confmap, augmentor.get_transforms())
         val_set = Dataset(self.val_box, self.val_confmap)
-        train_loader = DataLoader(train_set, batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(val_set, batch_size=self.batch_size, shuffle=False)
+        train_loader = prepare_dataloader(train_set, self.general_configuration.batch_size)
+        val_loader = prepare_dataloader(val_set, self.general_configuration.batch_size)
         
         self.callbacks.on_train_start()
-        for epoch in range(self.num_epochs):
+        for epoch in range(self.general_configuration.num_epochs):
             self.model.train()
             self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
+            if self.gpu_id == 0 and self.general_configuration.save_every > 0 and epoch % self.general_configuration.save_every == 0:
+                self._save_checkpoint(epoch=epoch)
 
         
     def train_val_split(self, shuffle=True):
@@ -160,43 +166,44 @@ class Trainer:
         idx = idx[val_size:]
         return self.box[idx], self.confmaps[idx], self.box[val_idx], self.confmaps[val_idx], idx, val_idx
 
-    def create_run_folders(self):
-        """ Creates folders necessary for outputs of vision. """
-        run_path = os.path.join(self.base_output_directory, self.run_name)
-        if not self.clean:
-            initial_run_path = run_path
-            i = 1
-            while os.path.exists(run_path):
-                run_path = "%s_%02d" % (initial_run_path, i)
-                i += 1
-        if os.path.exists(run_path):
-            shutil.rmtree(run_path)
-        os.makedirs(run_path)
-        os.makedirs(os.path.join(run_path, "weights"))
-        os.makedirs(os.path.join(run_path, "viz_pred"))
-        os.makedirs(os.path.join(run_path, "histograms"))
-        os.makedirs(os.path.join(run_path, "l2_histograms_per_point"))
-        print("Created folder:", run_path)
-        code_dir_path = os.path.join(run_path, "training code")
-        os.makedirs(code_dir_path)
-        for file_name in os.listdir('.'):
-            if file_name.endswith('.py'):
-                full_file_name = os.path.join('.', file_name)
-                if os.path.isfile(full_file_name):
-                    shutil.copy(full_file_name, code_dir_path)
-                    print(f"Copied {full_file_name} to {code_dir_path}")
-        return run_path
-    
-    def save_configuration(self):
-        with open(f"{self.run_path}/configuration.json", 'w') as file:
-            json.dump(self.config, file, indent=4)
-
+def joint_main(rank, world_size, general_configuration, base_run_directory, use_gpu):
+    ddp_setup(rank, world_size, use_gpu)
+    try:
+        trainer = Trainer(
+            general_configuration=general_configuration,
+            base_run_directory=base_run_directory,
+            gpu_id=rank
+        )
+        trainer.train()        
+    except Exception as e:
+        import traceback
+        print(f"[Rank {rank}] Exception during training: {e}")
+        traceback.print_exc()
+    finally:
+        destroy_process_group()
 
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
     print(f"Using config file: {config_path}")
-    trainer = Trainer(config_path)
-    trainer.train()
+    general_configuration = Config(config_path=config_path)
+    run_name = f"{general_configuration.model_type}_{date.today().strftime('%b %d')}"
+    base_output_directory = create_run_folders(
+        base_output_directory=general_configuration.get_base_output_directory(),
+        run_name=run_name,
+        original_config_file=general_configuration.get_config_file())
+    
+    if torch.cuda.is_available():
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        world_size = torch.cuda.device_count()
+        use_gpu = True
+    else:
+        world_size = 1
+        use_gpu = False
+        print("⚠️ GPU not available, using CPU instead.")
+
+    
+    mp.spawn(joint_main, args=(world_size, general_configuration, base_output_directory, use_gpu), nprocs=world_size)
+    
 
 
 if __name__ == "__main__":

@@ -1,20 +1,114 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from Datasets import *
+import shutil
+import json
+from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
+from torch.optim import Adam, SGD, RMSprop
 
 loss_from_string = {
-    "MSE": torch.nn.MSELoss,
-    "BCE": torch.nn.BCELoss,
-    "BCEWithLogits": torch.nn.BCEWithLogitsLoss,
-    "CrossEntropy": torch.nn.CrossEntropyLoss,
+    "MSE": MSELoss,
+    "BCE": BCELoss,
+    "BCEWithLogits": BCEWithLogitsLoss,
+    "CrossEntropy": CrossEntropyLoss,
 }
 
 optimizer_from_string = {
-    "Adam": torch.optim.Adam,
-    "SGD": torch.optim.SGD,
-    "RMSprop": torch.optim.RMSprop,
+    "Adam": Adam,
+    "SGD": SGD,
+    "RMSprop": RMSprop,
 }
+
+class Config:
+    def __init__(self, config_path):
+        with open(config_path) as CF:
+            config = json.load(CF)
+            # training configuration
+            self.config = config
+            self.batch_size = config['batch size']
+            self.num_epochs = config['epochs']
+            self.batches_per_epoch = config['batches per epoch']
+            self.val_fraction = config['val fraction']
+            self.loss_function_as_string = config["loss function"]
+            self.learning_rate = config["learning rate"]
+            self.optimizer_as_string = config["optimizer"]
+            self.reduce_lr_factor = config["reduce lr factor"]
+            self.reduce_lr_patience = config["reduce lr patience"]
+            self.reduce_lr_min_delta = config["reduce lr min delta"]
+            self.reduce_lr_cooldown = config["reduce lr cooldown"]
+            self.reduce_lr_min_lr = config["reduce lr min lr"]
+            self.base_output_directory = config["base output directory"]
+            self.viz_idx = 1
+            self.model_type = config["model type"]
+            self.save_every = config["save every"]
+            self.debug_mode = bool(config["debug mode"])
+            self.confmaps_orig = None
+            self.box_orig = None
+            self.data_path = config['data path']
+            self.test_path = config['test path']
+            
+            # preprocessing configuration
+            self.mix_with_test = bool(config['mix with test'])
+            self.mask_dilation = config['mask dilation']
+            self.wing_size_rank = config["rank wing size"]
+            self.do_curriculum_learning = config["do curriculum learning"]
+            self.single_time_channel = bool(config["single time channel"])
+
+            # Network configuration
+            self.num_blocks = config["number of encoder decoder blocks"]
+            self.kernel_size = config["convolution kernel size"]
+            self.num_base_filters = config["number of base filters"]
+            self.dilation_rate = config["dilation rate"]
+            self.dropout = config["dropout ratio"]
+
+            # augmentation configuration
+            self.rotation_range = config["rotation range"]
+            self.zoom_range = config["zoom range"]
+            self.horizontal_flip = bool(config["horizontal flip"])
+            self.vertical_flip = bool(config["vertical flip"])
+            self.shift = config["xy shift"]
+            self.batch_size = config["batch size"] if not self.debug_mode else 1
+
+    def get_config_file(self):
+        return self.config
+
+    def get_data_path(self):
+        return self.data_path
+    
+    def get_model_type(self):
+        return self.model_type
+    
+    def get_val_fraction(self):
+        return self.val_fraction
+    
+    def get_single_time_channel(self):
+        return self.single_time_channel
+    
+    def get_debug_mode(self):
+        return self.debug_mode
+    
+    def get_mask_dilation(self):
+        return self.mask_dilation
+    
+    def get_mix_with_test(self):
+        return self.mix_with_test
+    
+    def get_base_output_directory(self):
+        return self.base_output_directory
+    
+    def get_augmentation_configuration(self):
+        return self.rotation_range,\
+            self.zoom_range,\
+            self.horizontal_flip,\
+            self.vertical_flip,\
+            self.shift
+    
+    def get_network_configuration(self):
+        return self.num_base_filters,\
+            self.num_blocks,\
+            self.kernel_size,\
+            self.dilation_rate,\
+            self.dropout
 
 def tf_format_find_peaks(x):
 
@@ -163,3 +257,36 @@ def test_transforms(sample, label, save_directory, transforms):
                save_directory=save_directory,
                filename=f"{transform_name}_interest_points_index.png")
           
+
+def create_run_folders(base_output_directory, run_name, original_config_file):
+    """ Creates folders necessary for outputs of vision. """
+    run_path = os.path.join(base_output_directory, run_name)
+    initial_run_path = run_path
+    i = 1
+    while os.path.exists(run_path):
+        run_path = "%s_%02d" % (initial_run_path, i)
+        i += 1
+    if os.path.exists(run_path):
+        shutil.rmtree(run_path)
+    os.makedirs(run_path)
+    os.makedirs(os.path.join(run_path, "weights"))
+    os.makedirs(os.path.join(run_path, "viz_pred"))
+    os.makedirs(os.path.join(run_path, "histograms"))
+    os.makedirs(os.path.join(run_path, "l2_histograms_per_point"))
+    print("Created folder:", run_path)
+    code_dir_path = os.path.join(run_path, "training code")
+    os.makedirs(code_dir_path)
+    for file_name in os.listdir('.'):
+        if file_name.endswith('.py'):
+            full_file_name = os.path.join('.', file_name)
+            if os.path.isfile(full_file_name):
+                shutil.copy(full_file_name, code_dir_path)
+                print(f"Copied {full_file_name} to {code_dir_path}")
+    with open(f"{run_path}/configuration.json", 'w') as file:
+        json.dump(original_config_file, file, indent=4)
+    return run_path
+
+# def save_configuration():
+#     with open(f"{run_path}/configuration.json", 'w') as file:
+#         json.dump(config, file, indent=4)
+        
