@@ -5,7 +5,7 @@
 #SBATCH --mem=64g
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:05:00
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 
 echo "started"
 
@@ -17,5 +17,5 @@ echo "Job started on $(hostname)"
 echo "GPUs allocated: $CUDA_VISIBLE_DEVICES"
 
 echo "running python"
-python "code/training_code/train.py" "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_configurations/config_debug.json"
+python "code/training_code/train.py" "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_configurations/config_debug_resume.json"
 echo "finished working"

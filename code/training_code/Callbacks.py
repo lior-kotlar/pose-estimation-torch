@@ -3,6 +3,7 @@ from torchtnt.framework.callback import Callback
 from utils import *
 import matplotlib.pyplot as plt
 import os
+import sys
 import csv
 import logging
 from time import time
@@ -73,7 +74,11 @@ class ModelCallbacks:
         def __init__(self, log_interval=10):
             self.log_interval = log_interval
             self.training_logs = []
-            logging.basicConfig(level=logging.INFO, format='%(message)s')
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(message)s',
+                stream=sys.stdout
+            )
 
         def on_epoch_begin(self, epoch):
             self.epoch_start_time = time()
@@ -226,6 +231,9 @@ class ModelCallbacks:
     class LossHistory():
         def __init__(self, save_diretory):
             self.save_directory = save_diretory
+            self.csv_file_path = os.path.join(self.save_directory, "history.csv")
+            self.png_file_path = os.path.join(self.save_directory, "history.png")
+            self.mat_file_path = os.path.join(self.save_directory, "history.mat")
 
         def plot_history(self, history, save_path=None, show_figure=False):
             """ Plots the vision history. """
@@ -251,20 +259,31 @@ class ModelCallbacks:
 
         def on_train_start(self):
             self.history = []
-            self.csv_file_path = os.path.join(self.save_directory, "history.csv")
-            with open(self.csv_file_path, mode='w', newline='') as file:
-                writer = csv.writer(file)
-                writer.writerow(['epoch', 'train loss', 'val loss'])
+            if os.path.exists(self.csv_file_path):
+
+                with open(self.csv_file_path, mode='r', newline='') as file:
+                    reader = csv.DictReader(file)
+                    for row in reader:
+                        logs = {
+                            'train loss': float(row['train loss']),
+                            'validation loss': float(row['val loss'])
+                        }
+                        self.history.append(logs)
+                print(f"Resuming history from {self.csv_file_path}, {len(self.history)} epochs loaded.")
+            
+            else:
+                with open(self.csv_file_path, mode='w', newline='') as file:
+                    writer = csv.writer(file)
+                    writer.writerow(['epoch', 'train loss', 'val loss'])
+                print(f"Starting new history at {self.csv_file_path}.")
         
         def on_epoch_end(self, epoch, logs=None):
             self.history.append(logs.copy())
-            savemat(os.path.join(self.save_directory, "history.mat"),
+            savemat(self.mat_file_path,
                     {k: [x[k] for x in self.history] for k in self.history[0].keys()})
 
             with open(self.csv_file_path, mode='a', newline='') as file:
                 writer = csv.writer(file)
                 writer.writerow([epoch, logs['train loss'], logs.get('validation loss')])
 
-            save_path = os.path.join(self.save_directory, "history.png")
-            print(f'save path = {save_path}')
-            self.plot_history(self.history, save_path=save_path)
+            self.plot_history(self.history, save_path=self.png_file_path)

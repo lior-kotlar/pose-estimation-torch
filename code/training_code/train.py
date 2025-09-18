@@ -72,7 +72,10 @@ class Trainer:
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
         self.model.to(self.device)
-        self.model = DDP(self.model, device_ids=[self.gpu_id])
+        if self.device.type == 'cuda':
+            self.model = DDP(self.model, device_ids=[self.gpu_id])
+        else:
+            self.model = DDP(self.model)
 
         self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
         self.optimizer = optimizer_from_string[general_configuration.optimizer_as_string](
@@ -128,7 +131,7 @@ class Trainer:
         print(f'Epoch {epoch+1} - Training checkpoint was save to {save_path}')
 
     def _load_checkpoint(self, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
         if hasattr(self.model, "module"):
             self.model.module.load_state_dict(checkpoint["model"])
         else:
