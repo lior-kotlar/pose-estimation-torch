@@ -10,8 +10,8 @@
     "epochs pointwise loss": 0,
     "val fraction": 0.1,
     "learning rate": 0.001,
-    "training checkpoint file path": "",
-    "resume training directory": "",
+    "training checkpoint file path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_18_POINTS_PER_WING_Sep 17_04/weights/model_epoch_42.pt",
+    "resume training directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_18_POINTS_PER_WING_Sep 17_04",
 
     "// Network parameters //": 0,
     "dropout ratio": 0.5,

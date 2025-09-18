@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 from datetime import date
 from preprocessor import Preprocessor
 from Datasets import *
@@ -13,17 +14,15 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-# Select device: GPU if available, else CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 N = 0
 C = 1
 H = 2
 W = 3
 
-def ddp_setup(rank, world_size, use_gpu):
+def ddp_setup(rank, world_size, port, use_gpu):
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
+    # os.environ["MASTER_PORT"] = "12355"
+    os.environ["MASTER_PORT"] = port
     backend = 'nccl' if use_gpu else "gloo"
     init_process_group(backend=backend, rank=rank, world_size=world_size)
 
@@ -42,8 +41,9 @@ class Trainer:
     def __init__(self,
                  general_configuration: Config,
                  base_run_directory,
-                 gpu_id):
-
+                 gpu_id,
+                 device):
+        self.device = device
         if general_configuration.debug_mode:
             self.batches_per_epoch = 1
 
@@ -71,7 +71,7 @@ class Trainer:
         self.network = Network.Network(general_configuration, image_size=self.img_size,
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
-        self.model.to(device)
+        self.model.to(self.device)
         self.model = DDP(self.model, device_ids=[self.gpu_id])
 
         self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
@@ -112,7 +112,6 @@ class Trainer:
         self.general_configuration = general_configuration
 
     def _save_checkpoint(self, epoch, best=False):
-        # ckp = self.model.module.state_dict()
 
         ckp = {
             "model": self.model.module.state_dict() if hasattr(self.model, "module") else self.model.state_dict(),
@@ -151,11 +150,10 @@ class Trainer:
         last_loss = 0.0
         for i, data in enumerate(train_loader, 0):
             inputs, labels = data
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+            inputs = inputs.to(self.device)
+            labels = labels.to(self.device)
             self.optimizer.zero_grad()
             outputs = self.model(inputs)
-            # outputs = outputs.to(device)
             loss = self.loss_function(outputs, labels)
             loss.backward()
             self.optimizer.step()
@@ -172,8 +170,8 @@ class Trainer:
         with torch.no_grad():
             for i, data in enumerate(val_loader):
                 inputs, labels = data
-                inputs = inputs.to(device)
-                labels = labels.to(device)
+                inputs = inputs.to(self.device)
+                labels = labels.to(self.device)
                 outputs = self.model(inputs)
                 loss = self.loss_function(outputs, labels)
                 running_val_loss += loss.item()
@@ -221,13 +219,25 @@ class Trainer:
         idx = idx[val_size:]
         return self.box[idx], self.confmaps[idx], self.box[val_idx], self.confmaps[val_idx], idx, val_idx
 
-def joint_main(rank, world_size, general_configuration, base_run_directory, use_gpu):
-    ddp_setup(rank, world_size, use_gpu)
+def joint_main(rank,
+               world_size,
+               general_configuration,
+               base_run_directory,
+               port,
+               use_gpu):
+    ddp_setup(rank=rank, world_size=world_size, port=port, use_gpu=use_gpu)
+    if use_gpu:
+        device = torch.device(f'cuda:{rank}')
+        print(f"[Rank {rank}] Running on {torch.cuda.get_device_name(device=device)}")
+    else:
+        device = torch.device("cpu")
+        print(f"[Rank {rank}] Running on CPU")
     try:
         trainer = Trainer(
             general_configuration=general_configuration,
             base_run_directory=base_run_directory,
-            gpu_id=rank
+            gpu_id=rank,
+            device=device
         )
         trainer.train()        
     except Exception as e:
@@ -260,8 +270,12 @@ def main():
         use_gpu = False
         print("⚠️ GPU not available, using CPU instead.")
 
-    
-    mp.spawn(joint_main, args=(world_size, general_configuration, base_output_directory, use_gpu), nprocs=world_size)
+    port = str(random.randint(10000, 20000))  # pick free port
+    mp.spawn(joint_main, args=(world_size,
+                               general_configuration,
+                               base_output_directory,
+                               port,
+                               use_gpu), nprocs=world_size)
     
 
 
