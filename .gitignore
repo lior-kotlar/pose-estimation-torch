@@ -208,3 +208,4 @@ __marimo__/
 
 .vscode/
 train_output/debug_outputs/
+logs/
