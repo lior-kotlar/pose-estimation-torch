@@ -16,6 +16,6 @@ source .env/bin/activate
 echo "Job started on $(hostname)"
 echo "GPUs allocated: $CUDA_VISIBLE_DEVICES"
 
-echo "running python"
-python "code/training_code/train.py" "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_configurations/config_debug_resume.json"
-echo "finished working"
+echo "sbatch: running python"
+python "code/training_code/train.py" "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_configurations/config_debug.json"
+echo "sbatch: finished working"

@@ -143,7 +143,7 @@ class Augmentor():
             return shifted_sample, shifted_label
         
     class Scale:
-        def __init__(self, scale_range=(0.4, 1.6)):
+        def __init__(self, scale_range=(0.75, 1.25)):
             """
             Random scaling transform for image + confidence maps.
 

@@ -3,7 +3,7 @@
 
     "// training parameters //": 0,
     "batch size": 50,
-    "epochs": 50,
+    "epochs": 100,
     "batches per epoch": 2000,
     "do curriculum learning": 0,
     "loss function": "MSE",
@@ -56,7 +56,7 @@
     "// callbacks parameters //": 0,
     "// ReduceLROnPlateau": 0,
     "reduce lr factor": 0.2,
-    "reduce lr patience": 3,
+    "reduce lr patience": 2,
     "reduce lr min delta": 1e-05,
     "reduce lr cooldown": 0,
     "reduce lr min lr": 1e-10,

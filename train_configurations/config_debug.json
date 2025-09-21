@@ -3,7 +3,7 @@
     
     "// training parameters //": 0,
     "batch size": 50,
-    "epochs": 50,
+    "epochs": 1,
     "batches per epoch": 2000,
     "do curriculum learning": 0,
     "loss function": "MSE",

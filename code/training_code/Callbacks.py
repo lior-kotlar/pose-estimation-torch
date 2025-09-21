@@ -235,7 +235,7 @@ class ModelCallbacks:
             self.png_file_path = os.path.join(self.save_directory, "history.png")
             self.mat_file_path = os.path.join(self.save_directory, "history.mat")
 
-        def plot_history(self, history, save_path=None, show_figure=False):
+        def plot_history(self, history, save_path):
             """ Plots the vision history. """
 
             loss = [x["train loss"] for x in history]
@@ -250,12 +250,8 @@ class ModelCallbacks:
             plt.ylabel("Loss")
             plt.legend(["Training", "Validation"])
 
-            if save_path is not None:
-                plt.savefig(save_path)
-            if show_figure:
-                plt.show()
-            else:
-                plt.close()
+            plt.savefig(save_path)
+            plt.close()
 
         def on_train_start(self):
             self.history = []

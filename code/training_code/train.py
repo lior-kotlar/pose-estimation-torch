@@ -2,6 +2,7 @@ import os
 import sys
 import random
 from datetime import date
+import time
 from preprocessor import Preprocessor
 from Datasets import *
 from utils import *
@@ -102,8 +103,10 @@ class Trainer:
         print("img_size:", self.img_size)
         print("num_output_channels:", self.num_output_channels)
 
-        # test_transforms(self.train_box[0], self.train_confmap[0], self.run_path, [
-        #     Augmentor.Scale(scale_range=(0.4, 1.6))
+        show_sample_channels(self.viz_sample[0], self.base_run_directory, filename="viz_sample.png")
+        show_interest_points_with_index(self.viz_sample[0], self.viz_sample[1], self.base_run_directory, filename="viz_sample_points.png")
+        # test_transforms(self.train_box[0], self.train_confmap[0], self.base_run_directory, [
+        #     Augmentor.Scale()
         # ])
 
         self.callbacks = ModelCallbacks(
@@ -202,6 +205,7 @@ class Trainer:
         train_loader = prepare_dataloader(train_set, self.general_configuration.batch_size)
         val_loader = prepare_dataloader(val_set, self.general_configuration.batch_size)
         
+        training_start_time = time.time()
         self.callbacks.on_train_start()
         for epoch in range(self.start_epoch, self.general_configuration.num_epochs):
             self.model.train()
@@ -210,6 +214,14 @@ class Trainer:
                 self.general_configuration.save_every > 0 and \
                     epoch % self.general_configuration.save_every == 0:
                 self._save_checkpoint(epoch=epoch)
+
+        training_end_time = time.time()
+
+        elapsed_time = training_end_time - training_start_time
+        hours, rem = divmod(elapsed_time, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if self.gpu_id == 0:
+            print(f'Training completed in {int(hours):0>2}:{int(minutes):0>2}:{int(seconds):0>2} (hh:mm:ss)', flush=True)
 
         
     def train_val_split(self, shuffle=True):
