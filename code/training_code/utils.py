@@ -8,6 +8,9 @@ import json
 from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam, SGD, RMSprop
 
+TRAINING_CODE_DIRECTORY = "code/training_code"
+SBATCH_FILES_DIRECTORY = "sbatch_files"
+
 loss_from_string = {
     "MSE": MSELoss,
     "BCE": BCELoss,
@@ -297,7 +300,18 @@ def create_run_folders(base_output_directory, run_name, original_config_file):
         json.dump(original_config_file, file, indent=4)
     return run_path
 
-# def save_configuration():
-#     with open(f"{run_path}/configuration.json", 'w') as file:
-#         json.dump(config, file, indent=4)
+def save_training_code(base_run_directory):
+    save_to_directory = os.path.join(base_run_directory, "training code")
+    if not os.path.exists(save_to_directory):
+        os.makedirs(save_to_directory)
+    for file_name in os.listdir(TRAINING_CODE_DIRECTORY):
+        if file_name.endswith('.py'):
+            full_file_name = os.path.join(TRAINING_CODE_DIRECTORY, file_name)
+            if os.path.isfile(full_file_name):
+                shutil.copy(full_file_name, save_to_directory)
+    for file_name in os.listdir(SBATCH_FILES_DIRECTORY):
+        full_file_name = os.path.join(SBATCH_FILES_DIRECTORY, file_name)
+        if os.path.isfile(full_file_name):
+            shutil.copy(full_file_name, save_to_directory)
+    print(f"Copied training code to {save_to_directory}")
         

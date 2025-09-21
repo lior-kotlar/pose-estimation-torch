@@ -28,6 +28,11 @@ def ddp_setup(rank, world_size, port, use_gpu):
     init_process_group(backend=backend, rank=rank, world_size=world_size)
 
 def arrange_loaded_checkpoint(general_configuration: Config):
+    '''
+    Check if resuming from checkpoint, if so, check that both directory and file exist.
+    If not resuming, create new run directory.
+    returns the base output directory to use if resuming. If not resuming, returns None.
+    '''
     file = general_configuration.get_resume_training_checkpoint_path()
     directory = general_configuration.get_resume_training_directory()
     if (file and not directory) or (directory and not file):
@@ -275,6 +280,7 @@ def main():
             base_output_directory=general_configuration.get_base_output_directory(),
             run_name=run_name,
             original_config_file=general_configuration.get_config_file())
+        save_training_code(base_output_directory)
     
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")

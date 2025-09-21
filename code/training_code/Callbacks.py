@@ -90,7 +90,6 @@ class ModelCallbacks:
             logs['epoch_time'] = elapsed_time  # Add epoch time to logs
             self.training_logs.append(logs)  # Collect training logs
 
-
     class L2PerPointLossCallback():
 
         def __init__(self, validation_data, base_run_directory, model):
@@ -208,7 +207,6 @@ class ModelCallbacks:
             os.makedirs(os.path.dirname(histogram_path), exist_ok=True)
             plt.savefig(histogram_path)
             plt.close()
-
 
     class EarlyStopping():
         def __init__(self, patience=3):
