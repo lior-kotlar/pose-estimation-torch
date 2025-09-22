@@ -89,6 +89,9 @@ class Config:
     def get_val_fraction(self):
         return self.val_fraction
     
+    def get_num_epochs(self):
+        return self.num_epochs
+
     def get_single_time_channel(self):
         return self.single_time_channel
     
