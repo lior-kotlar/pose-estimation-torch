@@ -7,6 +7,7 @@ import shutil
 import json
 from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam, SGD, RMSprop
+import h5py
 
 TRAINING_CODE_DIRECTORY = "code/training_code"
 SBATCH_FILES_DIRECTORY = "sbatch_files"
@@ -307,6 +308,12 @@ def save_training_code(base_run_directory):
     save_to_directory = os.path.join(base_run_directory, "training code")
     if not os.path.exists(save_to_directory):
         os.makedirs(save_to_directory)
+    code_directory = os.path.dirname(TRAINING_CODE_DIRECTORY)
+    for file_name in os.listdir(code_directory):
+        if file_name.endswith('.py'):
+            full_file_name = os.path.join(code_directory, file_name)
+            if os.path.isfile(full_file_name):
+                shutil.copy(full_file_name, save_to_directory)
     for file_name in os.listdir(TRAINING_CODE_DIRECTORY):
         if file_name.endswith('.py'):
             full_file_name = os.path.join(TRAINING_CODE_DIRECTORY, file_name)
@@ -318,3 +325,9 @@ def save_training_code(base_run_directory):
             shutil.copy(full_file_name, save_to_directory)
     print(f"Copied training code to {save_to_directory}")
         
+def readfile(path):
+    with (h5py.File(path, "r") as f):
+        keys = list(f.keys())
+        for key in keys:
+            value = f[key]
+            print(f'key:{key}, value:{value}')

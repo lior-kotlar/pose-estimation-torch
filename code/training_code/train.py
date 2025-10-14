@@ -1,16 +1,19 @@
 import os
 import sys
+abspath = os.path.abspath(__file__)
+code_directory = os.path.dirname(os.path.dirname(abspath))
+sys.path.append(code_directory)
 import random
+import torch
 from datetime import date
 import time
-from preprocessor import Preprocessor
-from Datasets import *
-from utils import *
+import Preprocessor
+import Datasets
 import Network
 import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
 from utils import *
-from Callbacks import ModelCallbacks
+import Callbacks
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, reduce, ReduceOp, get_world_size
@@ -57,7 +60,7 @@ class Trainer:
         self.base_run_directory = base_run_directory
         self.val_fraction = general_configuration.get_val_fraction()
         self.gpu_id = gpu_id
-        self.preprocessor = Preprocessor(general_configuration)
+        self.preprocessor = Preprocessor.Preprocessor(general_configuration)
         self.best_val_loss = float("inf")
         self.start_epoch = 0
         self.num_epochs = general_configuration.get_num_epochs()
@@ -116,7 +119,7 @@ class Trainer:
         #     Augmentor.Scale()
         # ])
 
-        self.callbacks = ModelCallbacks(
+        self.callbacks = Callbacks.ModelCallbacks(
                                         model=self.model,
                                         base_directory=base_run_directory,
                                         viz_sample=self.viz_sample,
@@ -224,12 +227,12 @@ class Trainer:
             self.callbacks.on_epoch_end(epoch=epoch_number, logs=logs)
 
     def train(self):
-        augmentor = Augmentor(self.general_configuration)
-        train_set = Dataset(self.train_box, self.train_confmap, augmentor.get_transforms())
-        val_set = Dataset(self.val_box, self.val_confmap)
-        train_loader = prepare_dataloader(train_set, self.general_configuration.batch_size)
-        val_loader = prepare_dataloader(val_set, self.general_configuration.batch_size)
-        
+        augmentor = Datasets.Augmentor(self.general_configuration)
+        train_set = Datasets.Dataset(self.train_box, self.train_confmap, augmentor.get_transforms())
+        val_set = Datasets.Dataset(self.val_box, self.val_confmap)
+        train_loader = Datasets.prepare_dataloader(train_set, self.general_configuration.batch_size)
+        val_loader = Datasets.prepare_dataloader(val_set, self.general_configuration.batch_size)
+
         training_start_time = time.time()
         if self.gpu_id == 0:
             self.callbacks.on_train_start()
