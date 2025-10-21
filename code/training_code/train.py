@@ -14,9 +14,9 @@ import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
 from utils import *
 import Callbacks
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group, reduce, ReduceOp, get_world_size
+# import torch.multiprocessing as mp
+# from torch.nn.parallel import DistributedDataParallel as DDP
+# from torch.distributed import init_process_group, destroy_process_group, reduce, ReduceOp, get_world_size
 
 N = 0
 C = 1
@@ -24,12 +24,12 @@ H = 2
 W = 3
 REPORT_EVERY = 100
 
-def ddp_setup(rank, world_size, port, use_gpu):
-    os.environ["MASTER_ADDR"] = "localhost"
-    # os.environ["MASTER_PORT"] = "12355"
-    os.environ["MASTER_PORT"] = port
-    backend = 'nccl' if use_gpu else "gloo"
-    init_process_group(backend=backend, rank=rank, world_size=world_size)
+# def ddp_setup(rank, world_size, port, use_gpu):
+#     os.environ["MASTER_ADDR"] = "localhost"
+#     # os.environ["MASTER_PORT"] = "12355"
+#     os.environ["MASTER_PORT"] = port
+#     backend = 'nccl' if use_gpu else "gloo"
+#     init_process_group(backend=backend, rank=rank, world_size=world_size)
 
 def arrange_loaded_checkpoint(general_configuration: Config):
     '''
@@ -83,10 +83,10 @@ class Trainer:
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
         self.model.to(self.device)
-        if self.device.type == 'cuda':
-            self.model = DDP(self.model, device_ids=[self.gpu_id])
-        else:
-            self.model = DDP(self.model)
+        # if self.device.type == 'cuda':
+        #     self.model = DDP(self.model, device_ids=[self.gpu_id])
+        # else:
+        #     self.model = DDP(self.model)
 
         self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
         self.optimizer = optimizer_from_string[general_configuration.optimizer_as_string](
@@ -187,11 +187,12 @@ class Trainer:
             step_count += 1
 
         avg_train_loss = whole_epoch_train_loss_sum / step_count
-        avg_train_loss_tensor = torch.tensor([avg_train_loss], device=self.device)
-        reduce(avg_train_loss_tensor, dst=0, op=ReduceOp.SUM)
-        if self.gpu_id == 0:
-            general_avg_train_loss = avg_train_loss_tensor / get_world_size()
-            logs['train loss'] = general_avg_train_loss.item()
+        # avg_train_loss_tensor = torch.tensor([avg_train_loss], device=self.device)
+        # reduce(avg_train_loss_tensor, dst=0, op=ReduceOp.SUM)
+        # if self.gpu_id == 0:
+        #     general_avg_train_loss = avg_train_loss_tensor / get_world_size()
+        #     logs['train loss'] = general_avg_train_loss.item()
+        logs['train loss'] = avg_train_loss
             
         running_val_loss = 0.0
         step_count = 0
@@ -213,12 +214,13 @@ class Trainer:
             if self.gpu_id == 0:
                 self._save_checkpoint(epoch=epoch_number, best=True)
 
-        average_val_loss_tensor = torch.tensor([average_val_loss], device=self.device)
-        reduce(average_val_loss_tensor, dst=0, op=ReduceOp.SUM)
-        if self.gpu_id == 0:
-            general_avg_validation_loss = average_val_loss_tensor / get_world_size()
-            # print(f'[ALL GPUs] | Epoch {epoch_number}/{self.num_epochs} | Train Loss: {general_avg_train_loss.item():.4f}, Validation Loss: {general_avg_validation_loss.item():.8f}')
-            logs['validation loss'] = general_avg_validation_loss.item()
+        # average_val_loss_tensor = torch.tensor([average_val_loss], device=self.device)
+        # reduce(average_val_loss_tensor, dst=0, op=ReduceOp.SUM)
+        # if self.gpu_id == 0:
+        #     general_avg_validation_loss = average_val_loss_tensor / get_world_size()
+        #     # print(f'[ALL GPUs] | Epoch {epoch_number}/{self.num_epochs} | Train Loss: {general_avg_train_loss.item():.4f}, Validation Loss: {general_avg_validation_loss.item():.8f}')
+        #     logs['validation loss'] = general_avg_validation_loss.item()
+        logs['validation loss'] = average_val_loss
 
         self.lr_scheduler.step(average_val_loss)
         logs['lr'] = self.lr_scheduler.get_last_lr()[0]
@@ -238,7 +240,7 @@ class Trainer:
             self.callbacks.on_train_start()
 
         for epoch in range(self.start_epoch, self.num_epochs):
-            train_loader.sampler.set_epoch(epoch)
+            # train_loader.sampler.set_epoch(epoch)
             self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
             if self.gpu_id == 0 and \
                 self.general_configuration.save_every > 0 and \
@@ -270,7 +272,7 @@ def joint_main(rank,
                base_run_directory,
                port,
                use_gpu):
-    ddp_setup(rank=rank, world_size=world_size, port=port, use_gpu=use_gpu)
+    # ddp_setup(rank=rank, world_size=world_size, port=port, use_gpu=use_gpu)
     if use_gpu:
         device = torch.device(f'cuda:{rank}')
         print(f"[Rank {rank}] Running on {torch.cuda.get_device_name(device=device)}", flush=True)
@@ -289,8 +291,8 @@ def joint_main(rank,
         import traceback
         print(f"[Rank {rank}] Exception during training: {e}", flush=True)
         traceback.print_exc()
-    finally:
-        destroy_process_group()
+    # finally:
+    #     destroy_process_group()
 
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
@@ -309,19 +311,28 @@ def main():
     
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}", flush=True)
-        world_size = torch.cuda.device_count()
+        # world_size = torch.cuda.device_count()
         use_gpu = True
     else:
-        world_size = 1
+        # world_size = 1
         use_gpu = False
         print("⚠️ GPU not available, using CPU instead.", flush=True)
 
-    port = str(random.randint(10000, 20000))  # pick free port
-    mp.spawn(joint_main, args=(world_size,
-                               general_configuration,
-                               base_output_directory,
-                               port,
-                               use_gpu), nprocs=world_size)
+    # port = str(random.randint(10000, 20000))  # pick free port
+    # mp.spawn(joint_main, args=(world_size,
+    #                            general_configuration,
+    #                            base_output_directory,
+    #                            port,
+    #                            use_gpu), nprocs=world_size)
+
+    joint_main(
+        rank=0,
+        world_size=-1,
+        general_configuration=general_configuration,
+        base_run_directory=base_output_directory,
+        port="12355",
+        use_gpu=use_gpu
+    )
     
 
 

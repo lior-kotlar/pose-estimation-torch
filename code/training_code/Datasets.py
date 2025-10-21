@@ -3,7 +3,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from scipy.ndimage import rotate, shift, zoom
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
+# from torch.utils.data.distributed import DistributedSampler
 from utils import Config
 
 SAMPLE_CHANNEL_SHAPE = np.array((192, 192), dtype=np.int32)  # (H, W)
@@ -199,10 +199,16 @@ class Augmentor():
             return scaled_sample, scaled_label
         
 def prepare_dataloader(dataset, batch_size):
+    # return DataLoader(
+    #     dataset=dataset,
+    #     batch_size=batch_size,
+    #     pin_memory=True,
+    #     shuffle=False,
+    #     sampler=DistributedSampler(dataset=dataset)
+    # )
     return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         pin_memory=True,
-        shuffle=False,
-        sampler=DistributedSampler(dataset=dataset)
+        shuffle=False
     )
