@@ -1,10 +1,10 @@
 import torch
-from torchtnt.framework.callback import Callback
-from utils import *
+from utils import find_peaks
 import matplotlib.pyplot as plt
 import os
 import sys
 import csv
+import numpy as np
 import logging
 from time import time
 from scipy.io import savemat
