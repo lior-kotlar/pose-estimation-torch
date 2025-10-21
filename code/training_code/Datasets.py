@@ -3,7 +3,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from scipy.ndimage import rotate, shift, zoom
 from torch.utils.data import DataLoader
-from utils import Config
+from utils import Train_Config
 
 SAMPLE_CHANNEL_SHAPE = np.array((192, 192), dtype=np.int32)  # (H, W)
 
@@ -27,7 +27,7 @@ class Dataset(Dataset):
 
 class Augmentor():
     def __init__(self,
-                 general_configuration: Config):
+                 general_configuration: Train_Config):
         self.rotation_range,\
         self.zoom_range,\
         self.horizontal_flip,\

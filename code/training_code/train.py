@@ -21,7 +21,7 @@ H = 2
 W = 3
 REPORT_EVERY = 100
 
-def arrange_loaded_checkpoint(general_configuration: Config):
+def arrange_loaded_checkpoint(general_configuration: Train_Config):
     '''
     Check if resuming from checkpoint, if so, check that both directory and file exist.
     If not resuming, create new run directory.
@@ -39,7 +39,7 @@ def arrange_loaded_checkpoint(general_configuration: Config):
 
 class Trainer:
     def __init__(self,
-                 general_configuration: Config,
+                 general_configuration: Train_Config,
                  base_run_directory,
                  device):
         self.device = device
@@ -257,7 +257,7 @@ def training_main(
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
     print(f"Using config file: {config_path}", flush=True)
-    general_configuration = Config(config_path=config_path)
+    general_configuration = Train_Config(config_path=config_path)
 
     base_output_directory = arrange_loaded_checkpoint(general_configuration=general_configuration)
 

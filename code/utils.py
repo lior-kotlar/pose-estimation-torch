@@ -25,7 +25,7 @@ optimizer_from_string = {
     "RMSprop": RMSprop,
 }
 
-class Config:
+class Train_Config:
     def __init__(self, config_path):
         with open(config_path) as CF:
             config = json.load(CF)
@@ -133,6 +133,55 @@ class Config:
     
     def set_learning_rate(self, new_lr):
         self.learning_rate = new_lr
+
+class Predict_config:
+    def __init__(self, config_path):
+        with open(config_path) as CF:
+            config = json.load(CF)
+            self.config = config
+            self.movie_path = config['movie path']
+            self.output_directory = config['output directory']
+            self.calibration_path = config['calibration path']
+            self.model_types = config['model types']
+            self.wings_detector_path = config['wings detector path']
+            self.batch_size = config['batch size']
+            config_bank_path = config['config bank path']
+            specified_configs_path = config['specified configs path']
+            self.model_config_list = self.load_configurations_from_bank(config_bank_path, specified_configs_path)
+
+    def load_configurations_from_bank(self, config_bank_path, specified_configs_path):
+        with open(config_bank_path) as CBF:
+            config_bank = json.load(CBF)
+        with open(specified_configs_path) as SCF:
+            specified_configs = json.load(SCF)["specified configurations"]
+        model_config_list = []
+        for config_name in specified_configs:
+            if config_name in config_bank:
+                model_config_list.append(config_bank[config_name])
+            else:
+                raise ValueError(f"Config name {config_name} not found in config bank.")
+        return model_config_list
+
+    def get_movie_path(self):
+        return self.movie_path
+    
+    def get_output_directory(self):
+        return self.output_directory
+    
+    def get_calibration_path(self):
+        return self.calibration_path
+    
+    def get_model_type(self):
+        return self.model_type
+    
+    def get_wings_detector_path(self):
+        return self.wings_detector_path
+    
+    def get_batch_size(self):
+        return self.batch_size
+    
+    def get_model_config_list(self):
+        return self.model_config_list
 
 def tf_format_find_peaks(x):
 
