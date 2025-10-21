@@ -1,6 +1,6 @@
 import numpy as np
 from constants import *
-from utils import *
+from utils import Config, tf_format_find_peaks
 from skimage.morphology import disk, erosion, dilation
 import h5py
 from scipy.ndimage import binary_dilation, binary_closing

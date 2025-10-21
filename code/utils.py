@@ -7,6 +7,7 @@ import shutil
 import json
 from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam, SGD, RMSprop
+import h5py
 
 TRAINING_CODE_DIRECTORY = "code/training_code"
 SBATCH_FILES_DIRECTORY = "sbatch_files"
@@ -89,6 +90,9 @@ class Config:
     def get_val_fraction(self):
         return self.val_fraction
     
+    def get_num_epochs(self):
+        return self.num_epochs
+
     def get_single_time_channel(self):
         return self.single_time_channel
     
@@ -123,6 +127,12 @@ class Config:
     
     def get_resume_training_directory(self):
         return self.resume_training_directory
+    
+    def get_learning_rate(self):
+        return self.learning_rate
+    
+    def set_learning_rate(self, new_lr):
+        self.learning_rate = new_lr
 
 def tf_format_find_peaks(x):
 
@@ -304,6 +314,12 @@ def save_training_code(base_run_directory):
     save_to_directory = os.path.join(base_run_directory, "training code")
     if not os.path.exists(save_to_directory):
         os.makedirs(save_to_directory)
+    code_directory = os.path.dirname(TRAINING_CODE_DIRECTORY)
+    for file_name in os.listdir(code_directory):
+        if file_name.endswith('.py'):
+            full_file_name = os.path.join(code_directory, file_name)
+            if os.path.isfile(full_file_name):
+                shutil.copy(full_file_name, save_to_directory)
     for file_name in os.listdir(TRAINING_CODE_DIRECTORY):
         if file_name.endswith('.py'):
             full_file_name = os.path.join(TRAINING_CODE_DIRECTORY, file_name)
@@ -315,3 +331,9 @@ def save_training_code(base_run_directory):
             shutil.copy(full_file_name, save_to_directory)
     print(f"Copied training code to {save_to_directory}")
         
+def readfile(path):
+    with (h5py.File(path, "r") as f):
+        keys = list(f.keys())
+        for key in keys:
+            value = f[key]
+            print(f'key:{key}, value:{value}')
