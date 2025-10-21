@@ -127,6 +127,12 @@ class Config:
     
     def get_resume_training_directory(self):
         return self.resume_training_directory
+    
+    def get_learning_rate(self):
+        return self.learning_rate
+    
+    def set_learning_rate(self, new_lr):
+        self.learning_rate = new_lr
 
 def tf_format_find_peaks(x):
 

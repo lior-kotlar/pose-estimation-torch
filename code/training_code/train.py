@@ -312,6 +312,8 @@ def main():
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}", flush=True)
         # world_size = torch.cuda.device_count()
+        # current_learning_rate = general_configuration.get_learning_rate()
+        # general_configuration.set_learning_rate(current_learning_rate * world_size)
         use_gpu = True
     else:
         # world_size = 1
