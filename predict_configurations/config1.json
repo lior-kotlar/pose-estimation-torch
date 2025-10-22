@@ -9,8 +9,6 @@
     "sub config path": "",
     "2D to 3D config path": "/cs/labs/tsevi/lior.kotlar/pose-estimation/from 2D to 3D/2D_to_3D_config.json",
     "number of cameras": 4,
-    "number of time channels": 3,
-    "number of joints": 18,
     "body parts to predict": "WINGS_AND_BODY",
     "mask increase initial": 1,
     "mask increase reprojected": 1,

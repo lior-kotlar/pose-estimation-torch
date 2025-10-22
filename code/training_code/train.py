@@ -112,19 +112,28 @@ class Trainer:
 
     def _save_checkpoint(self, epoch, best=False):
 
-        ckp = {
-            "model": self.model.module.state_dict() if hasattr(self.model, "module") else self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.lr_scheduler.state_dict(),
-            "epoch": epoch,
-            "best_val_loss": self.best_val_loss,
-        }
+        if not best:
+            ckp = {
+                "model": self.model.module.state_dict() if hasattr(self.model, "module") else self.model.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.lr_scheduler.state_dict(),
+                "epoch": epoch,
+                "best_val_loss": self.best_val_loss,
+            }
 
-        save_directory = os.path.join(self.base_run_directory, 'weights')
-        file_name = f"best_model.pt" if best else f"model_epoch_{epoch + 1}.pt"
-        save_path = os.path.join(save_directory, file_name)
-        torch.save(ckp, save_path)
-        print(f'Epoch {epoch+1} - Training checkpoint was save to {save_path}', flush=True)
+            save_directory = os.path.join(self.base_run_directory, 'weights')
+            file_name = f"model_epoch_{epoch + 1}.pt"
+            save_path = os.path.join(save_directory, file_name)
+            torch.save(ckp, save_path)
+            print(f'Epoch {epoch+1} - Training checkpoint was save to {save_path}', flush=True)
+        else:
+            file_name = "best_model.pt"
+            torch.jit.save(self.model, os.path.join(self.base_run_directory, file_name))
+            print(f'best model so far was saved in epoch {epoch} with validation loss: {self.best_val_loss:.6f}', flush=True)
+            txt_file_path = os.path.join(self.base_run_directory, "best_model_info.txt")
+            with open(txt_file_path, 'w') as f:
+                f.write(f"Epoch: {epoch+1}\n")
+                f.write(f"Best Validation Loss: {self.best_val_loss:.6f}\n")
 
     def _load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)

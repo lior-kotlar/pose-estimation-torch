@@ -2,15 +2,17 @@ import itertools
 import cv2
 import h5py
 import numpy as np
+from utils import Predict_config
 
 
 class Triangulator:
-    def __init__(self, config):
-        self.config = config
-        self.calibration_data_path = self.config["calibration data path"]
-        print("Calibration data path:", self.calibration_data_path)
-        self.image_hight = self.config["IMAGE_HEIGHT"]
-        self.image_width = self.config["IMAGE_WIDTH"]
+    def __init__(
+            self,
+            predict_config: Predict_config
+            ):
+        self.calibration_data_path, \
+        self.image_height, \
+        self.image_width = predict_config.get_triangulator_data()
         self.rotation_matrix = self.load_rotation_matrix()
         self.camera_matrices = self.load_camera_matrices()
         self.inv_camera_matrices = self.load_inv_camera_matrices()
@@ -21,12 +23,6 @@ class Triangulator:
         self.num_cameras = len(self.camera_centers)
         self.all_couples = Triangulator.get_all_combinations(n=3)
         self.all_cameras_combinations = Triangulator.get_all_combinations(n=5)
-        # self.distortion = False
-        # try:
-        #     self.distortion_params = self.load_distortion_params()
-        #     self.distortion = True
-        # except:
-        #     print(f"no distortion parameters")
 
     def load_Ks(self):
         Ks = h5py.File(self.calibration_data_path, "r")["K_matrices"][:].T
@@ -34,13 +30,6 @@ class Triangulator:
             K = K / K[2, 2]
             Ks[i] = K
         return Ks
-
-    # def load_distortion_params(self):
-    #     distortion_params_full = np.zeros((4, 5))
-    #     distortion_params = h5py.File(self.calibration_data_path, "r")["distortion_params"][:].T
-    #     num_params_per_cam = distortion_params.shape[1]
-    #     distortion_params_full[:, :num_params_per_cam] = distortion_params
-    #     return distortion_params_full
     
     def load_Rs(self):
         return h5py.File(self.calibration_data_path, "r")["rotation_matrices"][:].T
@@ -132,7 +121,7 @@ class Triangulator:
                 # do undistort
                 # if self.distortion:
                 #     x, y = self.undistort_point(cam, x, y)
-                y = self.image_hight + 1 - y
+                y = self.image_height + 1 - y
                 if add_one:
                     point = [x, y, 1]
                 else:
@@ -278,7 +267,7 @@ class Triangulator:
                 for pnt in range(num_points):
                     x = cropzone[frame, cam, 1] + points_2D[frame, cam, pnt, 0]
                     y = cropzone[frame, cam, 0] + points_2D[frame, cam, pnt, 1]
-                    y = self.image_hight + 1 - y
+                    y = self.image_height + 1 - y
                     point = [x, y, 1]
                     points_2D_uncropped[frame, cam, pnt, :] = point
         return points_2D_uncropped
@@ -306,7 +295,7 @@ class Triangulator:
                     point_2D_hom = camera_mat @ point_rot_h
                     point_2D = point_2D_hom[:-1] / point_2D_hom[-1]
                     xp, yp = point_2D
-                    yp = self.image_hight + 1 - yp
+                    yp = self.image_height + 1 - yp
                     x = xp - x_crop
                     y = yp - y_crop
                     point_2D_cropped = np.array([x, y])

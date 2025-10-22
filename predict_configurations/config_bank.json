@@ -5,7 +5,7 @@
         "wings pose estimation model path second path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_18_POINTS_PER_WING_Oct 20_04/weights/best_model.pt",
         "model type": "WINGS_AND_BODY_SAME_MODEL",
         "model type second pass": "ALL_CAMS_ALL_POINTS",
-        "predict again 3D consistent": 0,
+        "predict again 3D consistency": 0,
         "use reprojected masks": 0
     },
 

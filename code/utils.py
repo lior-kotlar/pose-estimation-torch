@@ -138,16 +138,23 @@ class Predict_config:
     def __init__(self, config_path):
         with open(config_path) as CF:
             config = json.load(CF)
-            self.config = config
             self.movie_path = config['movie path']
             self.output_directory = config['output directory']
-            self.calibration_path = config['calibration path']
-            self.model_types = config['model types']
+            self.calibration_data_path = config['calibration path']
             self.wings_detector_path = config['wings detector path']
+            self.config_path_2D_to_3D = config['2D to 3D config path']
+            self.image_height = config['IMAGE HEIGHT']
+            self.image_width = config['IMAGE WIDTH']
+            self.num_cams = config['number of cameras']
+            self.mask_increase_initial = config['mask increase initial']
+            self.mask_increase_reprojected = config['mask increase reprojected']
+            self.is_video = bool(config['is video'])
             self.batch_size = config['batch size']
+
             config_bank_path = config['config bank path']
             specified_configs_path = config['specified configs path']
             self.model_config_list = self.load_configurations_from_bank(config_bank_path, specified_configs_path)
+            self.tuned_configration = False
 
     def load_configurations_from_bank(self, config_bank_path, specified_configs_path):
         with open(config_bank_path) as CBF:
@@ -169,7 +176,7 @@ class Predict_config:
         return self.output_directory
     
     def get_calibration_path(self):
-        return self.calibration_path
+        return self.calibration_data_path
     
     def get_model_type(self):
         return self.model_type
@@ -182,6 +189,65 @@ class Predict_config:
     
     def get_model_config_list(self):
         return self.model_config_list
+    
+    def tune_configuration(self, config_as_list):
+        self.wings_pose_estimation_model_path = config_as_list["wings pose estimation model path"]
+        self.wings_pose_estimation_model_path_second_pass = config_as_list["wings pose estimation model path second pass"]
+        self.model_type = config_as_list["model type"]
+        self.model_type_second_pass = config_as_list["model type second pass"]
+        self.predict_again_3D_consistency = config_as_list["predict again 3D consistency"]
+        self.use_reprojected_masks = bool(config_as_list["use reprojected masks"])
+        if not self.tuned_configration:
+            self.tuned_configration = True
+
+    def get_predictor_data(self):
+        if not self.tuned_configration:
+            raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
+        return \
+        self.movie_path, \
+        self.wings_detector_path, \
+        self.wings_pose_estimation_model_path, \
+        self.wings_pose_estimation_model_path_second_pass, \
+        self.config_path_2D_to_3D, \
+        self.output_directory, \
+        self.is_video, \
+        self.batch_size, \
+        self.num_cams, \
+        self.mask_increase_initial, \
+        self.mask_increase_reprojected
+
+    def get_triangulator_data(self):
+        if not self.tuned_configration:
+            raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
+        return self.calibration_data_path, \
+                self.image_height, \
+                self.image_width
+
+    def get_full_config_as_dict(self):
+        if not self.tuned_configration:
+            raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
+        return {
+            "movie path": self.movie_path,
+            "output directory": self.output_directory,
+            "calibration path": self.calibration_data_path,
+            "wings detector path": self.wings_detector_path,
+            "2D to 3D config path": self.config_path_2D_to_3D,
+            "IMAGE HEIGHT": self.image_height,
+            "IMAGE WIDTH": self.image_width,
+            "number of cameras": self.num_cams,
+            "mask increase initial": self.mask_increase_initial,
+            "mask increase reprojected": self.mask_increase_reprojected,
+            "is video": self.is_video,
+            "batch size": self.batch_size,
+            "wings pose estimation model path": self.wings_pose_estimation_model_path,
+            "wings pose estimation model path second pass": self.wings_pose_estimation_model_path_second_pass,
+            "model type": self.model_type,
+            "model type second pass": self.model_type_second_pass,
+            "predict again 3D consistency": self.predict_again_3D_consistency,
+            "use reprojected masks": self.use_reprojected_masks
+        }
+        
+    
 
 def tf_format_find_peaks(x):
 

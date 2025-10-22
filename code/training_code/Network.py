@@ -113,7 +113,7 @@ class Network:
 
     class simple_network(nn.Module):
 
-        def __init__(self, general_configuration, image_size, number_of_output_channels):
+        def __init__(self, general_configuration: Train_Config, image_size, number_of_output_channels):
             super(Network.simple_network, self).__init__()
             image_size = image_size
             number_of_output_channels = number_of_output_channels
@@ -152,18 +152,6 @@ class Network:
         #     model = self.all_4_cams()
         # elif self.model_type == ALL_CAMS_AND_3_GOOD_CAMS:
         #     model = self.all_3_cams()
-        # elif self.model_type == TWO_WINGS_TOGATHER:
-        #     model = self.two_wings_net()
-        # elif self.model_type == HEAD_TAIL_ALL_CAMS:
-        #     model = self.head_tail_all_cams()
-        # elif self.model_type == C2F_PER_WING:
-        #     model = self.C2F_per_wing()
-        # elif self.model_type == COARSE_PER_WING:
-        #     model = self.coarse_per_wing()
-        # elif self.model_type == MODEL_18_POINTS_PER_WING_VIT or self.model_type == ALL_POINTS_MODEL_VIT:
-        #     model = self.get_transformer()
-        # elif self.model_type == RESNET_18_POINTS_PER_WING:
-        #     model = self.resnet50_encoder_shallow_decoder()
         # else:
         #     model = self.simple_network()
 

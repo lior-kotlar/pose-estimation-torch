@@ -4,16 +4,21 @@ abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
 from utils import show_interest_points_with_index, readfile, Predict_config
-import training_code.Network as Network
 import torch
+from Predictor import Predictor
 
-class GeneralPredictor:
-    def __init__(self, config_path):
+
+
+class PredictingManager:
+    def __init__(self, config_path, device):
         self.config = Predict_config(config_path)
         self.model_config_list = self.config.get_model_config_list()
+        self.device = device
 
     def predict_movie(self):
-        pass
+        for model_config in self.model_config_list:
+            self.config.tune_configuration(model_config)
+            predictor = Predictor(self.config, self.device)
 
 def predict_sample_save(model, sample, save_directory, label=None):
     """
@@ -57,8 +62,15 @@ def predict_sample_save(model, sample, save_directory, label=None):
                                         )
 
 def main():
-
-    pass
+    config_path = sys.argv[1]
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("Using GPU for prediction")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU for prediction")
+    predictor = PredictingManager(config_path, device)
+    
     
     
 if __name__ == "__main__":

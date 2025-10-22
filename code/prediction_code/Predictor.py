@@ -27,8 +27,9 @@ from datetime import date
 import shutil
 from skimage.morphology import convex_hull_image
 from torchvision import transforms
-from utils import tf_format_find_peaks
+from utils import tf_format_find_peaks, Predict_config
 from constants import *
+import training_code.Network as Network
 # import predictions_2Dto3D
 import sys
 # from predictions_2Dto3D import From2Dto3D
@@ -37,14 +38,7 @@ import sys
 from SparseBox import SparseBox
 from Triangulator import Triangulator
 
-initial_gpus = tf.config.list_physical_devices('GPU')
-# Hide all GPUs from TensorFlow
-# tf.config.set_visible_devices([], 'GPU')
-# print("GPUs have been hidden.")
-print(f"Initially available GPUs: {initial_gpus}", flush=True)
-
 DETECT_WINGS_CPU = False
-
 
 WHICH_TO_FLIP = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1],
                           [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1]]).astype(bool)
@@ -54,7 +48,11 @@ RIGHT = 1
 
 
 class Predictor2D:
-    def __init__(self, configuration_path, load_box_from_sparse=False, is_masked=False):
+    def __init__(self,
+                 predict_config: Predict_config,
+                 device,
+                 load_box_from_sparse=False,
+                 is_masked=False):
         self.points_3D_smoothed = None
         self.points_3D = None
         self.saved_box_dir = None
@@ -68,34 +66,28 @@ class Predictor2D:
         self.points_3D_all = None
         self.conf_preds = None
         self.preds_2D = None
-        with open(configuration_path) as C:
-            config = json.load(C)
-            self.config = config
-            self.software = config['software']
-            self.triangulator = Triangulator(self.config)
-            self.box_path = config["box path"]
-            self.wings_pose_estimation_model_path = config["wings pose estimation model path"]
-            self.wings_pose_estimation_model_path_second_pass = config["wings pose estimation model path second path"]
-            self.head_tail_pose_estimation_model_path = config["head tail pose estimation model path"]
-            # self.out_path = config["out path"]
-            self.wings_detection_model_path = config["wings detection model path"]
-            self.model_type = config["model type"]
-            self.model_type_second_pass = config["model type second pass"]
-            self.is_video = bool(config["is video"])
-            self.batch_size = config["batch size"]
-            self.points_to_predict = config["body parts to predict"]
-            self.num_cams = config["number of cameras"]
-            self.num_times_channels = config["number of time channels"]
-            self.mask_increase_initial = config["mask increase initial"]
-            self.mask_increase_reprojected = config["mask increase reprojected"]
-            self.use_reprojected_masks = bool(config["use reprojected masks"])
-            self.predict_again_using_3D_consistent = config["predict again 3D consistent"]
-            self.base_output_path = config["base output path"]
-            self.json_2D_3D_path = config["2D to 3D config path"]
+        self.device = device
+
+        self.movie_path, \
+        self.wings_detector_model_path, \
+        self.wings_pose_estimation_model_path, \
+        self.wings_pose_estimation_model_second_pass_path, \
+        self.config_path_2D_to_3D, \
+        self.output_directory, \
+        self.is_video, \
+        self.batch_size, \
+        self.num_cams, \
+        self.mask_increase_initial, \
+        self.mask_increase_reprojected = predict_config.get_predictor_data()
+
+        self.config_as_dict = predict_config.get_full_config_as_dict()
+
+        self.software = 'pytorch'
+        self.triangulator = Triangulator(predict_config=predict_config)
         self.load_from_sparse = load_box_from_sparse
         if not load_box_from_sparse:
             print("creating sparse box object")
-            self.sparse_box = SparseBox(self.box_path, is_masked=is_masked)
+            self.sparse_box = SparseBox(self.movie_path, is_masked=is_masked)
             box = self.sparse_box.retrieve_dense_box()
             print("finish creating sparse box object")
         else:
@@ -113,19 +105,12 @@ class Predictor2D:
             self.wings_pose_estimation_model = \
                 Predictor2D.get_pose_estimation_model_tensorflow(self.wings_pose_estimation_model_path, return_model_peaks)
         else:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            try:
-                torch.zeros(4).cuda()
-            except:
-                print("No GPU found, doesnt use cuda")
-            if torch.cuda.is_available():
-                print("**************** CUDA is available. Using GPU. ****************", flush=True)
-            else:
-                print("**************** CUDA is not available. Using CPU. ****************", flush=True)
+            
             self.wings_pose_estimation_model = \
-                self.get_pose_estimation_model_pytorch(self.wings_pose_estimation_model_path)
+                self.load_pose_estimation_model(self.wings_pose_estimation_model_path)
             self.wings_pose_estimation_model = self.wings_pose_estimation_model.to(self.device)
             self.transform = transforms.Compose([transforms.ToTensor()])
+
         self.wings_detection_model = self.get_wings_detection_model()
         self.scores = np.zeros((self.num_frames, self.num_cams, 2))
         self.predict_method = self.choose_predict_method()
@@ -205,7 +190,7 @@ class Predictor2D:
             self.predict_method = self.choose_predict_method()
             return_model_peaks = False if self.model_type == ALL_CAMS_PER_WING or self.model_type == ALL_CAMS_ALL_POINTS else True
             self.wings_pose_estimation_model = \
-                self.get_pose_estimation_model_tensorflow(self.wings_pose_estimation_model_path_second_pass,
+                self.get_pose_estimation_model_tensorflow(self.wings_pose_estimation_model_second_pass_path,
                                                return_model_peaks=return_model_peaks)
             if self.use_reprojected_masks:
                 # points_3D = self.get_points_3D(alpha=None)
@@ -243,7 +228,7 @@ class Predictor2D:
     def save_base_box(self):
         print("saving box")
         # save the sparse box, neto wings sparse, body masks sparse, body_sizes, wings sizes
-        mov_dir_name = os.path.dirname(self.box_path)
+        mov_dir_name = os.path.dirname(self.movie_path)
         self.saved_box_dir = os.path.join(mov_dir_name, "saved_box_dir")
         if os.path.exists(self.saved_box_dir):
             shutil.rmtree(self.saved_box_dir)
@@ -270,7 +255,7 @@ class Predictor2D:
         np.save(wings_size_path, self.wings_size)
 
     def load_preprocessed_box(self):
-        mov_dir_name = os.path.dirname(self.box_path)
+        mov_dir_name = os.path.dirname(self.movie_path)
         self.saved_box_dir = os.path.join(mov_dir_name, "saved_box_dir")
 
         # load box
@@ -432,7 +417,7 @@ class Predictor2D:
     def clean_images(self):
         for frame in range(self.num_frames):
             for cam in range(self.num_cams):
-                for channel in range(self.num_times_channels):
+                for channel in range(self.num_time_channels):
                     image = self.sparse_box.get_frame_camera_channel_dense(frame, cam, channel)
                     # image = self.box[frame, cam, :, :, channel]
                     binary = np.where(image >= 0.1, 1, 0)
@@ -518,15 +503,15 @@ class Predictor2D:
                     mask = binary_dilation(mask, iterations=2)
                     orig_mask = self.sparse_box.get_frame_camera_channel_dense(frame,
                                                                                cam,
-                                                                               channel_idx=self.num_times_channels + wing)
+                                                                               channel_idx=self.num_time_channels + wing)
                     if deside_between_new_and_orig:
                         if np.count_nonzero(np.logical_and(mask, fly)) > np.count_nonzero(np.logical_and(orig_mask, fly)):
-                            self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_times_channels + wing, mask)
+                            self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_time_channels + wing, mask)
                         else:
-                            self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_times_channels + wing,
+                            self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_time_channels + wing,
                                                                            orig_mask)
                     else:
-                        self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_times_channels + wing, mask)
+                        self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_time_channels + wing, mask)
 
     def deside_if_switch(self, chosen_camera, frame):
         cur_left_points = self.preds_2D[frame, chosen_camera, self.left_inds, :]
@@ -644,13 +629,13 @@ class Predictor2D:
                 self.fix_masks()
 
     def get_run_name(self):
-        box_path_file = os.path.basename(self.box_path)
+        box_path_file = os.path.basename(self.movie_path)
         name, ext = os.path.splitext(box_path_file)
         run_name = f"{name}_{self.model_type}_{date.today().strftime('%b %d')}"
         return run_name
 
     def create_2D_3D_config(self):
-        json_path = self.json_2D_3D_path
+        json_path = self.config_path_2D_to_3D
         with open(json_path, "r") as jsonFile:
             data = json.load(jsonFile)
 
@@ -666,7 +651,7 @@ class Predictor2D:
 
     def create_run_folders(self):
         """ Creates subfolders necessary for outputs of vision. """
-        run_path = os.path.join(self.base_output_path, self.run_name)
+        run_path = os.path.join(self.output_directory, self.run_name)
 
         initial_run_path = run_path
         i = 1
@@ -690,14 +675,14 @@ class Predictor2D:
             name = "predicted_points_and_box.h5"
         self.out_path_h5 = os.path.join(self.run_path, name)
         with open(f"{self.run_path}/configuration.json", 'w') as file:
-            json.dump(self.config, file, indent=4)
+            json.dump(self.config_as_dict, file, indent=4)
         with h5py.File(self.out_path_h5, "w") as f:
             f.attrs["num_frames"] = self.sparse_box.shape[0]
             f.attrs["img_size"] = self.im_size
-            f.attrs["box_path"] = self.box_path
+            f.attrs["box_path"] = self.movie_path
             f.attrs["box_dset"] = "/box"
             f.attrs["pose_estimation_model_path"] = self.wings_pose_estimation_model_path
-            f.attrs["wings_detection_model_path"] = self.wings_detection_model_path
+            f.attrs["wings_detection_model_path"] = self.wings_detector_model_path
 
             positions = self.predicted_points[..., :2]
             confidence_val = self.predicted_points[..., 2]
@@ -711,12 +696,6 @@ class Predictor2D:
                                        compression_opts=1)
             ds_conf.attrs["description"] = "confidence map value in [0, 1.0] at peak"
             ds_conf.attrs["dims"] = "(frame, cam, joint)"
-            # if self.num_frames < 2000:
-            #     box = self.box_sparse.retrieve_dense_box()
-            #     box[np.abs(box) < 0.001] = 0
-            #     ds_conf = f.create_dataset("box", data=box, compression="gzip", compression_opts=1)
-            #     ds_conf.attrs["description"] = "The predicted box and the wings1 if the wings1 were detected"
-            #     ds_conf.attrs["dims"] = f"{box.shape}"
 
             if self.points_to_predict == WINGS or self.points_to_predict == WINGS_AND_BODY:
                 ds_conf = f.create_dataset("scores", data=self.scores, compression="gzip", compression_opts=1)
@@ -766,9 +745,9 @@ class Predictor2D:
 
     def choose_predict_method(self):
         if self.points_to_predict == WINGS:
-            return self.predict_wings
+            return self.predict_only_wings_per_cam
         elif self.points_to_predict == BODY:
-            return self.predict_body
+            return self.predict_only_body_per_cam
         elif self.points_to_predict == WINGS_AND_BODY:
             if self.model_type == WINGS_AND_BODY_SAME_MODEL:
                 return self.predict_wings_and_body_same_model
@@ -778,7 +757,7 @@ class Predictor2D:
                 return self.predict_all_cams_per_wing
             if self.model_type == ALL_CAMS_ALL_POINTS:
                 return self.predict_all_cams_all_points
-            return self.predict_wings_and_body
+            return self.predict_wings_and_body_separately_per_cam
 
     def predict_all_cams_per_wing(self, n=100):
         print(f"started predicting projected masks, split box into {n} parts", flush=True)
@@ -794,7 +773,7 @@ class Predictor2D:
                 for cam_idx in range(self.num_cams):
                     input_wing_cam = self.sparse_box.get_camera_dense(camera_idx=cam_idx,
                                                                       channels=[0, 1, 2,
-                                                                                self.num_times_channels + wing],
+                                                                                self.num_time_channels + wing],
                                                                       frames=splited_frames[i])
                     input_wing_cams.append(input_wing_cam)
                 input_wing = np.concatenate(input_wing_cams, axis=-1)
@@ -822,6 +801,9 @@ class Predictor2D:
         return all_wing_and_body_points
 
     def predict_all_cams_all_points(self,  n=100):
+        '''
+        predicts all points (both wings) using all cameras at once
+        '''
         print(f"started predicting projected masks, split box into {n} parts", flush=True)
         all_points = []
         n = max(int(self.num_frames // 50), 1)
@@ -838,7 +820,8 @@ class Predictor2D:
                 input_wing_cams.append(input_wing_cam)
             input_part = np.concatenate(input_wing_cams, axis=-1)
             output = self.wings_pose_estimation_model(input_part)
-            peaks = self.tf_find_peaks(output).numpy()
+            output = output.numpy()
+            peaks = tf_format_find_peaks(output)
             # peaks = peaks[:, :2, :]
             peaks = np.transpose(peaks, [0, 2, 1])
             peaks_per_camera = np.split(peaks, self.num_cams, axis=1)
@@ -861,7 +844,7 @@ class Predictor2D:
         return wings_and_body_pnts
 
     def predict_wings_and_body_same_model(self):
-        all_pnts = self.predict_wings()
+        all_pnts = self.predict_only_wings_per_cam()
         tail_points = all_pnts[:, :, [8, 18], :]
         tail_points = np.expand_dims(np.mean(tail_points, axis=2), axis=2)
         head_points = all_pnts[:, :, [9, 19], :]
@@ -870,13 +853,13 @@ class Predictor2D:
         wings_and_body_pnts = np.concatenate((wings_points, tail_points, head_points), axis=2)
         return wings_and_body_pnts
 
-    def predict_wings_and_body(self):
-        wings_points = self.predict_wings()
-        body_points = self.predict_body()
+    def predict_wings_and_body_separately_per_cam(self):
+        wings_points = self.predict_only_wings_per_cam()
+        body_points = self.predict_only_body_per_cam()
         wings_and_body_pnts = np.concatenate((wings_points, body_points), axis=2)
         return wings_and_body_pnts
 
-    def predict_wings(self, n=100):
+    def predict_only_wings_per_cam(self, n=100):
         Ypks = []
         n = max(int(self.num_frames // 50), 1)
         all_frames = np.arange(self.num_frames)
@@ -889,7 +872,7 @@ class Predictor2D:
                 # split for memory limit
                 Ypk = []
                 for i in range(n):
-                    input_i = self.sparse_box.get_camera_dense(cam, channels=[0, 1, 2, self.num_times_channels + wing],
+                    input_i = self.sparse_box.get_camera_dense(cam, channels=[0, 1, 2, self.num_time_channels + wing],
                                                                frames=splited_frames[i])
                     Ypk_i = self.predict_input(input_i)
                     Ypk.append(Ypk_i)
@@ -930,17 +913,6 @@ class Predictor2D:
         # output_points = np.reshape(output_points, [-1, 2])
         return output_points
 
-    def predict_body(self):
-        Ypks = []
-        for cam in range(self.num_cams):
-            input = self.box[:, cam, :, :, :self.num_times_channels]
-            Ypk_cam, _, _, _ = self.predict_Ypk(input, self.batch_size, self.head_tail_pose_estimation_model)
-            Ypk_cam = np.expand_dims(Ypk_cam, axis=1)
-            Ypks.append(Ypk_cam)
-        Ypk_all = np.concatenate(Ypks, axis=1)
-        Ypk_all = np.transpose(Ypk_all, [0, 1, 3, 2])
-        return Ypk_all
-
     def add_masks(self, n=100):
         """ Add train_masks to the dataset using yolov8 segmentation model """
         all_frames = np.arange(self.num_frames)
@@ -980,12 +952,12 @@ class Predictor2D:
     def adjust_masks_size(self):
         for frame in range(self.num_frames):
             for cam in range(self.num_cams):
-                mask_1 = self.sparse_box.get_frame_camera_channel_dense(frame, cam, self.num_times_channels)
-                mask_2 = self.sparse_box.get_frame_camera_channel_dense(frame, cam, self.num_times_channels + 1)
+                mask_1 = self.sparse_box.get_frame_camera_channel_dense(frame, cam, self.num_time_channels)
+                mask_2 = self.sparse_box.get_frame_camera_channel_dense(frame, cam, self.num_time_channels + 1)
                 mask_1 = self.adjust_mask(mask_1, self.mask_increase_initial)
                 mask_2 = self.adjust_mask(mask_2, self.mask_increase_initial)
-                self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_times_channels, mask_1)
-                self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_times_channels + 1, mask_2)
+                self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_time_channels, mask_1)
+                self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_time_channels + 1, mask_2)
 
     def fix_masks(self):  # todo find out if there are even train_masks to be fixed
         """
@@ -1001,7 +973,7 @@ class Predictor2D:
                 for mask_num in range(2):
                     # mask = self.box[frame, cam, :, :, self.num_times_channels + mask_num]
                     mask = self.sparse_box.get_frame_camera_channel_dense(frame, cam,
-                                                                          self.num_times_channels + mask_num)
+                                                                          self.num_time_channels + mask_num)
                     if np.all(mask == 0):  # check if all 0:
                         problematic_masks.append((frame, cam, mask_num))
                         # find previous matching mask
@@ -1009,14 +981,14 @@ class Predictor2D:
                         next_mask = np.zeros(mask.shape)
                         for prev_frame in range(frame - 1, max(0, frame - search_range - 1), -1):
                             prev_mask_i = self.sparse_box.get_frame_camera_channel_dense(prev_frame, cam,
-                                                                                         self.num_times_channels + mask_num)
+                                                                                         self.num_time_channels + mask_num)
                             if not np.all(prev_mask_i == 0):  # there is a good mask
                                 prev_mask = prev_mask_i
                                 break
                         # find next matching mask
                         for next_frame in range(frame + 1, min(self.num_frames, frame + search_range)):
                             next_mask_i = self.sparse_box.get_frame_camera_channel_dense(next_frame, cam,
-                                                                                         self.num_times_channels + mask_num)
+                                                                                         self.num_time_channels + mask_num)
                             if not np.all(next_mask_i == 0):  # there is a good mask
                                 next_mask = next_mask_i
                                 break
@@ -1033,14 +1005,14 @@ class Predictor2D:
                             new_mask = prev_mask if sz_prev_mask > sz_next_mask else next_mask
 
                         # replace empty mask with new mask
-                        self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_times_channels + mask_num,
+                        self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_time_channels + mask_num,
                                                                        new_mask)
 
     def get_cropzone(self):
         try:
-            cropzone = h5py.File(self.box_path, "r")["/cropzone"][:]
+            cropzone = h5py.File(self.movie_path, "r")["/cropzone"][:]
         except:
-            cropzone = h5py.File(self.box_path, "r")["/cropZone"][:]
+            cropzone = h5py.File(self.movie_path, "r")["/cropZone"][:]
         return cropzone
 
     def set_body_masks(self, opening_rad=6):
@@ -1096,10 +1068,10 @@ class Predictor2D:
     def get_wings_detection_model(self):
         """ load a pretrained YOLOv8 segmentation model"""
         if self.num_pass == 0:
-            model = YOLO(self.wings_detection_model_path)
+            model = YOLO(self.wings_detector_model_path)
             model.fuse()
         elif self.num_pass == 1:
-            model = YOLO(self.wings_pose_estimation_model_path_second_pass)
+            model = YOLO(self.wings_pose_estimation_model_second_pass_path)
             model.fuse()
         try:
             return model.cpu()
@@ -1124,7 +1096,7 @@ class Predictor2D:
         print("Loaded model: %d layers, %d params" % (len(model.layers), model.count_params()))
         return model
 
-    def get_pose_estimation_model_pytorch(self, pose_estimation_model_path):
+    def load_pose_estimation_model(self, pose_estimation_model_path):
         model = torch.jit.load(pose_estimation_model_path, map_location=torch.device(self.device))
         model.eval()
         return model
@@ -1144,39 +1116,39 @@ class Predictor2D:
         else:
             return keras.Model(model.input, peak_layer)
 
-    # @staticmethod
-    # def tf_find_peaks(x):
-    #     """ Finds the maximum value in each channel and returns the location and value.
-    #     Args:
-    #         x: rank-4 tensor (samples, height, width, channels)
+    @staticmethod
+    def tf_find_peaks(x):
+        """ Finds the maximum value in each channel and returns the location and value.
+        Args:
+            x: rank-4 tensor (samples, height, width, channels)
 
-    #     Returns:
-    #         peaks: rank-3 tensor (samples, [x, y, val], channels)
-    #     """
+        Returns:
+            peaks: rank-3 tensor (samples, [x, y, val], channels)
+        """
 
-    #     # Store input shape
-    #     in_shape = tf.shape(x)
+        # Store input shape
+        in_shape = tf.shape(x)
 
-    #     # Flatten height/width dims
-    #     flattened = tf.reshape(x, [in_shape[0], -1, in_shape[-1]])
+        # Flatten height/width dims
+        flattened = tf.reshape(x, [in_shape[0], -1, in_shape[-1]])
 
-    #     # Find peaks in linear indices
-    #     idx = tf.argmax(flattened, axis=1)
+        # Find peaks in linear indices
+        idx = tf.argmax(flattened, axis=1)
 
-    #     # Convert linear indices to subscripts
-    #     rows = tf.math.floordiv(tf.cast(idx, tf.int32), in_shape[1])
-    #     cols = tf.math.floormod(tf.cast(idx, tf.int32), in_shape[1])
+        # Convert linear indices to subscripts
+        rows = tf.math.floordiv(tf.cast(idx, tf.int32), in_shape[1])
+        cols = tf.math.floormod(tf.cast(idx, tf.int32), in_shape[1])
 
-    #     # Dumb way to get actual values without indexing
-    #     vals = tf.math.reduce_max(flattened, axis=1)
+        # Dumb way to get actual values without indexing
+        vals = tf.math.reduce_max(flattened, axis=1)
 
-    #     # Return N x 3 x C tensor
-    #     pred = tf.stack([
-    #         tf.cast(cols, tf.float32),
-    #         tf.cast(rows, tf.float32),
-    #         vals],
-    #         axis=1)
-    #     return pred
+        # Return N x 3 x C tensor
+        pred = tf.stack([
+            tf.cast(cols, tf.float32),
+            tf.cast(rows, tf.float32),
+            vals],
+            axis=1)
+        return pred
 
     @staticmethod
     def predict_Ypk(X, batch_size, model_peaks, save_confmaps=False):
