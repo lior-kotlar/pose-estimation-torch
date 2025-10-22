@@ -755,9 +755,8 @@ class Predictor2D:
                 return self.predict_all_points
             if self.model_type == ALL_CAMS_PER_WING:
                 return self.predict_all_cams_per_wing
-            if self.model_type == ALL_CAMS_ALL_POINTS:
+            elif self.model_type == ALL_CAMS_ALL_POINTS:
                 return self.predict_all_cams_all_points
-            return self.predict_wings_and_body_separately_per_cam
 
     def predict_all_cams_per_wing(self, n=100):
         print(f"started predicting projected masks, split box into {n} parts", flush=True)
@@ -831,6 +830,9 @@ class Predictor2D:
         return all_wing_and_body_points
 
     def predict_all_points(self):
+        '''
+        predicts all points (both wings) only one camera at a time
+        '''
         all_points = []
         frames = np.arange(0, self.num_frames)
         for cam in range(self.num_cams):
@@ -851,12 +853,6 @@ class Predictor2D:
         head_points = np.expand_dims(np.mean(head_points, axis=2), axis=2)
         wings_points = all_pnts[:, :, [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17], :]
         wings_and_body_pnts = np.concatenate((wings_points, tail_points, head_points), axis=2)
-        return wings_and_body_pnts
-
-    def predict_wings_and_body_separately_per_cam(self):
-        wings_points = self.predict_only_wings_per_cam()
-        body_points = self.predict_only_body_per_cam()
-        wings_and_body_pnts = np.concatenate((wings_points, body_points), axis=2)
         return wings_and_body_pnts
 
     def predict_only_wings_per_cam(self, n=100):
@@ -1152,7 +1148,10 @@ class Predictor2D:
 
     @staticmethod
     def predict_Ypk(X, batch_size, model_peaks, save_confmaps=False):
-        """ returns a predicted dataset"""
+        """ 
+        returns a predicted dataset
+        expects a model with a find peaks layer. that's a problem with pytorch models.
+        """
         confmaps, confmaps_min, confmaps_max = None, None, None
         if save_confmaps:
             Ypk, confmaps = model_peaks.predict(X, batch_size=batch_size)
