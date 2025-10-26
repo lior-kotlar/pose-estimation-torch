@@ -105,10 +105,10 @@ class Preprocessor:
             return self.do_preprocess_HEAD_TAIL_ALL_CAMS
         elif self.model_type == HEAD_TAIL_PER_CAM or self.model_type == HEAD_TAIL_PER_CAM_POINTS_LOSS:
             return self.do_preprocess_HEAD_TAIL_PER_CAM
-        elif (self.model_type == MODEL_18_POINTS_PER_WING or
-              self.model_type == MODEL_18_POINTS_PICK_3_BEST_CAMERAS or
-              self.model_type == MODEL_18_POINTS_3_CAMERAS_ONLY):
-            return self.do_preprocess_18_pnts
+        elif (self.model_type == MODEL_PER_CAM_PER_WING or
+              self.model_type == MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS or
+              self.model_type == MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY):
+            return self.preprocess_per_camera_per_wing
         
         # if self.model_type == ALL_POINTS_MODEL or self.model_type == HEAD_TAIL or self.model_type == TWO_WINGS_TOGATHER or self.model_type == ALL_POINTS_MODEL_VIT:
         #     return self.reshape_to_cnn_input
@@ -172,7 +172,7 @@ class Preprocessor:
                                         self.confmaps[:, 3, ...]), axis=0)
         self.num_samples = self.box.shape[0]
 
-    def do_preprocess_18_pnts(self):
+    def preprocess_per_camera_per_wing(self):
         head_tail_confmaps = self.confmaps[..., -2:]
         num_of_frames = head_tail_confmaps.shape[0]
         wings_confmaps = self.confmaps[..., :-2]
@@ -189,9 +189,9 @@ class Preprocessor:
         wings_sizes_right = self.wings_sizes[..., 1]
         wings_sizes_all = np.concatenate((wings_sizes_left, wings_sizes_right), axis=0)
 
-        if self.model_type == MODEL_18_POINTS_PICK_3_BEST_CAMERAS:
+        if self.model_type == MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS:
             self.box, self.confmaps, _, _, _ = self.take_n_good_cameras(self.box, self.confmaps, wings_sizes_all, 3)
-        elif self.model_type == MODEL_18_POINTS_3_CAMERAS_ONLY and self.box.shape[1] == 4:
+        elif self.model_type == MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY and self.box.shape[1] == 4:
             self.box, self.confmaps, _, _, _ = self.remove_bottom_camera(self.box, self.confmaps)
         self.box = np.reshape(self.box, shape=[self.box.shape[0] * self.box.shape[1],
                                                   self.box.shape[2], self.box.shape[3],
@@ -384,7 +384,7 @@ class Preprocessor:
                     wings_size[frame, cam, wing_num] = np.count_nonzero(neto_wing)
         return wings_size
     
-    def take_n_good_cameras(box, confmaps, all_wings_sizes, n, wing_size_rank=3):
+    def take_n_good_cameras(self, box, confmaps, all_wings_sizes, n, wing_size_rank=3):
         num_frames = box.shape[0]
         num_cams = box.shape[1]
         new_num_cams = n

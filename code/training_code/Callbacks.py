@@ -1,5 +1,5 @@
 import torch
-from utils import find_peaks
+from utils import torch_find_peaks
 import matplotlib.pyplot as plt
 import os
 import sys
@@ -108,8 +108,8 @@ class ModelCallbacks:
                 preds = self.model(x_val)
 
             preds = preds.cpu().numpy()
-            pred_peaks = find_peaks(preds)[:, :2, :]  # (B, 2, C)
-            gt_peaks   = find_peaks(self.confmaps)[:, :2, :]  # (B, 2, C)
+            pred_peaks = torch_find_peaks(preds)[:, :2, :]  # (B, 2, C)
+            gt_peaks   = torch_find_peaks(self.confmaps)[:, :2, :]  # (B, 2, C)
 
             # Transpose to (B, C, 2)
             pred_peaks = np.transpose(pred_peaks, (0, 2, 1))
@@ -174,10 +174,10 @@ class ModelCallbacks:
 
             # ---- Find peaks ----
             preds = preds.cpu().numpy()
-            pred_peaks = find_peaks(preds)[:, :2, :]  # shape: (B, 2, C)
+            pred_peaks = torch_find_peaks(preds)[:, :2, :]  # shape: (B, 2, C)
             pred_peaks = np.transpose(pred_peaks, (0, 2, 1))  # (B, C, 2)
 
-            gt_peaks = find_peaks(self.confmaps)[:, :2, :]
+            gt_peaks = torch_find_peaks(self.confmaps)[:, :2, :]
             gt_peaks = np.transpose(gt_peaks, (0, 2, 1))  # (B, C, 2)
 
             # ---- L2 distances (using numpy) ----

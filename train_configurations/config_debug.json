@@ -29,7 +29,7 @@
 
     "// preprocess parameters //": 0,
     "rank wing size": 2,
-    "model type": "MODEL_18_POINTS_PER_WING",
+    "model type": "MODEL_PER_CAM_PER_WING",
     "test path": "-",
     "data path": "/cs/labs/tsevi/lior.kotlar/pose-estimation/training_datasets/random_trainset_201_frames_18_joints.h5",
     "mix with test": 0,

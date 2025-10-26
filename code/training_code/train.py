@@ -71,6 +71,7 @@ class Trainer:
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
         self.model.to(self.device)
+        self.model_input_shape = (1, self.number_of_input_channels, self.img_size[1], self.img_size[2])
 
         self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
         self.optimizer = optimizer_from_string[general_configuration.optimizer_as_string](
@@ -110,8 +111,23 @@ class Trainer:
                                         )
         self.general_configuration = general_configuration
 
-    def _save_checkpoint(self, epoch, best=False):
+    def save_model_as_scripted(self):
+        file_name = "best_model.pt"
+        file_path = os.path.join(self.base_run_directory, file_name)
+        self.model.eval()
+        try:
+            device = next(self.model.parameters()).device
+            dummy_input = torch.randn(self.model_input_shape).to(device)
+            scripted_model = torch.jit.trace(self.model, dummy_input)
+            torch.jit.save(scripted_model, file_path)
+            print(f'Model successfully saved as scripted model to {file_path}', flush=True)
+        except Exception as e:
+            print(f'Error saving model as scripted: {e}', flush=True)
+        finally:
+            self.model.train()
 
+
+    def _save_checkpoint(self, epoch, best=False):
         if not best:
             ckp = {
                 "model": self.model.module.state_dict() if hasattr(self.model, "module") else self.model.state_dict(),
@@ -122,14 +138,12 @@ class Trainer:
             }
 
             save_directory = os.path.join(self.base_run_directory, 'weights')
-            file_name = f"model_epoch_{epoch + 1}.pt"
+            file_name = f"model_epoch_{epoch + 1}.pth"
             save_path = os.path.join(save_directory, file_name)
             torch.save(ckp, save_path)
             print(f'Epoch {epoch+1} - Training checkpoint was save to {save_path}', flush=True)
         else:
-            file_name = "best_model.pt"
-            torch.jit.save(self.model, os.path.join(self.base_run_directory, file_name))
-            print(f'best model so far was saved in epoch {epoch} with validation loss: {self.best_val_loss:.6f}', flush=True)
+            self.save_model_as_scripted()
             txt_file_path = os.path.join(self.base_run_directory, "best_model_info.txt")
             with open(txt_file_path, 'w') as f:
                 f.write(f"Epoch: {epoch+1}\n")
@@ -272,7 +286,7 @@ def main():
 
     if not base_output_directory:
         run_name = f"{general_configuration.model_type}_{date.today().strftime('%b %d')}"
-        base_output_directory = create_run_folders(
+        base_output_directory = create_train_run_folders(
             base_output_directory=general_configuration.get_base_output_directory(),
             run_name=run_name,
             original_config_file=general_configuration.get_config_file())
