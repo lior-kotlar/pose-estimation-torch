@@ -1,5 +1,5 @@
 {
-    "movie path": "/path/to/input/movie.mp4",
+    "data directory": "/path/to/input/movie.mp4",
     "output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_output/debug_outputs",
     "wings detection model path" : "/cs/labs/tsevi/lior.kotlar/pose-estimation/utils/wings segmentation models/yolo_weights_6_1_24.pt",
     "calibration path": "/path/to/calibration/file.json",
@@ -14,8 +14,8 @@
     "mask increase reprojected": 1,
     "is video": 1,
     "batch size": 8,
-    "IMAGE_HEIGHT": 800,
-    "IMAGE_WIDTH": 1280,
+    "IMAGE HEIGHT": 800,
+    "IMAGE WIDTH": 1280,
     "align right left": 0
 
 }

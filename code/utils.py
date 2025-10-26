@@ -10,6 +10,8 @@ from torch.optim import Adam, SGD, RMSprop
 import h5py
 
 TRAINING_CODE_DIRECTORY = "code/training_code"
+PREDICTION_CODE_DIRECTORY = "code/prediction_code"
+PREDICTION_CONFIGURATIONS_DIRECTORY = "predict_configurations"
 SBATCH_FILES_DIRECTORY = "sbatch_files"
 
 loss_from_string = {
@@ -138,7 +140,7 @@ class Predict_config:
     def __init__(self, config_path):
         with open(config_path) as CF:
             config = json.load(CF)
-            self.movie_path = config['movie path']
+            self.input_data_directory = config['data directory']
             self.output_directory = config['output directory']
             self.calibration_data_path = config['calibration path']
             self.wings_detector_path = config['wings detector path']
@@ -169,8 +171,8 @@ class Predict_config:
                 raise ValueError(f"Config name {config_name} not found in config bank.")
         return model_config_list
 
-    def get_movie_path(self):
-        return self.movie_path
+    def get_input_data_directory(self):
+        return self.input_data_directory
     
     def get_output_directory(self):
         return self.output_directory
@@ -204,7 +206,7 @@ class Predict_config:
         if not self.tuned_configration:
             raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
         return \
-        self.movie_path, \
+        self.input_data_directory, \
         self.wings_detector_path, \
         self.wings_pose_estimation_model_path, \
         self.wings_pose_estimation_model_path_second_pass, \
@@ -227,7 +229,7 @@ class Predict_config:
         if not self.tuned_configration:
             raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
         return {
-            "movie path": self.movie_path,
+            "movie path": self.input_data_directory,
             "output directory": self.output_directory,
             "calibration path": self.calibration_data_path,
             "wings detector path": self.wings_detector_path,
@@ -246,11 +248,18 @@ class Predict_config:
             "predict again 3D consistency": self.predict_again_3D_consistency,
             "use reprojected masks": self.use_reprojected_masks
         }
-        
-    
 
 def tf_format_find_peaks(x):
-
+        '''
+        find peaks in confidence maps.
+        Args:
+            x: np.array of shape [batch, height, width, channels]
+        Returns:
+            pred: np.array of shape [batch, 3, channels], for each channel:
+                  [0,:] = x-coords (cols),
+                  [1,:] = y-coords (rows),
+                  [2,:] = peak values.
+        '''
         b, h, w, c = x.shape
 
         flattened = x.reshape(b, h * w, c)
@@ -269,7 +278,7 @@ def tf_format_find_peaks(x):
 
         return pred
 
-def find_peaks(x):
+def torch_find_peaks(x):
     """
     Find peak locations in confidence maps.
 
@@ -350,7 +359,7 @@ def show_interest_points_with_index(sample, label, save_directory, filename="int
     label_batch = label[None]
 
     # Find peaks -> shape [B,3,C]
-    peaks = find_peaks(label_batch)  # (x, y, val)
+    peaks = torch_find_peaks(label_batch)  # (x, y, val)
     coords = peaks[:, :2, :].transpose(0, 2, 1)[0]  # shape (num_points, 2)
 
     _, H, W = sample.shape
@@ -397,7 +406,7 @@ def test_transforms(sample, label, save_directory, transforms):
                filename=f"{transform_name}_interest_points_index.png")
           
 
-def create_run_folders(base_output_directory, run_name, original_config_file):
+def create_train_run_folders(base_output_directory, run_name, original_config_file):
     """ Creates folders necessary for outputs of vision. """
     run_path = os.path.join(base_output_directory, run_name)
     initial_run_path = run_path

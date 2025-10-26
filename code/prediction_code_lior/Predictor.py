@@ -8,7 +8,6 @@ import h5py
 import numpy as np
 import os
 from multiprocessing import Pool, cpu_count
-# from tensorflow import keras
 from scipy.interpolate import make_smoothing_spline
 from skimage import util, measure
 from scipy.spatial.distance import cdist
@@ -16,10 +15,10 @@ import torch
 from itertools import combinations
 import math
 from scipy.io import loadmat
+
 # imports of the wings1 detection
 from time import time
 from ultralytics import YOLO
-# import open3d as o3d
 import scipy
 from scipy.signal import medfilt
 from scipy.ndimage import binary_dilation, binary_closing, center_of_mass, shift, gaussian_filter, binary_opening
@@ -27,7 +26,7 @@ from datetime import date
 import shutil
 from skimage.morphology import convex_hull_image
 from torchvision import transforms
-from utils import tf_format_find_peaks, Predict_config
+from utils import tf_format_find_peaks, torch_find_peaks, Predict_config
 from constants import *
 import training_code.Network as Network
 # import predictions_2Dto3D
@@ -67,6 +66,7 @@ class Predictor2D:
         self.conf_preds = None
         self.preds_2D = None
         self.device = device
+        self.points_to_predict = WINGS_AND_BODY
 
         self.movie_path, \
         self.wings_detector_model_path, \
@@ -105,7 +105,6 @@ class Predictor2D:
             self.wings_pose_estimation_model = \
                 Predictor2D.get_pose_estimation_model_tensorflow(self.wings_pose_estimation_model_path, return_model_peaks)
         else:
-            
             self.wings_pose_estimation_model = \
                 self.load_pose_estimation_model(self.wings_pose_estimation_model_path)
             self.wings_pose_estimation_model = self.wings_pose_estimation_model.to(self.device)
@@ -745,7 +744,7 @@ class Predictor2D:
 
     def choose_predict_method(self):
         if self.points_to_predict == WINGS:
-            return self.predict_only_wings_per_cam
+            return self.predict_per_wing_per_cam
         elif self.points_to_predict == BODY:
             return self.predict_only_body_per_cam
         elif self.points_to_predict == WINGS_AND_BODY:
@@ -831,7 +830,8 @@ class Predictor2D:
 
     def predict_all_points(self):
         '''
-        predicts all points (both wings) only one camera at a time
+        predicts all points (both wings) only one camera at a time.
+        only works for tensorflow models with peaks finding layer
         '''
         all_points = []
         frames = np.arange(0, self.num_frames)
@@ -846,7 +846,10 @@ class Predictor2D:
         return wings_and_body_pnts
 
     def predict_wings_and_body_same_model(self):
-        all_pnts = self.predict_only_wings_per_cam()
+        '''
+        predicts all points and separates them into wings and body points, and concatenates them
+        '''
+        all_pnts = self.predict_per_wing_per_cam()
         tail_points = all_pnts[:, :, [8, 18], :]
         tail_points = np.expand_dims(np.mean(tail_points, axis=2), axis=2)
         head_points = all_pnts[:, :, [9, 19], :]
@@ -855,7 +858,10 @@ class Predictor2D:
         wings_and_body_pnts = np.concatenate((wings_points, tail_points, head_points), axis=2)
         return wings_and_body_pnts
 
-    def predict_only_wings_per_cam(self, n=100):
+    def predict_per_wing_per_cam(self, n=100):
+        '''
+        predicts one wing at a time, one camera at a time, including body points
+        '''
         Ypks = []
         n = max(int(self.num_frames // 50), 1)
         all_frames = np.arange(self.num_frames)
@@ -870,7 +876,7 @@ class Predictor2D:
                 for i in range(n):
                     input_i = self.sparse_box.get_camera_dense(cam, channels=[0, 1, 2, self.num_time_channels + wing],
                                                                frames=splited_frames[i])
-                    Ypk_i = self.predict_input(input_i)
+                    Ypk_i = self.predict_input_torch(input_i)
                     Ypk.append(Ypk_i)
                 Ypk = np.concatenate(Ypk, axis=0)
                 Ypks_per_wing.append(Ypk)
@@ -882,6 +888,11 @@ class Predictor2D:
         return Ypk_all
 
     def predict_input(self, input_tensor):
+
+        '''
+        predicts the input tensor, returning the points peaks i.e. the coordinates of the peaks in the confidence maps
+        '''
+
         if self.software == 'tensorflow':
             Ypk, _, _, _ = self.predict_Ypk(input_tensor, self.batch_size, self.wings_pose_estimation_model)
         else:
@@ -890,7 +901,17 @@ class Predictor2D:
             input_tensor = input_tensor.to(self.device)
             confmaps = self.wings_pose_estimation_model(input_tensor)
             Ypk = Predictor2D.get_points_from_confmaps(confmaps)
-            pass
+            
+        return Ypk
+    
+    def predict_input_torch(self, input_tensor):
+        with torch.no_grad():
+            input_tensor = input_tensor.transpose([0, 3, 1, 2])
+            input_tensor = torch.from_numpy(input_tensor)
+            input_tensor = input_tensor.to(self.device)
+            confmaps = self.wings_pose_estimation_model(input_tensor)
+            confmaps = confmaps.detach().cpu().numpy()
+            Ypk = torch_find_peaks(confmaps)
         return Ypk
 
     @staticmethod
@@ -899,8 +920,8 @@ class Predictor2D:
         points = Predictor2D.tf_find_peaks(confmaps).numpy()
         # points = points.transpose([0, 2, 1])
         # points = points[:, :, :-1]
-        return points
-
+        return
+    
     @staticmethod
     def get_points_from_confmaps(confmaps):
         confmaps = confmaps.detach().cpu().numpy()

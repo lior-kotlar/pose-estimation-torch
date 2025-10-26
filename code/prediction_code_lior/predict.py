@@ -1,11 +1,13 @@
+import shutil
 import sys
 import os
+from datetime import date
 abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
-from utils import show_interest_points_with_index, readfile, Predict_config
+from utils import PREDICTION_CONFIGURATIONS_DIRECTORY, show_interest_points_with_index, Predict_config, PREDICTION_CODE_DIRECTORY
 import torch
-from Predictor import Predictor
+from Predictor import Predictor2D
 
 
 
@@ -14,11 +16,54 @@ class PredictingManager:
         self.config = Predict_config(config_path)
         self.model_config_list = self.config.get_model_config_list()
         self.device = device
+        self.base_run_directory = self.create_run_directory()
+        self.save_prediction_code_and_configurations()
+
+    def configure_movie_list(self):
+        movie_list = []
+        dir_list = [self.config.get_input_data_directory()]
+        
 
     def predict_movie(self):
         for model_config in self.model_config_list:
             self.config.tune_configuration(model_config)
-            predictor = Predictor(self.config, self.device)
+            predictor = Predictor2D(self.config, self.device)
+
+    def create_run_directory(self):
+        movie_name = os.path.basename(self.config.input_data_directory).split(".")[0]
+        run_name = f"{movie_name}_{date.today().strftime('%b_%d')}"
+        base_output_directory = self.config.get_output_directory()
+        run_path = os.path.join(base_output_directory, run_name)
+        initial_run_path = run_path
+        i = 1
+        while os.path.exists(run_path):
+            run_path = "%s_%02d" % (initial_run_path, i)
+            i += 1
+        os.makedirs(run_path)
+        print(f"Created run directory at: {run_path}")
+        return run_path
+        
+
+    def save_prediction_code_and_configurations(self):
+        code_dir_path = os.path.join(self.base_run_directory, "predicting code")
+        config_dir_path = os.path.join(self.base_run_directory, "predicting configurations")
+        os.makedirs(code_dir_path, exist_ok=True)
+        os.makedirs(config_dir_path, exist_ok=True)
+        for file_name in os.listdir(PREDICTION_CODE_DIRECTORY):
+            if file_name.endswith('.py'):
+                full_file_path = os.path.join(PREDICTION_CODE_DIRECTORY, file_name)
+                if os.path.isfile(full_file_path):
+                    shutil.copy(full_file_path, code_dir_path)
+                    file_name_only = os.path.basename(full_file_path)
+                    print(f"Copied {full_file_path} to {code_dir_path}")
+        for file_name in os.listdir(PREDICTION_CONFIGURATIONS_DIRECTORY):
+            if file_name.endswith('.json'):
+                full_file_path = os.path.join(PREDICTION_CONFIGURATIONS_DIRECTORY, file_name)
+                if os.path.isfile(full_file_path):
+                    shutil.copy(full_file_path, config_dir_path)
+                    file_name_only = os.path.basename(full_file_path)
+                    print(f"Copied {full_file_path} to {config_dir_path}")
+
 
 def predict_sample_save(model, sample, save_directory, label=None):
     """
