@@ -26,12 +26,12 @@ from datetime import date
 import shutil
 from skimage.morphology import convex_hull_image
 from torchvision import transforms
-from utils import tf_format_find_peaks, torch_find_peaks, Predict_config
+from utils import tf_format_find_peaks, torch_find_peaks, PredictConfig
 from constants import *
 import training_code.Network as Network
 # import predictions_2Dto3D
 import sys
-# from predictions_2Dto3D import From2Dto3D
+from From_2D_to_3D import From2Dto3D
 
 # sys.path.append(r'C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\predict_2D_pytorch')
 from SparseBox import SparseBox
@@ -48,7 +48,7 @@ RIGHT = 1
 
 class Predictor2D:
     def __init__(self,
-                 predict_config: Predict_config,
+                 predict_config: PredictConfig,
                  device,
                  load_box_from_sparse=False,
                  is_masked=False):
@@ -83,7 +83,7 @@ class Predictor2D:
         self.config_as_dict = predict_config.get_full_config_as_dict()
 
         self.software = 'pytorch'
-        self.triangulator = Triangulator(predict_config=predict_config)
+        self.triangulator = Triangulator(predict_config.get_triangulator_data())
         self.load_from_sparse = load_box_from_sparse
         if not load_box_from_sparse:
             print("creating sparse box object")
@@ -93,18 +93,11 @@ class Predictor2D:
         else:
             self.load_preprocessed_box()
         self.masks_flag = is_masked
-        # Visualizer.display_movie_from_box(np.copy(self.box))
         self.cropzone = self.get_cropzone()
         self.im_size = self.sparse_box.shape[2]
         self.num_frames = self.sparse_box.shape[0]
         self.num_pass = 0
-        if self.software == 'tensorflow':
-            return_model_peaks = True
-            if self.model_type == ALL_CAMS_PER_WING or self.model_type == ALL_CAMS_ALL_POINTS:
-                return_model_peaks = False
-            self.wings_pose_estimation_model = \
-                Predictor2D.get_pose_estimation_model_tensorflow(self.wings_pose_estimation_model_path, return_model_peaks)
-        else:
+        if self.software == 'pytorch':
             self.wings_pose_estimation_model = \
                 self.load_pose_estimation_model(self.wings_pose_estimation_model_path)
             self.wings_pose_estimation_model = self.wings_pose_estimation_model.to(self.device)
@@ -187,10 +180,10 @@ class Predictor2D:
             self.num_pass += 1
             self.model_type = self.model_type_second_pass
             self.predict_method = self.choose_predict_method()
-            return_model_peaks = False if self.model_type == ALL_CAMS_PER_WING or self.model_type == ALL_CAMS_ALL_POINTS else True
-            self.wings_pose_estimation_model = \
-                self.get_pose_estimation_model_tensorflow(self.wings_pose_estimation_model_second_pass_path,
-                                               return_model_peaks=return_model_peaks)
+            return_model_peaks = False if self.model_type == PER_WING_ALL_CAMS or self.model_type == ALL_POINTS_ALL_CAMS else True
+            self.wings_pose_estimation_model = self.load_pose_estimation_model(
+                self.wings_pose_estimation_model_second_pass_path
+            )
             if self.use_reprojected_masks:
                 # points_3D = self.get_points_3D(alpha=None)
                 # smoothed_3D = self.smooth_3D_points(points_3D)
@@ -743,18 +736,14 @@ class Predictor2D:
         f.close()
 
     def choose_predict_method(self):
-        if self.points_to_predict == WINGS:
-            return self.predict_per_wing_per_cam
-        elif self.points_to_predict == BODY:
-            return self.predict_only_body_per_cam
-        elif self.points_to_predict == WINGS_AND_BODY:
-            if self.model_type == WINGS_AND_BODY_SAME_MODEL:
-                return self.predict_wings_and_body_same_model
-            if self.model_type == ALL_POINTS or self.model_type == ALL_POINTS_REPROJECTED_MASKS:
-                return self.predict_all_points
-            if self.model_type == ALL_CAMS_PER_WING:
+        if self.points_to_predict == WINGS_AND_BODY:
+            if self.model_type == PER_WING_PER_CAM:
+                return self.predict_per_cam_per_wing_arrange_points
+            if self.model_type == ALL_POINTS_PER_CAM or self.model_type == ALL_POINTS_REPROJECTED_MASKS:
+                return self.predict_per_cam_all_points
+            if self.model_type == PER_WING_ALL_CAMS:
                 return self.predict_all_cams_per_wing
-            elif self.model_type == ALL_CAMS_ALL_POINTS:
+            elif self.model_type == ALL_POINTS_ALL_CAMS:
                 return self.predict_all_cams_all_points
 
     def predict_all_cams_per_wing(self, n=100):
@@ -775,8 +764,11 @@ class Predictor2D:
                                                                       frames=splited_frames[i])
                     input_wing_cams.append(input_wing_cam)
                 input_wing = np.concatenate(input_wing_cams, axis=-1)
-                output = self.wings_pose_estimation_model(input_wing)
-                peaks = self.tf_find_peaks(output)
+                if self.software == "pytorch":
+                    peaks = self.predict_input_torch(input_wing)
+                else:
+                    output = self.wings_pose_estimation_model(input_wing)
+                    peaks = tf_format_find_peaks(output.numpy())
                 peaks_list = [peaks[..., 0:10],
                               peaks[..., 10:20],
                               peaks[..., 20:30],
@@ -828,7 +820,7 @@ class Predictor2D:
         all_wing_and_body_points = np.concatenate(all_points, axis=0)
         return all_wing_and_body_points
 
-    def predict_all_points(self):
+    def predict_per_cam_all_points(self):
         '''
         predicts all points (both wings) only one camera at a time.
         only works for tensorflow models with peaks finding layer
@@ -845,7 +837,7 @@ class Predictor2D:
         wings_and_body_pnts = np.transpose(wings_and_body_pnts, [1, 0, 3, 2])
         return wings_and_body_pnts
 
-    def predict_wings_and_body_same_model(self):
+    def predict_per_cam_per_wing_arrange_points(self):
         '''
         predicts all points and separates them into wings and body points, and concatenates them
         '''
@@ -887,22 +879,22 @@ class Predictor2D:
         Ypk_all = np.transpose(Ypk_all, [0, 1, 3, 2])
         return Ypk_all
 
-    def predict_input(self, input_tensor):
+    # def predict_input(self, input_tensor):
 
-        '''
-        predicts the input tensor, returning the points peaks i.e. the coordinates of the peaks in the confidence maps
-        '''
+    #     '''
+    #     predicts the input tensor, returning the points peaks i.e. the coordinates of the peaks in the confidence maps
+    #     '''
 
-        if self.software == 'tensorflow':
-            Ypk, _, _, _ = self.predict_Ypk(input_tensor, self.batch_size, self.wings_pose_estimation_model)
-        else:
-            input_tensor = input_tensor.transpose([0, 3, 1, 2])
-            input_tensor = torch.from_numpy(input_tensor)
-            input_tensor = input_tensor.to(self.device)
-            confmaps = self.wings_pose_estimation_model(input_tensor)
-            Ypk = Predictor2D.get_points_from_confmaps(confmaps)
+    #     if self.software == 'tensorflow':
+    #         Ypk, _, _, _ = self.predict_Ypk(input_tensor, self.batch_size, self.wings_pose_estimation_model)
+    #     else:
+    #         input_tensor = input_tensor.transpose([0, 3, 1, 2])
+    #         input_tensor = torch.from_numpy(input_tensor)
+    #         input_tensor = input_tensor.to(self.device)
+    #         confmaps = self.wings_pose_estimation_model(input_tensor)
+    #         Ypk = Predictor2D.get_points_from_confmaps(confmaps)
             
-        return Ypk
+    #     return Ypk
     
     def predict_input_torch(self, input_tensor):
         with torch.no_grad():
@@ -910,25 +902,25 @@ class Predictor2D:
             input_tensor = torch.from_numpy(input_tensor)
             input_tensor = input_tensor.to(self.device)
             confmaps = self.wings_pose_estimation_model(input_tensor)
-            confmaps = confmaps.detach().cpu().numpy()
+            confmaps = confmaps.cpu().numpy()
             Ypk = torch_find_peaks(confmaps)
         return Ypk
 
     @staticmethod
-    def find_points(confmaps):
-        # points = find_peaks_soft_argmax(confmaps)
-        points = Predictor2D.tf_find_peaks(confmaps).numpy()
-        # points = points.transpose([0, 2, 1])
-        # points = points[:, :, :-1]
-        return
+    # def find_points(confmaps):
+    #     # points = find_peaks_soft_argmax(confmaps)
+    #     points = Predictor2D.tf_find_peaks(confmaps).numpy()
+    #     # points = points.transpose([0, 2, 1])
+    #     # points = points[:, :, :-1]
+    #     return points
     
     @staticmethod
-    def get_points_from_confmaps(confmaps):
-        confmaps = confmaps.detach().cpu().numpy()
-        confmaps = np.transpose(confmaps, [0, 2, 3, 1])
-        output_points = Predictor2D.find_points(confmaps)
-        # output_points = np.reshape(output_points, [-1, 2])
-        return output_points
+    # def get_points_from_confmaps(confmaps):
+    #     confmaps = confmaps.detach().cpu().numpy()
+    #     confmaps = np.transpose(confmaps, [0, 2, 3, 1])
+    #     output_points = Predictor2D.find_points(confmaps)
+    #     # output_points = np.reshape(output_points, [-1, 2])
+    #     return output_points
 
     def add_masks(self, n=100):
         """ Add train_masks to the dataset using yolov8 segmentation model """
@@ -940,12 +932,19 @@ class Predictor2D:
             results = []
             for i in range(n):
                 print(f"processing n = {i}")
-                img_3_ch_i = self.sparse_box.get_camera_dense(cam, [0, 1, 2], frames=all_frames_split[i])
+                img_3_ch_i = self.sparse_box.get_camera_dense_torch(cam, [0, 1, 2], frames=all_frames_split[i])
                 img_3_ch_input = np.round(img_3_ch_i * 255)
                 img_3_ch_input = [img_3_ch_input[i] for i in range(img_3_ch_input.shape[0])]
                 if DETECT_WINGS_CPU:
-                    with tf.device('/CPU:0'):  # Forces the operation to run on the CPU
+                    cpu_device = torch.device('cpu')
+                    self.wings_detection_model.to(cpu_device)
+                    img_3_ch_input = img_3_ch_input.float().to(cpu_device)
+                    with torch.no_grad():
                         results_i = self.wings_detection_model(img_3_ch_input)
+                        results_i = results_i.cpu().numpy()
+                # if DETECT_WINGS_CPU:
+                #     with tf.device('/CPU:0'):  # Forces the operation to run on the CPU
+                #         results_i = self.wings_detection_model(img_3_ch_input)
                 else:
                     results_i = self.wings_detection_model(img_3_ch_input)
                 results.append(results_i)
@@ -1102,70 +1101,70 @@ class Predictor2D:
         return mask
 
     @staticmethod
-    def get_pose_estimation_model_tensorflow(pose_estimation_model_path, return_model_peaks=True):
-        tfconfig.enable_unsafe_deserialization()
-        """ load a pretrained LEAP pose estimation model model"""
-        exists = os.path.exists(pose_estimation_model_path)
-        model = keras.models.load_model(pose_estimation_model_path, custom_objects={'LeakyReLU': LeakyReLU})
-        if return_model_peaks:
-            model = Predictor2D.convert_to_peak_outputs(model, include_confmaps=False)
-        print("weights_path:", pose_estimation_model_path)
-        print("Loaded model: %d layers, %d params" % (len(model.layers), model.count_params()))
-        return model
+    # def get_pose_estimation_model_tensorflow(pose_estimation_model_path, return_model_peaks=True):
+    #     tfconfig.enable_unsafe_deserialization()
+    #     """ load a pretrained LEAP pose estimation model model"""
+    #     exists = os.path.exists(pose_estimation_model_path)
+    #     model = keras.models.load_model(pose_estimation_model_path, custom_objects={'LeakyReLU': LeakyReLU})
+    #     if return_model_peaks:
+    #         model = Predictor2D.convert_to_peak_outputs(model, include_confmaps=False)
+    #     print("weights_path:", pose_estimation_model_path)
+    #     print("Loaded model: %d layers, %d params" % (len(model.layers), model.count_params()))
+    #     return model
 
     def load_pose_estimation_model(self, pose_estimation_model_path):
         model = torch.jit.load(pose_estimation_model_path, map_location=torch.device(self.device))
         model.eval()
         return model
 
-    @staticmethod
-    def convert_to_peak_outputs(model, include_confmaps=False):
-        """ Creates a new Keras model with a wrapper to yield channel peaks from rank-4 tensors. """
-        if type(model.output) == list:
-            confmaps = model.output[-1]
-        else:
-            confmaps = model.output
+    # @staticmethod
+    # def convert_to_peak_outputs(model, include_confmaps=False):
+    #     """ Creates a new Keras model with a wrapper to yield channel peaks from rank-4 tensors. """
+    #     if type(model.output) == list:
+    #         confmaps = model.output[-1]
+    #     else:
+    #         confmaps = model.output
 
-        peak_layer = Lambda(Predictor2D.tf_find_peaks, name="find_peaks_lambda")(confmaps)
+    #     peak_layer = Lambda(Predictor2D.tf_find_peaks, name="find_peaks_lambda")(confmaps)
 
-        if include_confmaps:
-            return keras.Model(model.input, [peak_layer, confmaps])
-        else:
-            return keras.Model(model.input, peak_layer)
+    #     if include_confmaps:
+    #         return keras.Model(model.input, [peak_layer, confmaps])
+    #     else:
+    #         return keras.Model(model.input, peak_layer)
 
-    @staticmethod
-    def tf_find_peaks(x):
-        """ Finds the maximum value in each channel and returns the location and value.
-        Args:
-            x: rank-4 tensor (samples, height, width, channels)
+    # @staticmethod
+    # def tf_find_peaks(x):
+    #     """ Finds the maximum value in each channel and returns the location and value.
+    #     Args:
+    #         x: rank-4 tensor (samples, height, width, channels)
 
-        Returns:
-            peaks: rank-3 tensor (samples, [x, y, val], channels)
-        """
+    #     Returns:
+    #         peaks: rank-3 tensor (samples, [x, y, val], channels)
+    #     """
 
-        # Store input shape
-        in_shape = tf.shape(x)
+    #     # Store input shape
+    #     in_shape = tf.shape(x)
 
-        # Flatten height/width dims
-        flattened = tf.reshape(x, [in_shape[0], -1, in_shape[-1]])
+    #     # Flatten height/width dims
+    #     flattened = tf.reshape(x, [in_shape[0], -1, in_shape[-1]])
 
-        # Find peaks in linear indices
-        idx = tf.argmax(flattened, axis=1)
+    #     # Find peaks in linear indices
+    #     idx = tf.argmax(flattened, axis=1)
 
-        # Convert linear indices to subscripts
-        rows = tf.math.floordiv(tf.cast(idx, tf.int32), in_shape[1])
-        cols = tf.math.floormod(tf.cast(idx, tf.int32), in_shape[1])
+    #     # Convert linear indices to subscripts
+    #     rows = tf.math.floordiv(tf.cast(idx, tf.int32), in_shape[1])
+    #     cols = tf.math.floormod(tf.cast(idx, tf.int32), in_shape[1])
 
-        # Dumb way to get actual values without indexing
-        vals = tf.math.reduce_max(flattened, axis=1)
+    #     # Dumb way to get actual values without indexing
+    #     vals = tf.math.reduce_max(flattened, axis=1)
 
-        # Return N x 3 x C tensor
-        pred = tf.stack([
-            tf.cast(cols, tf.float32),
-            tf.cast(rows, tf.float32),
-            vals],
-            axis=1)
-        return pred
+    #     # Return N x 3 x C tensor
+    #     pred = tf.stack([
+    #         tf.cast(cols, tf.float32),
+    #         tf.cast(rows, tf.float32),
+    #         vals],
+    #         axis=1)
+    #     return pred
 
     @staticmethod
     def predict_Ypk(X, batch_size, model_peaks, save_confmaps=False):
@@ -1384,9 +1383,7 @@ class Predictor2D:
                              all_frames_scores_side_points]
         return final_score, final_points_3D, all_models_combinations, all_frames_scores
 
-
 if __name__ == '__main__':
-    print(tf.version.VERSION)
     # points_3D_all = np.load(r"C:\Users\amita\OneDrive\Desktop\temp\points_3D_all.npy")
     # Predictor2D.find_3D_points_optimize_neighbors([points_3D_all])
     config_file = 'predict_2D_config.json'

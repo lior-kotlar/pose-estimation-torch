@@ -1,9 +1,9 @@
 import torch.nn as nn
-from utils import Train_Config
+from utils import TrainConfig
 
 
 class Network:
-    def __init__(self, general_configuration: Train_Config, image_size, number_of_output_channels):
+    def __init__(self, general_configuration: TrainConfig, image_size, number_of_output_channels):
         self.model_type = general_configuration.get_model_type()
         self.image_size = image_size
         self.number_of_output_channels = number_of_output_channels
@@ -113,7 +113,7 @@ class Network:
 
     class simple_network(nn.Module):
 
-        def __init__(self, general_configuration: Train_Config, image_size, number_of_output_channels):
+        def __init__(self, general_configuration: TrainConfig, image_size, number_of_output_channels):
             super(Network.simple_network, self).__init__()
             image_size = image_size
             number_of_output_channels = number_of_output_channels
@@ -146,7 +146,7 @@ class Network:
             x = self.decoder(x)
             return x
 
-    def config_model(self, general_configuration: Train_Config):
+    def config_model(self, general_configuration: TrainConfig):
         
         # if self.model_type == ALL_CAMS or self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
         #     model = self.all_4_cams()

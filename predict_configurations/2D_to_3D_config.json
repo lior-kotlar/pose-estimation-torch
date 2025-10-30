@@ -1,6 +1,6 @@
 {
   "2D predictions path":"/cs/labs/tsevi/lior.kotlar/pose-estimation/from 2D to 3D/example datasets/mov10_u/movie_1_10_4410_ds_3tc_7tj_WINGS_AND_BODY_SAME_MODEL_Mar 11/predicted_points_and_box.h5",
-  "out path": "/cs/labs/tsevi/lior.kotlar/pose-estimation/from 2D to 3D/example datasets/mov10_u/movie_1_10_4410_ds_3tc_7tj_WINGS_AND_BODY_SAME_MODEL_Mar 11",
+  "output directory path": "/cs/labs/tsevi/lior.kotlar/pose-estimation/from 2D to 3D/example datasets/mov10_u/movie_1_10_4410_ds_3tc_7tj_WINGS_AND_BODY_SAME_MODEL_Mar 11",
   "number of cameras": 4,
   "calibration data path":"/cs/labs/tsevi/lior.kotlar/pose-estimation/from 2D to 3D/calibration file/calibration file.h5",
   "align right left": 0,

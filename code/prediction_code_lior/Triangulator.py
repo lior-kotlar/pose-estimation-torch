@@ -2,17 +2,19 @@ import itertools
 import cv2
 import h5py
 import numpy as np
-from utils import Predict_config
+from utils import PredictConfig
 
 
 class Triangulator:
     def __init__(
             self,
-            predict_config: Predict_config
+            calibration_data_path,
+            image_height,
+            image_width
             ):
-        self.calibration_data_path, \
-        self.image_height, \
-        self.image_width = predict_config.get_triangulator_data()
+        self.calibration_data_path = calibration_data_path
+        self.image_height = image_height
+        self.image_width = image_width
         self.rotation_matrix = self.load_rotation_matrix()
         self.camera_matrices = self.load_camera_matrices()
         self.inv_camera_matrices = self.load_inv_camera_matrices()
@@ -257,6 +259,7 @@ class Triangulator:
                     rep_error = rep_errors.mean()
                     reprojection_errors[frame, point_ind, i] = rep_error
         return points_3D_all, reprojection_errors, triangulation_errors
+    
     def get_uncropped_xy1(self, points_2D, cropzone):
         new_shape = list(points_2D.shape)
         new_shape[-1] += 1

@@ -1,6 +1,7 @@
 import h5py
 import numpy as np
 from scipy.sparse import csr_matrix
+import torch
 
 
 class SparseBox:
@@ -205,6 +206,50 @@ class SparseBox:
                     # Convert the sparse matrix to a dense array and assign it to the correct channel
                     dense_camera[i, :, :, j] = self.sparse_frames[key].toarray()
 
+        return dense_camera
+    
+    def get_camera_dense_torch(self, camera_idx, channels=None, frames=None):
+        """
+        Retrieve frames for a specific camera in dense PyTorch format.
+
+        :param camera_idx: Index of the camera.
+        :param frames: Optional list of frame indexes to retrieve. If None, all frames are retrieved.
+        :return: PyTorch tensor of shape (selected_num_frames, num_channels, height, width) 
+                for the specified camera.
+        """
+        # 1. --- (Input validation logic is unchanged) ---
+        if channels is None:
+            channels = range(self.num_channels)
+
+        if frames is None:
+            frames = range(self.num_frames)
+        else:
+            # Validate the provided frame indexes
+            frames = [f for f in frames if f < self.num_frames and f >= 0]
+
+        selected_num_frames = len(frames)
+        selected_num_channels = len(channels) # Added for clarity
+
+        # 2. --- (THE MAIN CHANGE) ---
+        # Initialize a PyTorch tensor with the correct (N, C, H, W) shape
+        dense_camera = torch.zeros(
+            (selected_num_frames, selected_num_channels, self.height, self.width), 
+            dtype=torch.float32
+        )
+
+        # 3. --- (Fill the tensor with the correct indexing) ---
+        # Iterate over the specified frames and channels for the specific camera
+        for i, frame_idx in enumerate(frames):
+            for j, channel_idx in enumerate(channels):
+                key = (frame_idx, camera_idx, channel_idx)
+                if key in self.sparse_frames:
+                    # Convert the (H, W) numpy array from .toarray() to a torch tensor
+                    frame_data = torch.from_numpy(self.sparse_frames[key].toarray())
+                    
+                    # Assign it to the correct (N, C, H, W) slice
+                    dense_camera[i, j, :, :] = frame_data
+
+        # 4. --- (Return the PyTorch tensor) ---
         return dense_camera
 
     def set_camera_dense(self, camera_idx, dense_camera_data, channels=None, frames=None):

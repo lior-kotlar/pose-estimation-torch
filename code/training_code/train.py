@@ -11,7 +11,7 @@ import Datasets
 import Network
 import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
-from utils import *
+from utils import TrainConfig, loss_from_string, optimizer_from_string, show_interest_points_with_index, show_sample_channels, create_train_run_folders, save_training_code
 import Callbacks
 
 
@@ -21,7 +21,7 @@ H = 2
 W = 3
 REPORT_EVERY = 100
 
-def arrange_loaded_checkpoint(general_configuration: Train_Config):
+def arrange_loaded_checkpoint(general_configuration: TrainConfig):
     '''
     Check if resuming from checkpoint, if so, check that both directory and file exist.
     If not resuming, create new run directory.
@@ -39,7 +39,7 @@ def arrange_loaded_checkpoint(general_configuration: Train_Config):
 
 class Trainer:
     def __init__(self,
-                 general_configuration: Train_Config,
+                 general_configuration: TrainConfig,
                  base_run_directory,
                  device):
         self.device = device
@@ -280,7 +280,7 @@ def training_main(
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
     print(f"Using config file: {config_path}", flush=True)
-    general_configuration = Train_Config(config_path=config_path)
+    general_configuration = TrainConfig(config_path=config_path)
 
     base_output_directory = arrange_loaded_checkpoint(general_configuration=general_configuration)
 

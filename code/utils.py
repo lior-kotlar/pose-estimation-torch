@@ -8,9 +8,10 @@ import json
 from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam, SGD, RMSprop
 import h5py
+import glob
 
 TRAINING_CODE_DIRECTORY = "code/training_code"
-PREDICTION_CODE_DIRECTORY = "code/prediction_code"
+PREDICTION_CODE_DIRECTORY = "code/prediction_code_lior"
 PREDICTION_CONFIGURATIONS_DIRECTORY = "predict_configurations"
 SBATCH_FILES_DIRECTORY = "sbatch_files"
 
@@ -27,7 +28,7 @@ optimizer_from_string = {
     "RMSprop": RMSprop,
 }
 
-class Train_Config:
+class TrainConfig:
     def __init__(self, config_path):
         with open(config_path) as CF:
             config = json.load(CF)
@@ -136,7 +137,7 @@ class Train_Config:
     def set_learning_rate(self, new_lr):
         self.learning_rate = new_lr
 
-class Predict_config:
+class PredictConfig:
     def __init__(self, config_path):
         with open(config_path) as CF:
             config = json.load(CF)
@@ -192,13 +193,15 @@ class Predict_config:
     def get_model_config_list(self):
         return self.model_config_list
     
-    def tune_configuration(self, config_as_list):
-        self.wings_pose_estimation_model_path = config_as_list["wings pose estimation model path"]
-        self.wings_pose_estimation_model_path_second_pass = config_as_list["wings pose estimation model path second pass"]
-        self.model_type = config_as_list["model type"]
-        self.model_type_second_pass = config_as_list["model type second pass"]
-        self.predict_again_3D_consistency = config_as_list["predict again 3D consistency"]
-        self.use_reprojected_masks = bool(config_as_list["use reprojected masks"])
+    def tune_configuration(self, config_as_dict, movie_path, specific_output_directory):
+        self.wings_pose_estimation_model_path = config_as_dict["wings pose estimation model path"]
+        self.wings_pose_estimation_model_path_second_pass = config_as_dict["wings pose estimation model path second pass"]
+        self.model_type = config_as_dict["model type"]
+        self.model_type_second_pass = config_as_dict["model type second pass"]
+        self.predict_again_3D_consistency = config_as_dict["predict again 3D consistency"]
+        self.use_reprojected_masks = bool(config_as_dict["use reprojected masks"])
+        self.movie_path = movie_path
+        self.specific_output_directory = specific_output_directory
         if not self.tuned_configration:
             self.tuned_configration = True
 
@@ -206,12 +209,12 @@ class Predict_config:
         if not self.tuned_configration:
             raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
         return \
-        self.input_data_directory, \
+        self.movie_path, \
         self.wings_detector_path, \
         self.wings_pose_estimation_model_path, \
         self.wings_pose_estimation_model_path_second_pass, \
         self.config_path_2D_to_3D, \
-        self.output_directory, \
+        self.specific_output_directory, \
         self.is_video, \
         self.batch_size, \
         self.num_cams, \
@@ -229,8 +232,10 @@ class Predict_config:
         if not self.tuned_configration:
             raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
         return {
-            "movie path": self.input_data_directory,
+            "input data directory": self.input_data_directory,
+            "movie path": self.movie_path,
             "output directory": self.output_directory,
+            "specific output directory": self.specific_output_directory,
             "calibration path": self.calibration_data_path,
             "wings detector path": self.wings_detector_path,
             "2D to 3D config path": self.config_path_2D_to_3D,
@@ -248,6 +253,40 @@ class Predict_config:
             "predict again 3D consistency": self.predict_again_3D_consistency,
             "use reprojected masks": self.use_reprojected_masks
         }
+
+    def save_config_as_json(self, save_directory, filename="specific_configuration.json"):
+        if not self.tuned_configration:
+            raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
+        config_dict = self.get_full_config_as_dict()
+        file_path = os.path.join(save_directory, filename)
+        with open(file_path, 'w') as file:
+            json.dump(config_dict, file, indent=4)
+        print(f"Saved used configuration to {file_path}")
+
+class From2D23DConfig:
+    def __init__(self, config_path):
+        with open(config_path) as CF:
+            config = json.load(CF)
+            self.config = config
+            self.d2_predictions_path = config['2D predictions path']
+            self.output_directory_path = config['output directory path']
+            self.number_of_cameras = config['number of cameras']
+            self.calibration_data_path = config['calibration data path']
+            self.align_right_left = bool(config['align right left'])
+            self.image_height = config['IMAGE HEIGHT']
+            self.image_width = config['IMAGE WIDTH']
+
+    def get_config_data(self):
+        return self.d2_predictions_path, \
+                self.output_directory_path, \
+                self.number_of_cameras, \
+                self.align_right_left
+    
+    def get_triangulator_data(self):
+        return self.calibration_data_path, \
+                self.image_height, \
+                self.image_width
+
 
 def tf_format_find_peaks(x):
         '''
@@ -461,3 +500,21 @@ def readfile(path):
         for key in keys:
             value = f[key]
             print(f'key:{key}, value:{value}')
+
+def predict_3D_points_all_pairs(base_path):
+    all_points_file_list = []
+    points_3D_file_list = []
+    dir_path = os.path.join(base_path)
+    dirs = glob.glob(os.path.join(dir_path, "*"))
+    for dir in dirs:
+        if os.path.isdir(dir):
+            all_points_file = os.path.join(dir, "points_3D_all.npy")
+            points_3D_file = os.path.join(dir, "points_3D.npy")
+            if os.path.isfile(all_points_file):
+                all_points_file_list.append(all_points_file)
+            if os.path.isfile(points_3D_file):
+                points_3D_file_list.append(points_3D_file)
+    all_points_arrays = [np.load(array_path) for array_path in all_points_file_list]
+    points_3D_arrays = [np.load(array_path)[:, :, np.newaxis, :] for array_path in points_3D_file_list]
+    big_array_all_points = np.concatenate(all_points_arrays, axis=2)
+    return big_array_all_points, all_points_arrays

@@ -209,4 +209,5 @@ __marimo__/
 .vscode/
 train_output/debug_outputs/
 predict_output/debug_outputs/
+inference_datasets/
 logs/

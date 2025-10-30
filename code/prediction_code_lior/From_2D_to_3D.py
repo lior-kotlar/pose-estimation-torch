@@ -7,7 +7,7 @@ import scipy.signal
 from skimage.morphology import convex_hull_image
 from scipy.stats import median_abs_deviation
 from Triangulator import Triangulator
-import visualize
+import Visualize as Visualize
 import matplotlib
 from sklearn.decomposition import PCA
 
@@ -22,6 +22,7 @@ from scipy.interpolate import make_smoothing_spline
 from scipy.signal import medfilt
 from constants import *
 from scipy.optimize import curve_fit
+from utils import From2D23DConfig
 
 WHICH_TO_FLIP = np.array(
     [[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1], [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1]]).astype(bool)
@@ -30,23 +31,32 @@ ALPHA = 0.7
 
 
 class From2Dto3D:
-
-    def __init__(self, load_from=CONFIG, h5_file_path="", configuration_path=""):
+    def __init__(self,
+                 load_from=CONFIG,
+                 h5_file_path="",
+                 config2D3D: From2D23DConfig = None):
+        
+        calibration_data_path, image_height, image_width = config2D3D.get_triangulator_data()
         if load_from == CONFIG:
-            with open(configuration_path) as C:
-                config = json.load(C)
-                self.configuration_path = configuration_path
-                self.config = config
-                self.points_2D_h5_path = self.config["2D predictions path"]
-                self.save_path = self.config["out path"]
-                self.num_cams = self.config["number of cameras"]
-                self.need_left_right_alignment = bool(self.config["align right left"])
+            self.points_2D_h5_path, \
+            self.output_directory_path, \
+            self.num_cams, \
+            self.need_left_right_alignment = config2D3D.get_config_data()
+            # with open(configuration_path) as C:
+            #     config = json.load(C)
+            #     self.configuration_path = configuration_path
+            #     self.config = config
+            #     self.points_2D_h5_path = self.config["2D predictions path"]
+            #     self.save_path = self.config["out path"]
+            #     self.num_cams = self.config["number of cameras"]
+            #     self.need_left_right_alignment = bool(self.config["align right left"])
             self.preds_2D = self.load_preds_2D()
             self.cropzone = self.load_cropzone()
             self.box = self.load_box()
             self.conf_preds = self.load_conf_pred()
             self.set_attributes()
-            self.triangulate = Triangulator(self.config)
+            
+            self.triangulator = Triangulator(calibration_data_path, image_height, image_width)
             print(f"number of frames: {self.num_frames}")
             print("finding body masks")
             self.body_masks, self.body_distance_transform = self.set_body_masks()
@@ -70,7 +80,7 @@ class From2Dto3D:
             self.configuration_path = f.attrs["configuration_path"]
             with open(self.configuration_path) as C:
                 self.config = json.load(C)
-            self.triangulate = Triangulator(self.config)
+            self.triangulator = Triangulator(calibration_data_path, image_height, image_width)
             self.num_cams = self.config["number of cameras"]
             self.body_masks = h5py.File(self.h5_path, "r")["/body_masks"][:]
             self.body_sizesbody_sizes = h5py.File(self.h5_path, "r")["/body_sizes"][:]
@@ -94,7 +104,7 @@ class From2Dto3D:
         self.right_mask_ind = self.box.shape[-1] - 1
 
     def save_data_to_h5(self):
-        h5_file_name = os.path.join(self.save_path, "preprocessed_2D_to_3D.h5")
+        h5_file_name = os.path.join(self.output_directory_path, "preprocessed_2D_to_3D.h5")
         with h5py.File(h5_file_name, "w") as f:
             f.attrs["configuration_path"] = self.configuration_path
             ds_pos = f.create_dataset("positions_pred", data=self.preds_2D, compression="gzip",
@@ -157,18 +167,18 @@ class From2Dto3D:
 
     @staticmethod
     def visualize_3D(points_3D):
-        visualize.Visualizer.show_points_in_3D(points_3D)
+        Visualize.Visualizer.show_points_in_3D(points_3D)
 
     def visualize_2D(self, points_2D):
-        visualize.Visualizer.show_predictions_all_cams(np.copy(self.box), points_2D)
+        Visualize.Visualizer.show_predictions_all_cams(np.copy(self.box), points_2D)
 
     def reprojected_2D_points(self, points_3D):
-        points_2D_reprojected = self.triangulate.get_reprojections(points_3D, self.cropzone)
+        points_2D_reprojected = self.triangulator.get_reprojections(points_3D, self.cropzone)
         return points_2D_reprojected
 
     def get_all_3D_pnts_pairs(self, points_2D, cropzone):
         points_3D_all, reprojection_errors, triangulation_errors = \
-            self.triangulate.triangulate_2D_to_3D_reprojection_optimization(points_2D, cropzone)
+            self.triangulator.triangulate_2D_to_3D_reprojection_optimization(points_2D, cropzone)
         return points_3D_all, reprojection_errors, triangulation_errors
 
     def fix_wings_3D_per_frame(self):
@@ -199,10 +209,10 @@ class From2Dto3D:
         _points_3D = self.get_points_3D()
         if smoothed:
             _points_3D = self.smooth_3D_points(_points_3D)
-        return self.triangulate.get_reprojections(_points_3D, self.cropzone)
+        return self.triangulator.get_reprojections(_points_3D, self.cropzone)
 
     def get_reprojection_masks(self, points_3D, extend_mask_radius=4):
-        points_2D_reprojected = self.triangulate.get_reprojections(points_3D, self.cropzone)
+        points_2D_reprojected = self.triangulator.get_reprojections(points_3D, self.cropzone)
         reprojected_masks = np.zeros_like(self.neto_wings_masks)
         for frame in range(self.num_frames):
             for cam in range(self.num_cams):
@@ -241,7 +251,7 @@ class From2Dto3D:
 
             cropzone = np.tile(self.cropzone[frame, ...], (cube.shape[0], 1, 1))
 
-            reprojections = np.squeeze(self.triangulate.get_reprojections(cube[:, np.newaxis, :], cropzone))
+            reprojections = np.squeeze(self.triangulator.get_reprojections(cube[:, np.newaxis, :], cropzone))
             limit = self.body_masks.shape[-2:]
             are_inside = (reprojections >= 0) & (reprojections < limit)
             are_inside_all = np.all(are_inside, axis=(1, 2))
@@ -448,7 +458,7 @@ class From2Dto3D:
                 # scores = noise_score  # todo now the score is only noise
                 # scores = scores * visibility_score
                 cameras_ind = np.sort(np.argpartition(scores, -2)[-2:])
-                best_pair_ind = self.triangulate.all_couples.index(tuple(cameras_ind))
+                best_pair_ind = self.triangulator.all_couples.index(tuple(cameras_ind))
                 best_3D_point = candidates[best_pair_ind]
                 points_3D[frame, ind, :] = best_3D_point
 
@@ -463,7 +473,7 @@ class From2Dto3D:
                     scores = alpha * masks_sizes_score + (1 - alpha) * noise_score
                     # scores = scores * visibility_score
                     cameras_ind = np.sort(np.argpartition(scores, -2)[-2:])
-                    best_pair_ind = self.triangulate.all_couples.index(tuple(cameras_ind))
+                    best_pair_ind = self.triangulator.all_couples.index(tuple(cameras_ind))
                     best_3D_point = candidates[best_pair_ind]
                     points_3D[frame, pnt_num, :] = best_3D_point
         # now find the
@@ -523,7 +533,7 @@ class From2Dto3D:
                 confidence_scores = self.conf_preds[frame, :, joint]
                 indices = np.argpartition(confidence_scores, -2)[-2:]
                 indices = tuple(np.sort(indices))
-                best_pair_ind = self.triangulate.all_couples.index(indices)
+                best_pair_ind = self.triangulator.all_couples.index(indices)
                 best_conf_3D_point = candidates[best_pair_ind]
                 points_3D[frame, joint, :] = best_conf_3D_point
         return points_3D

@@ -1,8 +1,8 @@
 {
-    "data directory": "/path/to/input/movie.mp4",
+    "data directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/roni_dark_60ms",
     "output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_output/debug_outputs",
     "wings detection model path" : "/cs/labs/tsevi/lior.kotlar/pose-estimation/utils/wings segmentation models/yolo_weights_6_1_24.pt",
-    "calibration path": "/path/to/calibration/file.json",
+    "calibration path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/roni_dark_60ms/calibration file.h5",
     "config bank path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_configurations/config_bank.json",
     "specified configs path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_configurations/specified_configs.json",
     "wings detector path": "",

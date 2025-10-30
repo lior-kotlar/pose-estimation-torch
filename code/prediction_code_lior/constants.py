@@ -6,5 +6,12 @@ BODY = "BODY"
 WINGS_AND_BODY = "WINGS_AND_BODY"
 
 #model types
-ALL_CAMS_ALL_POINTS = "ALL_CAMS_ALL_POINTS" # predict all points (wings and body) using all cameras at once
-ALL_CAMS_PER_WING = "ALL_CAMS_PER_WING" # predict all points (wings and body) using all cameras for each wing separately
+ALL_POINTS_ALL_CAMS = "ALL_POINTS_ALL_CAMS" # predicts all points using all cameras at once
+PER_WING_ALL_CAMS = "PER_WING_ALL_CAMS" # predicts one wing at a time using all cameras at once
+PER_WING_PER_CAM = "PER_WING_PER_CAM" # predicts one wing at a time using one camera at a time
+ALL_POINTS_PER_CAM = "ALL_POINTS_PER_CAM" # predicts all points at once using one camera at a time
+ALL_POINTS_REPROJECTED_MASKS = "ALL_POINTS_REPROJECTED_MASKS"
+
+# 2d to 3d loading types
+CONFIG = "CONFIG"
+H5_FILE = "H5_FILE"
