@@ -3,6 +3,8 @@
 HEAD_TAIL_PER_CAM = "HEAD_TAIL_PER_CAM"
 HEAD_TAIL_ALL_CAMS = "HEAD_TAIL_ALL_CAMS"
 HEAD_TAIL_PER_CAM_POINTS_LOSS = "HEAD_TAIL_PER_CAM_POINTS_LOSS"
+ALL_CAMS_18_POINTS = "ALL_CAMS_18_POINTS" # preprocess to predict each wing separately using all cameras at once
+ALL_CAMS_ALL_POINTS = "ALL_CAMS_ALL_POINTS" # preprocess to predict all points at once using all cameras at once
 MODEL_PER_CAM_PER_WING = "MODEL_PER_CAM_PER_WING" # predicts one wing at a time, one camera at a time, including body points
 MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS = "MODEL_PER_CAM_PER_WING_3_GOOD_CAMERAS" # choose best 3 cameras out of 4
 MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY = "MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY" #there are only 3 cameras to begin with

@@ -1,5 +1,7 @@
+import torch
 import torch.nn as nn
 from utils import TrainConfig
+from constants import ALL_CAMS_18_POINTS
 
 
 class Network:
@@ -39,19 +41,19 @@ class Network:
 
                 in_channels = out_channels
 
-            out_channels = num_base_filters * (2 ** num_blocks)
+            self.out_channels = num_base_filters * (2 ** num_blocks)
 
-            layers.append(nn.Conv2d(in_channels, out_channels, kernel_size,
+            layers.append(nn.Conv2d(in_channels, self.out_channels, kernel_size,
                                     padding='same',
                                     dilation=dilation_rate))
             layers.append(nn.LeakyReLU(inplace=True))
 
-            layers.append(nn.Conv2d(out_channels, out_channels, kernel_size,
+            layers.append(nn.Conv2d(self.out_channels, self.out_channels, kernel_size,
                                     padding='same',
                                     dilation=dilation_rate))
             layers.append(nn.LeakyReLU(inplace=True))
 
-            layers.append(nn.Conv2d(out_channels, out_channels, kernel_size,
+            layers.append(nn.Conv2d(self.out_channels, self.out_channels, kernel_size,
                                     padding='same',
                                     dilation=dilation_rate))
             layers.append(nn.LeakyReLU(inplace=True))
@@ -63,6 +65,9 @@ class Network:
         def forward(self, x):
             return self.model(x)
         
+        def get_out_channels(self):
+            return self.out_channels
+
     class decoder(nn.Module):
         def __init__(self, input_channels, output_channels, 
                         num_base_filters, num_blocks, kernel_size):
@@ -146,6 +151,74 @@ class Network:
             x = self.decoder(x)
             return x
 
+    class FourCamsNetwork(nn.Module):
+        NUM_OF_CAMS = 4
+        def __init__(self, general_configuration: TrainConfig, image_size, number_of_output_channels):
+            super(Network.FourCamsNetwork, self).__init__()
+            image_size = image_size
+            number_of_output_channels = number_of_output_channels
+
+            num_base_filters,\
+            num_blocks,\
+            kernel_size,\
+            dilation_rate,\
+            dropout = general_configuration.get_network_configuration()
+
+            total_input_channels = image_size[0]
+            self.channels_per_cam = total_input_channels // self.NUM_OF_CAMS
+
+            self.shared_encoder = Network.encoder_atrous(
+                img_size=(image_size[0]//self.NUM_OF_CAMS, image_size[1], image_size[2]),
+                num_base_filters=num_base_filters,
+                num_blocks=num_blocks,
+                kernel_size=kernel_size,
+                dilation_rate=dilation_rate,
+                dropout=dropout
+            )
+
+            encoder_out_channels = self.shared_encoder.get_out_channels()
+            decoder_input_channels = (self.NUM_OF_CAMS + 1) * encoder_out_channels
+
+            self.shared_decoder = Network.decoder(
+                input_channels=decoder_input_channels,
+                output_channels=number_of_output_channels//self.NUM_OF_CAMS,
+                num_base_filters=num_base_filters,
+                num_blocks=num_blocks,
+                kernel_size=kernel_size
+            )
+
+        def forward(self, x):
+            splits = torch.split(x, self.channels_per_cam, dim=1)
+            x_in_split_1 = splits[0]
+            x_in_split_2 = splits[1]
+            x_in_split_3 = splits[2]
+            x_in_split_4 = splits[3]
+
+            # 4. Shared Encoding
+            # Call the *same* module on each split
+            code_out_1 = self.shared_encoder(x_in_split_1)
+            code_out_2 = self.shared_encoder(x_in_split_2)
+            code_out_3 = self.shared_encoder(x_in_split_3)
+            code_out_4 = self.shared_encoder(x_in_split_4)
+
+            # 5. Global Feature Merging
+            # Concatenate along the channel dimension (dim=1)
+            x_code_merge = torch.cat([code_out_1, code_out_2, code_out_3, code_out_4], dim=1)
+            # Shape is (B, 4 * C_enc, H_feat, W_feat)
+
+            # 6. Shared Decoding (Local + Global)
+            # We also concatenate along the channel dimension (dim=1)
+            map_out_1 = self.shared_decoder(torch.cat([code_out_1, x_code_merge], dim=1))
+            map_out_2 = self.shared_decoder(torch.cat([code_out_2, x_code_merge], dim=1))
+            map_out_3 = self.shared_decoder(torch.cat([code_out_3, x_code_merge], dim=1))
+            map_out_4 = self.shared_decoder(torch.cat([code_out_4, x_code_merge], dim=1))
+
+            # 7. Final Output Merging
+            # Concatenate along the channel dimension (dim=1)
+            x_maps_merge = torch.cat([map_out_1, map_out_2, map_out_3, map_out_4], dim=1)
+            return x_maps_merge
+
+
     def config_model(self, general_configuration: TrainConfig):
         
         # if self.model_type == ALL_CAMS or self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
@@ -154,12 +227,18 @@ class Network:
         #     model = self.all_3_cams()
         # else:
         #     model = self.simple_network()
-
-
-        model = self.simple_network(
-            general_configuration=general_configuration,
-            image_size=self.image_size,
-            number_of_output_channels=self.number_of_output_channels)
+        if self.model_type == ALL_CAMS_18_POINTS:
+            model = self.FourCamsNetwork(
+                general_configuration=general_configuration,
+                image_size=self.image_size,
+                number_of_output_channels=self.number_of_output_channels)
+        
+        else:
+            model = self.simple_network(
+                general_configuration=general_configuration,
+                image_size=self.image_size,
+                number_of_output_channels=self.number_of_output_channels)
+        
         return model
 
     def get_model(self):

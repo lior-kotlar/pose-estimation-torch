@@ -97,8 +97,8 @@ class Trainer:
         self.viz_sample = (self.val_box[general_configuration.viz_idx], self.val_confmap[general_configuration.viz_idx])
         print("img_size:", self.img_size, flush=True)
         print("num_output_channels:", self.num_output_channels, flush=True)
-        show_sample_channels(self.viz_sample[0], self.base_run_directory, filename="viz_sample.png")
-        show_interest_points_with_index(self.viz_sample[0], self.viz_sample[1], self.base_run_directory, filename="viz_sample_points.png")
+        # show_sample_channels(self.viz_sample[0], self.base_run_directory, filename="viz_sample.png")
+        # show_interest_points_with_index(self.viz_sample[0], self.viz_sample[1], self.base_run_directory, filename="viz_sample_points.png")
         # test_transforms(self.train_box[0], self.train_confmap[0], self.base_run_directory, [
         #     Augmentor.Scale()
         # ])

@@ -104,11 +104,15 @@ class Preprocessor:
         if self.model_type == HEAD_TAIL_ALL_CAMS:
             return self.do_preprocess_HEAD_TAIL_ALL_CAMS
         elif self.model_type == HEAD_TAIL_PER_CAM or self.model_type == HEAD_TAIL_PER_CAM_POINTS_LOSS:
-            return self.do_preprocess_HEAD_TAIL_PER_CAM
+            return self.preprocess_HEAD_TAIL_PER_CAM
         elif (self.model_type == MODEL_PER_CAM_PER_WING or
               self.model_type == MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS or
               self.model_type == MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY):
             return self.preprocess_per_camera_per_wing
+        elif self.model_type == ALL_CAMS_ALL_POINTS:
+            return self.preprocess_all_points_all_cams
+        elif self.model_type == ALL_CAMS_18_POINTS:
+            return self.preprocess_per_wing_all_cams
         
         # if self.model_type == ALL_POINTS_MODEL or self.model_type == HEAD_TAIL or self.model_type == TWO_WINGS_TOGATHER or self.model_type == ALL_POINTS_MODEL_VIT:
         #     return self.reshape_to_cnn_input
@@ -155,8 +159,65 @@ class Preprocessor:
                                         self.confmaps[:, 3, ...]), axis=-1)
         self.num_samples = self.box.shape[0]
 
+    def preprocess_all_points_all_cams(self):
+        '''
+        preprocess to predict all points at once using all cameras at once
+        '''
+        head_tail_confmaps = self.confmaps[..., -2:]
+        wings_confmaps = self.confmaps[..., :-2]
+        self.box, wings_confmaps = self.split_per_wing(self.box, wings_confmaps, ALL_POINTS_MODEL, RANDOM_TRAIN_SET)
+        self.confmaps = np.concatenate((wings_confmaps, head_tail_confmaps), axis=-1)
+        cam_boxes = []
+        cam_confmaps = []
+        for cam in range(self.num_cams):
+            box_cam_i = self.box[:, cam, :, :, :]
+            cam_confmaps_i = self.confmaps[:, cam, :, :, :]
+            cam_boxes.append(box_cam_i)
+            cam_confmaps.append(cam_confmaps_i)
+        self.box = np.concatenate(cam_boxes, axis=-1)
+        self.confmaps = np.concatenate(cam_confmaps, axis=-1)
+        self.adjust_masks_size_ALL_CAMS_ALL_POINTS()
+        self.box = self.box.transpose(0, 3, 1, 2)
+        self.confmaps = self.confmaps.transpose(0, 3, 1, 2)
+        self.num_samples = self.box.shape[0]
+
+    def adjust_masks_size_ALL_CAMS_ALL_POINTS(self):
+        masks_inds = [3, 4, 8, 9, 13, 14, 18, 19]
+        for frame in range(self.num_frames):
+            for mask_ind in masks_inds:
+                mask = self.box[frame, ..., mask_ind]
+                mask = self.adjust_mask(mask)
+                self.box[frame, ..., mask_ind] = mask
+
+    def preprocess_per_wing_all_cams(self):
+        '''
+        preprocess to predict each wing separately using all cameras at once
+        '''
+        num_cams = self.box.shape[1]
+        head_tail_confmaps = self.confmaps[..., -2:]
+        num_of_frames = head_tail_confmaps.shape[0]
+        wings_confmaps = self.confmaps[..., :-2]
+        self.box, wings_confmaps = self.split_per_wing(self.box, wings_confmaps, PER_WING_MODEL, RANDOM_TRAIN_SET)
+        left_confmaps = wings_confmaps[:num_of_frames]
+        right_confmaps = wings_confmaps[num_of_frames:]
+        left_confmaps = np.concatenate((left_confmaps, head_tail_confmaps), axis=-1)
+        right_confmaps = np.concatenate((right_confmaps, head_tail_confmaps), axis=-1)
+        self.confmaps = np.concatenate((left_confmaps, right_confmaps), axis=0)
+        self.adjust_masks_size_per_wing()
+        cam_boxes = []
+        cam_confmaps = []
+        for cam in range(num_cams):
+            box_cam_i = self.box[:, cam, :, :, :]
+            cam_confmaps_i = self.confmaps[:, cam, :, :, :]
+            cam_boxes.append(box_cam_i)
+            cam_confmaps.append(cam_confmaps_i)
+        self.box = np.concatenate(cam_boxes, axis=-1)
+        self.confmaps = np.concatenate(cam_confmaps, axis=-1)
+        self.box = self.box.transpose(0, 3, 1, 2)
+        self.confmaps = self.confmaps.transpose(0, 3, 1, 2)
+        self.num_samples = self.box.shape[0]
     
-    def do_preprocess_HEAD_TAIL_PER_CAM(self):
+    def preprocess_HEAD_TAIL_PER_CAM(self):
         self.box = self.box[..., :3]
         self.box = np.concatenate((self.box[0, ...],
                                    self.box[1, ...]))
@@ -173,6 +234,9 @@ class Preprocessor:
         self.num_samples = self.box.shape[0]
 
     def preprocess_per_camera_per_wing(self):
+        '''
+        preprocess to predict each wing separately using each camera separately
+        '''
         head_tail_confmaps = self.confmaps[..., -2:]
         num_of_frames = head_tail_confmaps.shape[0]
         wings_confmaps = self.confmaps[..., :-2]
