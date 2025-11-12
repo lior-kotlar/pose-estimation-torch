@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=train_per_wing
+#SBATCH --job-name=train_pwing_pcam
 #SBATCH -o logs/%x_%J.out
 #SBATCH -e logs/%x_%J.err
 #SBATCH --mem=256g
 #SBATCH --cpus-per-task=8
-#SBATCH --time=20:00:00
-#SBATCH --gres=gpu:a100:2
+#SBATCH --time=15:00:00
+#SBATCH --gres=gpu:1
 
 echo "started"
 

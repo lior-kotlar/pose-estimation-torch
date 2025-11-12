@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from utils import TrainConfig
-from constants import ALL_CAMS_18_POINTS
+from constants import ALL_CAMS_18_POINTS, ALL_CAMS_ALL_POINTS
 
 
 class Network:
@@ -12,9 +12,18 @@ class Network:
         self.model = self.config_model(general_configuration=general_configuration)
 
     class encoder_atrous(nn.Module):
-        def __init__(self, img_size, num_base_filters, num_blocks,
-                     kernel_size, dilation_rate, dropout):
+        def __init__(
+                        self,
+                        img_size,
+                        num_base_filters,
+                        num_blocks,
+                        kernel_size,
+                        dilation_rate,
+                        weight_init_method_str,
+                        dropout
+                    ):
             super(Network.encoder_atrous, self).__init__()
+            weight_init_function = Network.config_init_method(self, weight_init_method_str)
             layers = []
             in_channels = img_size[0]
             for block_idx in range(num_blocks):
@@ -62,6 +71,8 @@ class Network:
 
             self.model = nn.Sequential(*layers)
 
+            self.model.apply(lambda m: Network.init_weights(self, m, weight_init_function))
+
         def forward(self, x):
             return self.model(x)
         
@@ -69,9 +80,17 @@ class Network:
             return self.out_channels
 
     class decoder(nn.Module):
-        def __init__(self, input_channels, output_channels, 
-                        num_base_filters, num_blocks, kernel_size):
+        def __init__(
+                self,
+                input_channels,
+                output_channels,
+                weight_init_method_str,
+                num_base_filters,
+                num_blocks,
+                kernel_size
+                ):
             super(Network.decoder, self).__init__()
+            weight_init_function = Network.config_init_method(self, weight_init_method_str)
             layers = []
             in_channels = input_channels
             for block_idx in range(num_blocks-1, -1, -1):
@@ -112,6 +131,7 @@ class Network:
 
             self.model = nn.Sequential(*layers)
 
+            self.model.apply(lambda m: Network.init_weights(self, m, weight_init_function))
 
         def forward(self, x):
             return self.model(x)
@@ -127,6 +147,7 @@ class Network:
             num_blocks,\
             kernel_size,\
             dilation_rate,\
+            weight_init_str,\
             dropout = general_configuration.get_network_configuration()
             
             self.encoder = Network.encoder_atrous(
@@ -135,12 +156,14 @@ class Network:
                 num_blocks=num_blocks,
                 kernel_size=kernel_size,
                 dilation_rate=dilation_rate,
+                weight_init_method_str=weight_init_str,
                 dropout=dropout
             )
             encoder_out_channels = num_base_filters * (2 ** num_blocks)
             self.decoder = Network.decoder(
                 input_channels=encoder_out_channels,
                 output_channels=number_of_output_channels,
+                weight_init_method_str=weight_init_str,
                 num_base_filters=num_base_filters,
                 num_blocks=num_blocks,
                 kernel_size=kernel_size
@@ -227,7 +250,7 @@ class Network:
         #     model = self.all_3_cams()
         # else:
         #     model = self.simple_network()
-        if self.model_type == ALL_CAMS_18_POINTS:
+        if self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
             model = self.FourCamsNetwork(
                 general_configuration=general_configuration,
                 image_size=self.image_size,
@@ -240,6 +263,23 @@ class Network:
                 number_of_output_channels=self.number_of_output_channels)
         
         return model
+    
+    def config_init_method(self, weight_init_method_str):
+        weight_init_method_str = weight_init_method_str.lower()
+        weight_init_function = None
+        if weight_init_method_str == "xavier_uniform":
+            weight_init_function = nn.init.xavier_uniform_
+        elif weight_init_method_str == "xavier_normal":
+            weight_init_function = nn.init.xavier_normal_
+        elif weight_init_method_str == "kaiming_uniform":
+            weight_init_function = nn.init.kaiming_uniform_
+        else:
+            weight_init_function = nn.init.kaiming_normal_
+        return weight_init_function
+
+    def init_weights(self, m, weight_init_function):
+        if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+            weight_init_function(m.weight)
 
     def get_model(self):
         return self.model         

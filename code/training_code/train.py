@@ -76,7 +76,8 @@ class Trainer:
         self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
         self.optimizer = optimizer_from_string[general_configuration.optimizer_as_string](
             self.model.parameters(),
-            lr=general_configuration.learning_rate
+            lr=general_configuration.learning_rate,
+            eps=general_configuration.optimizer_epsilon
             )
         
         self.lr_scheduler = lr_scheduler.ReduceLROnPlateau(
@@ -304,9 +305,7 @@ def main():
         general_configuration=general_configuration,
         base_run_directory=base_output_directory,
         use_gpu=use_gpu
-    )
-    
-
+    )    
 
 if __name__ == "__main__":
     main()

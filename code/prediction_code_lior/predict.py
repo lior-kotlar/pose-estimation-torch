@@ -2,13 +2,15 @@ import shutil
 import sys
 import os
 from datetime import date
+import glob
+import numpy as np
 abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
 from utils import PREDICTION_CONFIGURATIONS_DIRECTORY, show_interest_points_with_index, PredictConfig, PREDICTION_CODE_DIRECTORY
 import torch
 from Predictor import Predictor2D
-
+from From_2D_to_3D import From2Dto3D
 
 
 class PredictingManager:
@@ -50,18 +52,35 @@ class PredictingManager:
         print(f"Created model run directory at: {directory_name}")
         return directory_name
 
-    def predict_movies(self):
+    def predict_movies(self,
+                       only_create_mp4=False):
         for movie_path in self.movie_path_list:
             movie_run_directory_path = os.path.join(self.base_run_directory, os.path.basename(movie_path).replace('.h5',''))
             os.makedirs(movie_run_directory_path, exist_ok=True)
+            predictor = None
             for model_config in self.model_config_list:
-                model_run_directory_path = self.create_model_run_directory(movie_run_directory_path, self.config.get_model_type())
+                
+                model_run_directory_path = self.create_model_run_directory(movie_run_directory_path, model_config["model type"])
                 self.config.tune_configuration(model_config, movie_path, model_run_directory_path)
                 self.config.save_config_as_json(model_run_directory_path)
                 predictor = Predictor2D(predict_config=self.config,
                                         device=self.device)
                 predictor.create_base_box()
                 predictor.save_base_box()
+                try:
+                    predictor.run_predict_2D()
+                except Exception as e:
+                    print(f"An error occurred during prediction: {e}")
+        
+            cropzone = predictor.get_cropzone()
+            if not only_create_mp4:
+                print("Starting to predict ensemble")
+                best_points_3D, smoothed_3D = find_3D_points_from_ensemble(movie_run_directory_path)
+                reprojected = predictor.triangulator.get_reprojections(best_points_3D, cropzone)
+                smoothed_reprojected = predictor.triangulator.get_reprojections(smoothed_3D, cropzone)
+                From2Dto3D.save_points_3D(movie_run_directory_path, reprojected, name="points_ensemble_reprojected.npy")
+                From2Dto3D.save_points_3D(movie_run_directory_path, smoothed_reprojected,
+                                          name="points_ensemble_smoothed_reprojected_before_analisys.npy")
 
     def create_general_run_directory(self):
         experiment_name = os.path.basename(self.config.get_input_data_directory())
@@ -135,6 +154,49 @@ def predict_sample_save(model, sample, save_directory, label=None):
                                         filename="ground_truth.png"
                                         )
 
+def predict_3D_points_all_pairs(base_path):
+        all_points_file_list = []
+        points_3D_file_list = []
+        dir_path = os.path.join(base_path)
+        dirs = glob.glob(os.path.join(dir_path, "*"))
+        for dir in dirs:
+            if os.path.isdir(dir):
+                all_points_file = os.path.join(dir, "points_3D_all.npy")
+                points_3D_file = os.path.join(dir, "points_3D.npy")
+                if os.path.isfile(all_points_file):
+                    all_points_file_list.append(all_points_file)
+                if os.path.isfile(points_3D_file):
+                    points_3D_file_list.append(points_3D_file)
+        all_points_arrays = [np.load(array_path) for array_path in all_points_file_list]
+        big_array_all_points = np.concatenate(all_points_arrays, axis=2)
+        return big_array_all_points, all_points_arrays
+
+def find_3D_points_from_ensemble(base_path, test=False):
+        result, all_points_list = predict_3D_points_all_pairs(base_path)
+        final_score, best_points_3D, all_models_combinations, all_frames_scores = Predictor2D.find_3D_points_optimize_neighbors(
+            all_points_list)
+
+        print(f"score: {final_score}\n", flush=True)
+        if not test:
+            smoothed_3D = Predictor2D.smooth_3D_points(best_points_3D)
+            save_points_3D(base_path, [], best_points_3D, smoothed_3D, "best_method")
+            save_name = os.path.join(base_path, "all_models_combinations.npy")
+            np.save(save_name, all_models_combinations)
+        return best_points_3D, smoothed_3D
+
+@staticmethod
+def save_points_3D(base_path, best_combination, best_points_3D, smoothed_3D, type_chosen):
+    score1 = From2Dto3D.get_validation_score(best_points_3D)
+    score2 = From2Dto3D.get_validation_score(smoothed_3D)
+    From2Dto3D.save_points_3D(base_path, best_points_3D, name=f"points_3D_ensemble_{type_chosen}.npy")
+    From2Dto3D.save_points_3D(base_path, smoothed_3D, name=f"points_3D_smoothed_ensemble_{type_chosen}.npy")
+    readme_path = os.path.join(base_path, "README_scores_3D_ensemble.txt")
+    print(f"score1 is {score1}, score2 is {score2}")
+    with open(readme_path, "w") as f:
+        f.write(f"The score for the points was {score1}\n")
+        f.write(f"The score for the smoothed points was {score2}\n")
+        f.write(f"The winning combination was {best_combination}")
+
 def main():
     config_path = sys.argv[1]
     if torch.cuda.is_available():
@@ -145,7 +207,6 @@ def main():
         print("Using CPU for prediction")
     predictor = PredictingManager(config_path, device)
     predictor.predict_movies()
-    
     
     
 if __name__ == "__main__":

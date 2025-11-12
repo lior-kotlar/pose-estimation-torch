@@ -28,8 +28,6 @@ from skimage.morphology import convex_hull_image
 from torchvision import transforms
 from utils import tf_format_find_peaks, torch_find_peaks, PredictConfig
 from constants import *
-import training_code.Network as Network
-# import predictions_2Dto3D
 import sys
 from From_2D_to_3D import From2Dto3D
 
@@ -50,7 +48,6 @@ class Predictor2D:
     def __init__(self,
                  predict_config: PredictConfig,
                  device,
-                 load_box_from_sparse=False,
                  is_masked=False):
         self.points_3D_smoothed = None
         self.points_3D = None
@@ -68,6 +65,8 @@ class Predictor2D:
         self.device = device
         self.points_to_predict = WINGS_AND_BODY
 
+        self.model_type, \
+        self.model_type_second_pass, \
         self.movie_path, \
         self.wings_detector_model_path, \
         self.wings_pose_estimation_model_path, \
@@ -78,20 +77,23 @@ class Predictor2D:
         self.batch_size, \
         self.num_cams, \
         self.mask_increase_initial, \
-        self.mask_increase_reprojected = predict_config.get_predictor_data()
+        self.mask_increase_reprojected, \
+        self.predict_again_3D_consistency, \
+        self.use_reprojected_masks = predict_config.get_predictor_data()
 
         self.config_as_dict = predict_config.get_full_config_as_dict()
 
         self.software = 'pytorch'
-        self.triangulator = Triangulator(predict_config.get_triangulator_data())
-        self.load_from_sparse = load_box_from_sparse
-        if not load_box_from_sparse:
-            print("creating sparse box object")
-            self.sparse_box = SparseBox(self.movie_path, is_masked=is_masked)
-            box = self.sparse_box.retrieve_dense_box()
-            print("finish creating sparse box object")
-        else:
-            self.load_preprocessed_box()
+        calibration_data_path, image_height, image_width = predict_config.get_triangulator_data()
+        self.triangulator = Triangulator(calibration_data_path, image_height, image_width)
+        self.configure_sparse_box(is_masked=is_masked)
+        # if not load_box_from_sparse:
+        #     print("creating sparse box object")
+        #     self.sparse_box = SparseBox(self.movie_path, is_masked=is_masked)
+        #     # self.box = self.sparse_box.retrieve_dense_box()
+        #     print("finish creating sparse box object")
+        # else:
+        #     self.load_preprocessed_box()
         self.masks_flag = is_masked
         self.cropzone = self.get_cropzone()
         self.im_size = self.sparse_box.shape[2]
@@ -106,8 +108,6 @@ class Predictor2D:
         self.wings_detection_model = self.get_wings_detection_model()
         self.scores = np.zeros((self.num_frames, self.num_cams, 2))
         self.predict_method = self.choose_predict_method()
-
-        self.run_name = self.get_run_name()
 
         self.total_runtime = None
         self.prediction_runtime = None
@@ -127,12 +127,28 @@ class Predictor2D:
         self.left_mask_ind = 3
         self.right_mask_ind = 4
 
+    def configure_sparse_box(self, is_masked=False):
+        mov_dir_name = os.path.dirname(self.movie_path)
+        saved_box_dir = os.path.join(mov_dir_name, "saved_box_dir")
+        if os.path.exists(saved_box_dir):
+            print("loading preprocessed box object")
+            try:
+                self.load_preprocessed_box()
+                self.load_from_sparse = True
+                return
+            except FileNotFoundError:
+                shutil.rmtree(saved_box_dir)
+        print("creating sparse box object")
+        self.sparse_box = SparseBox(self.movie_path, is_masked=is_masked)
+        print("finish creating sparse box object")
+        self.load_from_sparse = False
+
     def run_predict_2D(self, save=True):
         """
         creates an array of pose estimation predictions
         """
         t0 = time()
-        self.run_path = self.create_run_folders()
+        self.run_path = self.output_directory
         if not self.load_from_sparse:
             if not self.masks_flag:
                 print("cleaning the images")
@@ -175,7 +191,7 @@ class Predictor2D:
         # box = self.box_sparse.retrieve_dense_box()
         # Visualizer.show_predictions_all_cams(box, self.predicted_points)
         print("done saving", flush=True)
-        if self.predict_again_using_3D_consistent:
+        if self.predict_again_3D_consistency:
             print("starting the reprojected masks creation")
             self.num_pass += 1
             self.model_type = self.model_type_second_pass
@@ -206,6 +222,8 @@ class Predictor2D:
         print("Prediction performance: %.3f FPS" % (self.num_frames * self.num_cams / self.prediction_runtime))
 
     def create_base_box(self):
+        if self.load_from_sparse:
+            return
         print("cleaning the images", flush=True)
         self.clean_images()
         print("aligning time channels", flush=True)
@@ -218,6 +236,8 @@ class Predictor2D:
         self.get_neto_wings_masks()
 
     def save_base_box(self):
+        if self.load_from_sparse:
+            return
         print("saving box")
         # save the sparse box, neto wings sparse, body masks sparse, body_sizes, wings sizes
         mov_dir_name = os.path.dirname(self.movie_path)
@@ -906,7 +926,7 @@ class Predictor2D:
             Ypk = torch_find_peaks(confmaps)
         return Ypk
 
-    @staticmethod
+    # @staticmethod
     # def find_points(confmaps):
     #     # points = find_peaks_soft_argmax(confmaps)
     #     points = Predictor2D.tf_find_peaks(confmaps).numpy()
@@ -914,7 +934,7 @@ class Predictor2D:
     #     # points = points[:, :, :-1]
     #     return points
     
-    @staticmethod
+    # @staticmethod
     # def get_points_from_confmaps(confmaps):
     #     confmaps = confmaps.detach().cpu().numpy()
     #     confmaps = np.transpose(confmaps, [0, 2, 3, 1])
@@ -932,7 +952,7 @@ class Predictor2D:
             results = []
             for i in range(n):
                 print(f"processing n = {i}")
-                img_3_ch_i = self.sparse_box.get_camera_dense_torch(cam, [0, 1, 2], frames=all_frames_split[i])
+                img_3_ch_i = self.sparse_box.get_camera_dense(cam, [0, 1, 2], frames=all_frames_split[i])
                 img_3_ch_input = np.round(img_3_ch_i * 255)
                 img_3_ch_input = [img_3_ch_input[i] for i in range(img_3_ch_input.shape[0])]
                 if DETECT_WINGS_CPU:
@@ -1100,7 +1120,7 @@ class Predictor2D:
         mask = binary_dilation(mask, iterations=radius).astype(int)
         return mask
 
-    @staticmethod
+    # @staticmethod
     # def get_pose_estimation_model_tensorflow(pose_estimation_model_path, return_model_peaks=True):
     #     tfconfig.enable_unsafe_deserialization()
     #     """ load a pretrained LEAP pose estimation model model"""

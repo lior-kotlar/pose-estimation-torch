@@ -162,6 +162,9 @@ class Preprocessor:
     def preprocess_all_points_all_cams(self):
         '''
         preprocess to predict all points at once using all cameras at once
+        output box shape: (B, NUM_CAMS * NUM_CHANNELS, H, W)
+        example NUM_CHANNELS = 3 time channels + 2 masks
+        output confmaps shape: (B, NUM_CAMS * NUM_POINTS, H, W)
         '''
         head_tail_confmaps = self.confmaps[..., -2:]
         wings_confmaps = self.confmaps[..., :-2]
@@ -192,6 +195,8 @@ class Preprocessor:
     def preprocess_per_wing_all_cams(self):
         '''
         preprocess to predict each wing separately using all cameras at once
+        output box shape: (B*2 [split per wing], NUM_CAMS * NUM_CHANNELS_PER_WING[3 time channels + 1 wing mask], H, W)
+        output confmaps shape: (B*2 [split per wing], NUM_CAMS * (NUM_WING_POINTS + head & tail points), H, W)
         '''
         num_cams = self.box.shape[1]
         head_tail_confmaps = self.confmaps[..., -2:]

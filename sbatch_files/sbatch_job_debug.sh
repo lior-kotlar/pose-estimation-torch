@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_try1
+#SBATCH --job-name=train_pwing_allcams_debug
 #SBATCH -o logs/%x_%J.out
 #SBATCH -e logs/%x_%J.err
 #SBATCH --mem=64g
@@ -16,6 +16,6 @@ source .env/bin/activate
 echo "Job started on $(hostname)"
 echo "GPUs allocated: $CUDA_VISIBLE_DEVICES"
 
-echo "sbatch: running python"
+echo "sbatch: running python debugging job"
 python "code/training_code/train.py" "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_configurations/config_debug.json"
 echo "sbatch: finished working"

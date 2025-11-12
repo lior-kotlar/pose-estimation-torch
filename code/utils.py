@@ -41,13 +41,15 @@ class TrainConfig:
             self.loss_function_as_string = config["loss function"]
             self.learning_rate = config["learning rate"]
             self.optimizer_as_string = config["optimizer"]
+            self.optimizer_epsilon = config["optimizer epsilon"]
+            self.weight_initialization_method = config["weight initialization method"]
             self.reduce_lr_factor = config["reduce lr factor"]
             self.reduce_lr_patience = config["reduce lr patience"]
             self.reduce_lr_min_delta = config["reduce lr min delta"]
             self.reduce_lr_cooldown = config["reduce lr cooldown"]
             self.reduce_lr_min_lr = config["reduce lr min lr"]
             self.base_output_directory = config["base output directory"]
-            self.viz_idx = 1
+            self.viz_idx = 0
             self.model_type = config["model type"]
             self.save_every = config["save every"]
             self.debug_mode = bool(config["debug mode"])
@@ -123,6 +125,7 @@ class TrainConfig:
             self.num_blocks,\
             self.kernel_size,\
             self.dilation_rate,\
+            self.weight_initialization_method,\
             self.dropout
     
     def get_resume_training_checkpoint_path(self):
@@ -182,6 +185,8 @@ class PredictConfig:
         return self.calibration_data_path
     
     def get_model_type(self):
+        if not self.tuned_configration:
+            raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
         return self.model_type
     
     def get_wings_detector_path(self):
@@ -209,6 +214,8 @@ class PredictConfig:
         if not self.tuned_configration:
             raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
         return \
+        self.model_type, \
+        self.model_type_second_pass, \
         self.movie_path, \
         self.wings_detector_path, \
         self.wings_pose_estimation_model_path, \
@@ -219,7 +226,9 @@ class PredictConfig:
         self.batch_size, \
         self.num_cams, \
         self.mask_increase_initial, \
-        self.mask_increase_reprojected
+        self.mask_increase_reprojected, \
+        self.predict_again_3D_consistency, \
+        self.use_reprojected_masks
 
     def get_triangulator_data(self):
         if not self.tuned_configration:
@@ -518,3 +527,8 @@ def predict_3D_points_all_pairs(base_path):
     points_3D_arrays = [np.load(array_path)[:, :, np.newaxis, :] for array_path in points_3D_file_list]
     big_array_all_points = np.concatenate(all_points_arrays, axis=2)
     return big_array_all_points, all_points_arrays
+
+def add_nan_frames(original_array, N):
+    nan_frames = np.full((N,) + original_array.shape[1:], np.nan)
+    new_array = np.concatenate((nan_frames, original_array), axis=0)
+    return new_array

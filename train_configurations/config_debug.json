@@ -2,7 +2,7 @@
     "debug mode": 1,
     
     "// training parameters //": 0,
-    "batch size": 50,
+    "batch size": 32,
     "epochs": 20,
     "batches per epoch": 2000,
     "do curriculum learning": 0,
@@ -10,6 +10,8 @@
     "epochs pointwise loss": 0,
     "val fraction": 0.1,
     "learning rate": 0.001,
+    "optimizer epsilon": 1e-07,
+    "weight initialization method": "xavier_uniform",
 
     "// Network parameters //": 0,
     "dropout ratio": 0.5,
