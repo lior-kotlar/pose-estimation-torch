@@ -7,10 +7,12 @@ import numpy as np
 abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
-from utils import PREDICTION_CONFIGURATIONS_DIRECTORY, show_interest_points_with_index, PredictConfig, PREDICTION_CODE_DIRECTORY
+from utils import get_start_frame, show_interest_points_with_index, PredictConfig, PREDICTION_CODE_DIRECTORY, PREDICTION_CONFIGURATIONS_DIRECTORY
 import torch
 from Predictor import Predictor2D
 from From_2D_to_3D import From2Dto3D
+from extract_flight_data import FlightAnalysis
+from Visualizer import Visualizer
 
 
 class PredictingManager:
@@ -81,6 +83,24 @@ class PredictingManager:
                 From2Dto3D.save_points_3D(movie_run_directory_path, reprojected, name="points_ensemble_reprojected.npy")
                 From2Dto3D.save_points_3D(movie_run_directory_path, smoothed_reprojected,
                                           name="points_ensemble_smoothed_reprojected_before_analisys.npy")
+                self.create_movie_html(movie_run_directory_path, name="points_3D_smoothed_ensemble_best_method.npy")
+                
+            
+    def create_movie_html(movie_dir_path, name="points_3D_smoothed_ensemble_best.npy"):
+        print(movie_dir_path, flush=True)
+        start_frame = get_start_frame(movie_dir_path)
+        points_path = os.path.join(movie_dir_path, name)
+        if os.path.isfile(points_path):
+            file_name = 'movie_html.html'
+            save_path = os.path.join(movie_dir_path, file_name)
+            FA = FlightAnalysis(points_path)
+            com = FA.center_of_mass
+            x_body = FA.x_body
+            y_body = FA.y_body
+            points_3D = FA.points_3D
+            start_frame = int(start_frame)
+            Visualizer.create_movie_plot(com=com, x_body=x_body, y_body=y_body, points_3D=points_3D,
+                                         start_frame=start_frame, save_path=save_path)
 
     def create_general_run_directory(self):
         experiment_name = os.path.basename(self.config.get_input_data_directory())

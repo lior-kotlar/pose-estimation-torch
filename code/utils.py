@@ -1,10 +1,12 @@
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from sympy import re
 matplotlib.use("Agg")
 import os
 import shutil
 import json
+import torch
 from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam, SGD, RMSprop
 import h5py
@@ -14,6 +16,7 @@ TRAINING_CODE_DIRECTORY = "code/training_code"
 PREDICTION_CODE_DIRECTORY = "code/prediction_code_lior"
 PREDICTION_CONFIGURATIONS_DIRECTORY = "predict_configurations"
 SBATCH_FILES_DIRECTORY = "sbatch_files"
+VIZ_OUTPUT_DIRECTORY_NAME = "viz_pred"
 
 loss_from_string = {
     "MSE": MSELoss,
@@ -532,3 +535,140 @@ def add_nan_frames(original_array, N):
     nan_frames = np.full((N,) + original_array.shape[1:], np.nan)
     new_array = np.concatenate((nan_frames, original_array), axis=0)
     return new_array
+
+def find_starting_frame(readme_file):
+    start_pattern = re.compile(r'start:\s*(\d+)')
+    with open(readme_file, 'r') as file:
+        for line in file:
+            match = start_pattern.search(line)
+            if match:
+                start_number = match.group(1)
+                return start_number
+
+def get_start_frame(movie_dir_path):
+    start_frame = 0
+    for filename in os.listdir(movie_dir_path):
+        if filename.startswith("README_mov"):
+            readme_file = os.path.join(movie_dir_path, filename)
+            start_frame = find_starting_frame(readme_file)
+    return start_frame
+
+def draw_sample_with_points(sample_image, predicted_points, gt_points, save_file_path):
+    """
+    Saves a visualization of ground truth and predicted landmarks on a sample image
+    using Matplotlib.
+
+    The function plots ground truth points as green circles ('o') and predicted points
+    as red crosses ('x') on the image and saves it to a file.
+
+    Args:
+        sample_image (np.ndarray): The grayscale input image, expected shape (192, 192).
+                                   Can be float [0, 1] or uint8 [0, 255].
+        gt_labels (np.ndarray): Ground truth landmarks, shape (10, 2) of (x, y) coords.
+        pred_labels (np.ndarray): Predicted landmarks, shape (10, 2) of (x, y) coords.
+        output_filename (str): The path and filename to save the output image.
+    """
+    try:
+        # 1. Create a figure and axes for the plot
+        fig, ax = plt.subplots()
+
+        # 2. Handle data type range for imshow
+        # imshow auto-scales uint8 [0, 255] and float [0, 1]
+        # We must manually set range if it's float [0, 255]
+        img_to_show = sample_image
+        v_min, v_max = None, None
+        
+        if img_to_show.dtype in (np.float32, np.float64):
+            if img_to_show.max() > 1.0:
+                # It's a float image but with 0-255 range
+                v_min, v_max = 0, 255
+
+        # 3. Display the grayscale image
+        # cmap='gray' is essential for grayscale
+        ax.imshow(img_to_show, cmap='gray', vmin=v_min, vmax=v_max)
+
+        # 4. Draw Ground Truth points (as green circles)
+        # Matplotlib scatter needs x and y as separate arrays
+        ax.scatter(
+            gt_points[:, 0],  # All x coordinates
+            gt_points[:, 1],  # All y coordinates
+            c='g',            # Color green
+            marker='o',       # Circle marker
+            s=10,             # Size of the marker
+            label='Ground Truth'
+        )
+
+        for i, (x, y) in enumerate(gt_points):
+            # Add text index (0-9) slightly offset from the point
+            ax.text(x + 1.5, y + 1.5, str(i), color='g', fontsize=5, 
+                    bbox=dict(facecolor='white', alpha=0.4, pad=0.1, boxstyle='round,pad=0.1'))
+
+        # 5. Draw Predicted points (as red 'x' markers)
+        ax.scatter(
+            predicted_points[:, 0], # All x coordinates
+            predicted_points[:, 1], # All y coordinates
+            c='r',             # Color red
+            marker='x',        # Cross marker
+            s=10,              # Size of the marker
+            label='Prediction'
+        )
+
+        for i, (x, y) in enumerate(predicted_points):
+            # Add text index (0-9) slightly offset from the point (different offset)
+            ax.text(x + 1.5, y - 1.5, str(i), color='r', fontsize=5, 
+                    bbox=dict(facecolor='white', alpha=0.4, pad=0.1, boxstyle='round,pad=0.1'))
+
+        # 6. Clean up the plot
+        # Remove axes, ticks, and labels
+        ax.axis('off')
+        
+        # Optional: Add a legend. Can be placed inside:
+        ax.legend(loc='upper right', fontsize='small')
+
+        # 7. Save the final image
+        # bbox_inches='tight' and pad_inches=0 remove whitespace borders
+        fig.savefig(
+            save_file_path, 
+            bbox_inches='tight', 
+            pad_inches=0, 
+            dpi=150  # Set DPI for good quality
+        )
+        
+        # 8. Close the figure to free memory
+        plt.close(fig)
+        
+        print(f"Successfully saved visualization to {save_file_path}")
+
+    except Exception as e:
+        print(f"Error saving image to {save_file_path} using Matplotlib: {e}")
+
+def show_pred(net, sample_image, gt_confmaps, sample_idx, epoch_num, joint_idx=0, alpha_pred=0.7, save_directory=None, show_figure=False):
+    """
+    Shows a prediction from the model.
+        net: network to use for prediction
+        idx: index into box/confmap to use or tuple of (box, confmap) with a single sample
+        joint_idx: index of confmap channel to overlay
+        alpha_pred: opacity of confmap overlay
+    """
+    net.eval()
+    print(sample_image.shape)
+    x_batch = sample_image[None, ...]
+    try:
+        device = next(net.parameters()).device
+    except StopIteration:
+        device = torch.device('cpu')
+    
+    x_tensor = torch.from_numpy(x_batch).float().to(device)
+    with torch.no_grad():
+        predicted_confmaps = net(x_tensor)
+        predicted_confmaps = predicted_confmaps.cpu().numpy()
+
+    predicted_peaks = torch_find_peaks(predicted_confmaps)[0,:2,:]
+    gt_peaks = torch_find_peaks(gt_confmaps[None, ...])[0,:2,:]
+    save_path = os.path.join(save_directory, f"epoch_{epoch_num}_sample_{sample_idx}.png")
+    draw_sample_with_points(
+        sample_image=np.squeeze(sample_image)[1,...],
+        predicted_points=predicted_peaks.T,
+        gt_points=gt_peaks.T,
+        save_file_path=save_path
+    )

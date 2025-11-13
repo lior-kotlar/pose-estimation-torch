@@ -95,7 +95,9 @@ class Trainer:
 
         self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
         self.validation = (self.val_box, self.val_confmap)
-        self.viz_sample = (self.val_box[general_configuration.viz_idx], self.val_confmap[general_configuration.viz_idx])
+        viz_idx = [0, 1, 2]
+        viz_sample_list = (self.val_box[viz_idx], self.val_confmap[viz_idx])
+
         print("img_size:", self.img_size, flush=True)
         print("num_output_channels:", self.num_output_channels, flush=True)
         # show_sample_channels(self.viz_sample[0], self.base_run_directory, filename="viz_sample.png")
@@ -107,7 +109,7 @@ class Trainer:
         self.callbacks = Callbacks.ModelCallbacks(
                                         model=self.model,
                                         base_directory=base_run_directory,
-                                        viz_sample=self.viz_sample,
+                                        viz_sample_list=viz_sample_list,
                                         validation=(self.val_box, self.val_confmap)
                                         )
         self.general_configuration = general_configuration

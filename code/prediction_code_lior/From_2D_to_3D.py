@@ -7,7 +7,7 @@ import scipy.signal
 from skimage.morphology import convex_hull_image
 from scipy.stats import median_abs_deviation
 from Triangulator import Triangulator
-import Visualize as Visualize
+import code.prediction_code_lior.Visualizer as Visualizer
 import matplotlib
 from sklearn.decomposition import PCA
 
@@ -167,10 +167,10 @@ class From2Dto3D:
 
     @staticmethod
     def visualize_3D(points_3D):
-        Visualize.Visualizer.show_points_in_3D(points_3D)
+        Visualizer.Visualizer.show_points_in_3D(points_3D)
 
     def visualize_2D(self, points_2D):
-        Visualize.Visualizer.show_predictions_all_cams(np.copy(self.box), points_2D)
+        Visualizer.Visualizer.show_predictions_all_cams(np.copy(self.box), points_2D)
 
     def reprojected_2D_points(self, points_3D):
         points_2D_reprojected = self.triangulator.get_reprojections(points_3D, self.cropzone)

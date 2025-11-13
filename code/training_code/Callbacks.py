@@ -1,5 +1,5 @@
 import torch
-from utils import torch_find_peaks
+from utils import torch_find_peaks, VIZ_OUTPUT_DIRECTORY_NAME, show_pred
 import matplotlib.pyplot as plt
 import os
 import sys
@@ -11,10 +11,10 @@ from scipy.io import savemat
 
 
 class ModelCallbacks:
-    def __init__(self, model, base_directory, viz_sample, validation):
+    def __init__(self, model, base_directory, viz_sample_list, validation):
         self.validation = validation
         self.base_directory = base_directory
-        self.viz_sample = viz_sample
+        self.viz_sample_list = viz_sample_list
         self.model_callbacks = self.config_callbacks(model)
         
         # self.camera_matrices = h5py.File(self.data_path, "r")['/cameras_dlt_array'][:].T
@@ -50,6 +50,7 @@ class ModelCallbacks:
         callbacks.append(self.L2LossCallback(self.validation, self.base_directory, model))
         callbacks.append(self.L2PerPointLossCallback(self.validation, self.base_directory, model))
         callbacks.append(self.LossHistory(self.base_directory))
+        callbacks.append(self.VizPredCallback(self.viz_sample_list, self.base_directory, model))
         return callbacks
     
     def on_train_start(self):
@@ -281,3 +282,25 @@ class ModelCallbacks:
                 writer.writerow([epoch, logs['train loss'], logs.get('validation loss')])
 
             self.plot_history(self.history, save_path=self.png_file_path)
+
+    class VizPredCallback():
+        def __init__(self, sample_confmaps_list, save_directory, model):
+            self.samples, self.confmaps = sample_confmaps_list
+            self.save_directory = os.path.join(save_directory, VIZ_OUTPUT_DIRECTORY_NAME)
+            self.model = model
+        
+        def on_epoch_end(self, epoch, logs=None):
+            for i, (sample, confmap) in enumerate(zip(self.samples, self.confmaps)):
+                save_path = os.path.join(
+                    self.save_directory,
+                    f"epoch_{epoch + 1}_sample_{i}.png"
+                )
+                show_pred(
+                    self.model,
+                    sample,
+                    confmap,
+                    sample_idx=i,
+                    epoch_num=epoch,
+                    save_directory=self.save_directory,
+                    show_figure=False
+                          )
