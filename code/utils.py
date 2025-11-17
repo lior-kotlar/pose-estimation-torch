@@ -37,6 +37,7 @@ class TrainConfig:
             config = json.load(CF)
             # training configuration
             self.config = config
+            self.debug_mode = bool(config["debug mode"])
             self.batch_size = config['batch size']
             self.num_epochs = config['epochs']
             self.batches_per_epoch = config['batches per epoch']
@@ -52,10 +53,9 @@ class TrainConfig:
             self.reduce_lr_cooldown = config["reduce lr cooldown"]
             self.reduce_lr_min_lr = config["reduce lr min lr"]
             self.base_output_directory = config["base output directory"]
-            self.viz_idx = 0
+            self.how_many_visualizations = 1 if self.debug_mode else config["how many visualizations"]
             self.model_type = config["model type"]
             self.save_every = config["save every"]
-            self.debug_mode = bool(config["debug mode"])
             self.confmaps_orig = None
             self.box_orig = None
             self.data_path = config['data path']
@@ -637,12 +637,12 @@ def draw_sample_with_points(sample_image, predicted_points, gt_points, save_file
         # 8. Close the figure to free memory
         plt.close(fig)
         
-        print(f"Successfully saved visualization to {save_file_path}")
+        # print(f"Successfully saved visualization to {save_file_path}")
 
     except Exception as e:
         print(f"Error saving image to {save_file_path} using Matplotlib: {e}")
 
-def show_pred(net, sample_image, gt_confmaps, sample_idx, epoch_num, joint_idx=0, alpha_pred=0.7, save_directory=None, show_figure=False):
+def show_pred(net, sample_image, gt_confmaps, epoch_num, save_directory):
     """
     Shows a prediction from the model.
         net: network to use for prediction
@@ -651,7 +651,6 @@ def show_pred(net, sample_image, gt_confmaps, sample_idx, epoch_num, joint_idx=0
         alpha_pred: opacity of confmap overlay
     """
     net.eval()
-    print(sample_image.shape)
     x_batch = sample_image[None, ...]
     try:
         device = next(net.parameters()).device
@@ -665,7 +664,7 @@ def show_pred(net, sample_image, gt_confmaps, sample_idx, epoch_num, joint_idx=0
 
     predicted_peaks = torch_find_peaks(predicted_confmaps)[0,:2,:]
     gt_peaks = torch_find_peaks(gt_confmaps[None, ...])[0,:2,:]
-    save_path = os.path.join(save_directory, f"epoch_{epoch_num}_sample_{sample_idx}.png")
+    save_path = os.path.join(save_directory, f"epoch_{epoch_num}.png")
     draw_sample_with_points(
         sample_image=np.squeeze(sample_image)[1,...],
         predicted_points=predicted_peaks.T,

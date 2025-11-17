@@ -288,19 +288,20 @@ class ModelCallbacks:
             self.samples, self.confmaps = sample_confmaps_list
             self.save_directory = os.path.join(save_directory, VIZ_OUTPUT_DIRECTORY_NAME)
             self.model = model
-        
+            self.create_sample_directories()
+
+        def create_sample_directories(self):
+            for i in range(len(self.samples)):
+                sample_dir = os.path.join(self.save_directory, f"sample_{i}")
+                os.makedirs(sample_dir, exist_ok=True)
+
         def on_epoch_end(self, epoch, logs=None):
             for i, (sample, confmap) in enumerate(zip(self.samples, self.confmaps)):
-                save_path = os.path.join(
-                    self.save_directory,
-                    f"epoch_{epoch + 1}_sample_{i}.png"
-                )
+                sample_save_dir = os.path.join(self.save_directory, f"sample_{i}")
                 show_pred(
                     self.model,
                     sample,
                     confmap,
-                    sample_idx=i,
                     epoch_num=epoch,
-                    save_directory=self.save_directory,
-                    show_figure=False
+                    save_directory=sample_save_dir,
                           )

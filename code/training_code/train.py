@@ -94,9 +94,7 @@ class Trainer:
             self._load_checkpoint(self.checkpoint_load_path)
 
         self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
-        self.validation = (self.val_box, self.val_confmap)
-        viz_idx = [0, 1, 2]
-        viz_sample_list = (self.val_box[viz_idx], self.val_confmap[viz_idx])
+        viz_sample_list = (self.val_box[:general_configuration.how_many_visualizations], self.val_confmap[:general_configuration.how_many_visualizations])
 
         print("img_size:", self.img_size, flush=True)
         print("num_output_channels:", self.num_output_channels, flush=True)
