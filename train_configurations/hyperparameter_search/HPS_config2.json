@@ -9,7 +9,7 @@
     "loss function": "MSE",
     "epochs pointwise loss": 0,
     "val fraction": 0.1,
-    "learning rate": 0.001,
+    "learning rate": 0.025,
     "optimizer epsilon": 1e-07,
     "weight initialization method": "xavier_uniform",
     "how many visualizations": 50,

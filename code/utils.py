@@ -40,7 +40,6 @@ class TrainConfig:
             self.debug_mode = bool(config["debug mode"])
             self.batch_size = config['batch size']
             self.num_epochs = config['epochs']
-            self.batches_per_epoch = config['batches per epoch']
             self.val_fraction = config['val fraction']
             self.loss_function_as_string = config["loss function"]
             self.learning_rate = config["learning rate"]
