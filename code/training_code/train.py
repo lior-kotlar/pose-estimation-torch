@@ -73,7 +73,7 @@ class Trainer:
         self.model.to(self.device)
         self.model_input_shape = (1, self.number_of_input_channels, self.img_size[1], self.img_size[2])
 
-        self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
+        self.loss_function = general_configuration.configure_loss()
         self.optimizer = optimizer_from_string[general_configuration.optimizer_as_string](
             self.model.parameters(),
             lr=general_configuration.learning_rate,

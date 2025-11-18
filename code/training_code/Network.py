@@ -147,7 +147,8 @@ class Network:
             num_blocks,\
             kernel_size,\
             dilation_rate,\
-            weight_init_str,\
+            enc_weight_init_str,\
+            dec_weight_init_str,\
             dropout = general_configuration.get_network_configuration()
             
             self.encoder = Network.encoder_atrous(
@@ -156,14 +157,14 @@ class Network:
                 num_blocks=num_blocks,
                 kernel_size=kernel_size,
                 dilation_rate=dilation_rate,
-                weight_init_method_str=weight_init_str,
+                weight_init_method_str=enc_weight_init_str,
                 dropout=dropout
             )
             encoder_out_channels = num_base_filters * (2 ** num_blocks)
             self.decoder = Network.decoder(
                 input_channels=encoder_out_channels,
                 output_channels=number_of_output_channels,
-                weight_init_method_str=weight_init_str,
+                weight_init_method_str=dec_weight_init_str,
                 num_base_filters=num_base_filters,
                 num_blocks=num_blocks,
                 kernel_size=kernel_size

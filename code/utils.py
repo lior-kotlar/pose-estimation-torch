@@ -45,7 +45,8 @@ class TrainConfig:
             self.learning_rate = config["learning rate"]
             self.optimizer_as_string = config["optimizer"]
             self.optimizer_epsilon = config["optimizer epsilon"]
-            self.weight_initialization_method = config["weight initialization method"]
+            self.encoder_weight_initialization_method = config["encoder weight initialization method"]
+            self.decoder_weight_initialization_method = config["decoder weight initialization method"]
             self.reduce_lr_factor = config["reduce lr factor"]
             self.reduce_lr_patience = config["reduce lr patience"]
             self.reduce_lr_min_delta = config["reduce lr min delta"]
@@ -127,7 +128,8 @@ class TrainConfig:
             self.num_blocks,\
             self.kernel_size,\
             self.dilation_rate,\
-            self.weight_initialization_method,\
+            self.encoder_weight_initialization_method,\
+            self.decoder_weight_initialization_method,\
             self.dropout
     
     def get_resume_training_checkpoint_path(self):
@@ -141,6 +143,18 @@ class TrainConfig:
     
     def set_learning_rate(self, new_lr):
         self.learning_rate = new_lr
+
+    def configure_loss(self):
+        if self.loss_function_as_string == "MSE":
+            try:
+                reduction = self.config["loss reduction"]
+            except KeyError:
+                print("No reduction method specified for MSE loss. Using default 'mean'.")
+                reduction = "mean"
+            if reduction == "mean":
+                return MSELoss(reduction="mean")
+            elif reduction == "sum":
+                return MSELoss(reduction="sum")
 
 class PredictConfig:
     def __init__(self, config_path):
