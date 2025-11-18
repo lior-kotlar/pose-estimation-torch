@@ -78,7 +78,7 @@ class Trainer:
 
         summary(self.model, input_size=(self.number_of_input_channels, self.img_size[1], self.img_size[2]))
 
-        self.loss_function = loss_from_string[self.general_configuration.loss_function_as_string]()
+        self.loss_function = self.general_configuration.configure_loss()
         self.optimizer = optimizer_from_string[self.general_configuration.optimizer_as_string](
             self.model.parameters(),
             lr=self.general_configuration.learning_rate,
