@@ -69,12 +69,20 @@ class Network:
 
             layers.append(nn.Dropout(p=dropout))
 
-            self.model = nn.Sequential(*layers)
+            self.layers = nn.ModuleList(layers)
 
-            self.model.apply(lambda m: Network.init_weights(self, m, weight_init_function))
+            self.layers.apply(lambda m: Network.init_weights(self, m, weight_init_function))
 
         def forward(self, x):
-            return self.model(x)
+            """
+            Processes the input through each layer sequentially for easy debugging.
+            """
+            for i, layer in enumerate(self.layers):
+                # You can place a breakpoint here to inspect 'x' after each layer
+                x = layer(x)
+                # print(f"After layer {i}, x.shape: {x.shape}") # Optional: Print for inspection
+                
+            return x
         
         def get_out_channels(self):
             return self.out_channels
@@ -129,12 +137,20 @@ class Network:
                 kernel_size=1
             ))
 
-            self.model = nn.Sequential(*layers)
+            self.layers = nn.ModuleList(layers)
 
-            self.model.apply(lambda m: Network.init_weights(self, m, weight_init_function))
+            self.layers.apply(lambda m: Network.init_weights(self, m, weight_init_function))
 
         def forward(self, x):
-            return self.model(x)
+            """
+            Processes the input through each layer sequentially for easy debugging.
+            """
+            for i, layer in enumerate(self.layers):
+                # You can place a breakpoint here to inspect 'x' after each layer
+                x = layer(x)
+                # print(f"After layer {i}, x.shape: {x.shape}") # Optional: Print for inspection
+                
+            return x
         
     class encoder_standard(nn.Module):
         def __init__(
