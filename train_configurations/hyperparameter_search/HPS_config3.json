@@ -6,7 +6,7 @@
     "epochs": 50,
     "batches per epoch": 2000,
     "do curriculum learning": 0,
-    "loss function": "MSE",
+    "loss function": "KL",
     "epochs pointwise loss": 0,
     "val fraction": 0.1,
     "learning rate": 0.001,

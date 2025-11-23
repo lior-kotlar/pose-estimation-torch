@@ -12,6 +12,7 @@ from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam, SGD, RMSprop
 import h5py
 import glob
+from training_code.Losses import SoftArgmaxLoss, SpatialKLLoss
 
 TRAINING_CODE_DIRECTORY = "code/training_code"
 PREDICTION_CODE_DIRECTORY = "code/prediction_code_lior"
@@ -155,6 +156,13 @@ class TrainConfig:
                 return MSELoss(reduction="mean")
             elif reduction == "sum":
                 return MSELoss(reduction="sum")
+        elif self.loss_function_as_string == "KL":
+            return SpatialKLLoss()
+        elif self.loss_function_as_string == "softargmax":
+            return SoftArgmaxLoss()
+        else:
+            raise ValueError(f"Loss function {self.loss_function_as_string} not recognized.")
+
 
 class PredictConfig:
     def __init__(self, config_path):
