@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from utils import TrainConfig
-from constants import ALL_CAMS_18_POINTS, ALL_CAMS_ALL_POINTS
+from constants import ALL_CAMS_18_POINTS, ALL_CAMS_ALL_POINTS, MODEL_PER_CAM_PER_WING_STANDARD
 
 
 class Network:
@@ -135,6 +135,173 @@ class Network:
 
         def forward(self, x):
             return self.model(x)
+        
+    class encoder_standard(nn.Module):
+        def __init__(
+                        self,
+                        img_size,
+                        num_base_filters,
+                        num_blocks,
+                        kernel_size,
+                        dilation_rate,
+                        weight_init_method_str,
+                        dropout
+                    ):
+            super(Network.encoder_standard, self).__init__()
+            weight_init_function = Network.config_init_method(self, weight_init_method_str)
+            layers = []
+            in_channels = img_size[0]
+            current_kernel_size = kernel_size
+            for block_idx in range(num_blocks):
+                out_channels = num_base_filters*(2**block_idx)
+                layers.append(nn.Conv2d(
+                     in_channels=in_channels,
+                     out_channels=out_channels,
+                     kernel_size=current_kernel_size,
+                     dilation=dilation_rate,
+                     padding=1
+                ))
+                layers.append(nn.LeakyReLU(inplace=True))
+                layers.append(nn.Conv2d(
+                     in_channels=out_channels,
+                     out_channels=out_channels,
+                     kernel_size=current_kernel_size,
+                     dilation=dilation_rate,
+                     padding=1
+                ))
+                layers.append(nn.LeakyReLU(inplace=True))
+                layers.append(nn.MaxPool2d(kernel_size=2, stride=2))  # padding=0 usually
+                layers.append(nn.ReLU(inplace=True))
+                layers.append(nn.Dropout(p=dropout))
+
+                in_channels = out_channels
+                current_kernel_size -= 2
+
+            self.out_channels = num_base_filters * (2 ** num_blocks)
+
+            layers.append(nn.Conv2d(in_channels, self.out_channels, current_kernel_size,
+                                    padding='same',
+                                    dilation=dilation_rate))
+            layers.append(nn.LeakyReLU(inplace=True))
+
+            layers.append(nn.Conv2d(self.out_channels, self.out_channels, current_kernel_size,
+                                    padding='same',
+                                    dilation=dilation_rate))
+            layers.append(nn.LeakyReLU(inplace=True))
+
+            layers.append(nn.Conv2d(self.out_channels, self.out_channels, current_kernel_size,
+                                    padding='same',
+                                    dilation=dilation_rate))
+            layers.append(nn.LeakyReLU(inplace=True))
+
+            layers.append(nn.Dropout(p=dropout))
+
+            self.layers = nn.ModuleList(layers)
+
+            self.layers.apply(lambda m: Network.init_weights(self, m, weight_init_function))
+
+        def forward(self, x):
+            """
+            Processes the input through each layer sequentially for easy debugging.
+            """
+            for i, layer in enumerate(self.layers):
+                # You can place a breakpoint here to inspect 'x' after each layer
+                x = layer(x)
+                # print(f"After layer {i}, x.shape: {x.shape}") # Optional: Print for inspection
+                
+            return x
+        
+        def get_out_channels(self):
+            return self.out_channels
+        
+    class decoder_standard(nn.Module):
+        def __init__(
+                self,
+                input_channels,
+                output_channels,
+                weight_init_method_str,
+                num_base_filters,
+                num_blocks,
+                kernel_size
+                ):
+            super(Network.decoder_standard, self).__init__()
+            weight_init_function = Network.config_init_method(self, weight_init_method_str)
+            layers = []
+            in_channels = input_channels
+            current_kernel_size = kernel_size-2
+            current_padding = 1
+            for block_idx in range(num_blocks-1, -1, -1):
+                out_channels = num_base_filters * (2 ** block_idx)
+
+                layers.append(nn.ConvTranspose2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=current_kernel_size,
+                    stride=2,
+                    padding=current_padding,
+                ))
+
+                layers.append(nn.LeakyReLU(inplace=True))
+
+                layers.append(nn.Conv2d(
+                    out_channels,
+                    out_channels,
+                    current_kernel_size,
+                    padding=current_padding))
+                
+                layers.append(nn.LeakyReLU(inplace=True))
+
+                layers.append(nn.Conv2d(
+                    out_channels,
+                    out_channels,
+                    current_kernel_size,
+                    padding=current_padding))
+                
+                layers.append(nn.LeakyReLU(inplace=True))
+
+                in_channels = out_channels
+                current_kernel_size += 2
+                current_padding += 1
+
+            layers.append(nn.ConvTranspose2d(
+                in_channels,
+                in_channels,
+                kernel_size=kernel_size,
+                padding=1
+            ))
+
+            layers.append(nn.LeakyReLU(inplace=True))
+
+            layers.append(nn.ConvTranspose2d(
+                in_channels,
+                in_channels,
+                kernel_size=kernel_size,
+                padding=1
+            ))
+
+            layers.append(nn.LeakyReLU(inplace=True))
+
+            layers.append(nn.ConvTranspose2d(
+                in_channels,
+                10,          # fixed output channels
+                kernel_size=4,
+                padding=0
+            ))
+
+            self.layers = nn.ModuleList(layers)
+
+            self.layers.apply(lambda m: Network.init_weights(self, m, weight_init_function))
+
+        def forward(self, x):
+            """
+            Processes the input through each layer sequentially for easy debugging.
+            """
+            for i, layer in enumerate(self.layers):
+                # You can place a breakpoint here to inspect 'x' after each layer
+                x = layer(x)
+                # print(f"After layer {i}, x.shape: {x.shape}") # Optional: Print for inspection
+                
+            return x
 
     class simple_network(nn.Module):
 
@@ -161,6 +328,42 @@ class Network:
             )
             encoder_out_channels = num_base_filters * (2 ** num_blocks)
             self.decoder = Network.decoder(
+                input_channels=encoder_out_channels,
+                output_channels=number_of_output_channels,
+                weight_init_method_str=weight_init_str,
+                num_base_filters=num_base_filters,
+                num_blocks=num_blocks,
+                kernel_size=kernel_size
+            )
+
+        def forward(self, x):
+            x = self.encoder(x)
+            x = self.decoder(x)
+            return x
+        
+    class standard_network(nn.Module):
+        def __init__(self, general_configuration: TrainConfig, image_size, number_of_output_channels):
+            super(Network.standard_network, self).__init__()
+            image_size = image_size
+
+            num_base_filters,\
+            num_blocks,\
+            kernel_size,\
+            dilation_rate,\
+            weight_init_str,\
+            dropout = general_configuration.get_network_configuration()
+            
+            self.encoder = Network.encoder_standard(
+                img_size=(image_size[0], image_size[1], image_size[2]),
+                num_base_filters=num_base_filters,
+                num_blocks=num_blocks,
+                kernel_size=kernel_size,
+                dilation_rate=dilation_rate,
+                weight_init_method_str=weight_init_str,
+                dropout=dropout
+            )
+            encoder_out_channels = num_base_filters * (2 ** num_blocks)
+            self.decoder = Network.decoder_standard(
                 input_channels=encoder_out_channels,
                 output_channels=number_of_output_channels,
                 weight_init_method_str=weight_init_str,
@@ -252,6 +455,12 @@ class Network:
         #     model = self.simple_network()
         if self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
             model = self.FourCamsNetwork(
+                general_configuration=general_configuration,
+                image_size=self.image_size,
+                number_of_output_channels=self.number_of_output_channels)
+        
+        if self.model_type == MODEL_PER_CAM_PER_WING_STANDARD:
+            model = self.standard_network(
                 general_configuration=general_configuration,
                 image_size=self.image_size,
                 number_of_output_channels=self.number_of_output_channels)
