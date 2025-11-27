@@ -252,26 +252,28 @@ class Network:
                 layers.append(nn.ConvTranspose2d(
                     in_channels=in_channels,
                     out_channels=out_channels,
-                    kernel_size=current_kernel_size,
+                    kernel_size=4,
                     stride=2,
-                    padding=current_padding,
+                    padding=1,
                 ))
 
                 layers.append(nn.LeakyReLU(inplace=True))
 
                 layers.append(nn.Conv2d(
-                    out_channels,
-                    out_channels,
-                    current_kernel_size,
-                    padding=current_padding))
+                    in_channels=out_channels,
+                    out_channels=out_channels,
+                    kernel_size=current_kernel_size,
+                    padding=current_padding
+                ))
                 
                 layers.append(nn.LeakyReLU(inplace=True))
 
                 layers.append(nn.Conv2d(
-                    out_channels,
-                    out_channels,
-                    current_kernel_size,
-                    padding=current_padding))
+                    in_channels=out_channels,
+                    out_channels=out_channels,
+                    kernel_size=current_kernel_size,
+                    padding=current_padding
+                ))
                 
                 layers.append(nn.LeakyReLU(inplace=True))
 
@@ -280,17 +282,8 @@ class Network:
                 current_padding += 1
 
             layers.append(nn.ConvTranspose2d(
-                in_channels,
-                in_channels,
-                kernel_size=kernel_size,
-                padding=1
-            ))
-
-            layers.append(nn.LeakyReLU(inplace=True))
-
-            layers.append(nn.ConvTranspose2d(
-                in_channels,
-                in_channels,
+                in_channels=in_channels,
+                out_channels=in_channels,
                 kernel_size=kernel_size,
                 padding=1
             ))
@@ -300,8 +293,8 @@ class Network:
             layers.append(nn.ConvTranspose2d(
                 in_channels,
                 10,          # fixed output channels
-                kernel_size=4,
-                padding=0
+                kernel_size=kernel_size,
+                padding=1
             ))
 
             self.layers = nn.ModuleList(layers)
@@ -314,6 +307,7 @@ class Network:
             """
             for i, layer in enumerate(self.layers):
                 # You can place a breakpoint here to inspect 'x' after each layer
+                # print(f"Before layer {i}, x.shape: {x.shape}")
                 x = layer(x)
                 # print(f"After layer {i}, x.shape: {x.shape}") # Optional: Print for inspection
                 
