@@ -12,7 +12,7 @@ import Datasets
 import Network
 import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
-from utils import TrainConfig, loss_from_string, optimizer_from_string, create_train_run_folders, save_training_code
+from utils import TrainConfig, optimizer_from_string, create_train_run_folders, save_training_code
 import Callbacks
 from constants import CONFIGURATION_FILE_NAME
 

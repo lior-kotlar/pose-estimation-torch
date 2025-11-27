@@ -237,11 +237,11 @@ class ModelCallbacks:
         def plot_history(self, history, save_path):
             """ Plots the vision history. """
 
-            loss = [x["train loss"] for x in history]
+            train_loss = [x["train loss"] for x in history]
             val_loss = [x["validation loss"] for x in history]
 
             plt.figure(figsize=(8, 4))
-            plt.plot(loss)
+            plt.plot(train_loss)
             plt.plot(val_loss)
             plt.semilogy()
             plt.grid()
@@ -304,4 +304,4 @@ class ModelCallbacks:
                     confmap,
                     epoch_num=epoch,
                     save_directory=sample_save_dir,
-                          )
+                )

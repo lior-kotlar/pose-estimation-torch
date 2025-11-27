@@ -2,6 +2,52 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class JSDLoss(nn.Module):
+    
+    def __init__(self):
+        super(JSDLoss, self).__init__()
+    
+    def forward(self, pred_logits, gt_maps):
+        b, c, _, _ = pred_logits.shape
+    
+        # Flatten spatial dimensions
+        flat_pred_logits = pred_logits.view(b, c, -1)
+        flat_gt = gt_maps.view(b, c, -1)
+        
+        # 1. Get P: Ground Truth Probabilities (Normalize Gaussian)
+        P = flat_gt / (flat_gt.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        # 2. Get Q: Prediction Probabilities
+        # Note: We use Softmax (not LogSoftmax) first, because we need to ADD them to calculate M
+        Q = F.softmax(flat_pred_logits, dim=-1)
+        
+        # 3. Calculate M: The Mixture Distribution
+        M = 0.5 * (P + Q)
+        
+        # 4. Compute Log(M)
+        # F.kl_div requires the first argument to be in Log-Space.
+        # We add epsilon to M inside the log to ensure stability.
+        log_M = torch.log(M + 1e-8)
+        
+        # 5. Calculate the two KL terms
+        # Recall PyTorch Syntax: F.kl_div(input_log_probs, target_probs)
+        # The formula is sum(Target * (log(Target) - Input_Log_Prob))
+        
+        # Term 1: KL(P || M) 
+        # "How far is Ground Truth from the Mixture?"
+        # Target = P, Input = log_M
+        kl_P_M = F.kl_div(log_M, P, reduction='batchmean')
+        
+        # Term 2: KL(Q || M)
+        # "How far is Prediction from the Mixture?"
+        # Target = Q, Input = log_M
+        kl_Q_M = F.kl_div(log_M, Q, reduction='batchmean')
+        
+        # 6. Final JS Divergence
+        loss = 0.5 * (kl_P_M + kl_Q_M)
+        
+        return loss
+
 class SpatialKLLoss(nn.Module):
     """
     Distribution Matching
@@ -31,7 +77,7 @@ class SpatialKLLoss(nn.Module):
         
         # 3. Calculate KL Divergence
         # reduction='batchmean' averages the loss over the batch size
-        loss = F.kl_div(flat_pred_log_prob, flat_gt_prob, reduction='batchmean')
+        loss = F.kl_div(flat_pred_log_prob, flat_gt_prob, reduction='batchmean') + F.kl_div(flat_gt_prob, flat_pred_log_prob, reduction='batchmean')
         
         return loss
 

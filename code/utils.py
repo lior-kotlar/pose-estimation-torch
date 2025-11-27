@@ -12,20 +12,13 @@ from torch.nn import MSELoss, BCELoss, BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam, SGD, RMSprop
 import h5py
 import glob
-from training_code.Losses import SoftArgmaxLoss, SpatialKLLoss
+from training_code.Losses import SoftArgmaxLoss, SpatialKLLoss, JSDLoss
 
 TRAINING_CODE_DIRECTORY = "code/training_code"
 PREDICTION_CODE_DIRECTORY = "code/prediction_code_lior"
 PREDICTION_CONFIGURATIONS_DIRECTORY = "predict_configurations"
 SBATCH_FILES_DIRECTORY = "sbatch_files"
 VIZ_OUTPUT_DIRECTORY_NAME = "viz_pred"
-
-loss_from_string = {
-    "MSE": MSELoss,
-    "BCE": BCELoss,
-    "BCEWithLogits": BCEWithLogitsLoss,
-    "CrossEntropy": CrossEntropyLoss,
-}
 
 optimizer_from_string = {
     "Adam": Adam,
@@ -160,6 +153,8 @@ class TrainConfig:
             return SpatialKLLoss()
         elif self.loss_function_as_string == "softargmax":
             return SoftArgmaxLoss()
+        elif self.loss_function_as_string == "JSD":
+            return JSDLoss()
         else:
             raise ValueError(f"Loss function {self.loss_function_as_string} not recognized.")
 
