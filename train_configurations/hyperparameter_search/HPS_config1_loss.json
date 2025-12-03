@@ -1,12 +1,12 @@
 {
-    "debug mode": 0,
+    "debug mode": 1,
 
     "// training parameters //": 0,
-    "batch size": 32,
+    "batch size": 16,
     "epochs": 50,
     "batches per epoch": 2000,
     "do curriculum learning": 0,
-    "loss function": "MSE",
+    "loss function": "JSD",
     "loss reduction": "sum",
     "epochs pointwise loss": 0,
     "val fraction": 0.1,
