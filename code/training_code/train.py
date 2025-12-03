@@ -200,7 +200,26 @@ class Trainer:
         self.optimizer.zero_grad()
         outputs = self.model(inputs)
         loss = self.loss_function(outputs, labels)
+        # --- CRITICAL DEBUG BLOCK ---
+        if torch.isnan(loss) or torch.isinf(loss):
+            print("CRITICAL ERROR: Loss turned to NaN/Inf during training step!")
+            print(f"Loss value: {loss.item()}")
+            
+            # Check if logits caused it
+            if torch.isnan(outputs).any():
+                print(" -> Cause: Model outputs were already NaN before loss.")
+            else:
+                print(" -> Cause: The Loss function math failed (likely log(0)).")
+            
+            # STOP execution so you can see the error
+            raise ValueError("Training stopped due to NaN loss.")
+        # -----------------------------
+
         loss.backward()
+        
+        # --- OPTIONAL: Gradient Clipping (Highly Recommended for JSD) ---
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        # --------------------------------------------------------------
         self.optimizer.step()
         return loss.item()
 

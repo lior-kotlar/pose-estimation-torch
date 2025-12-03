@@ -1,5 +1,5 @@
 {
-    "debug mode": 1,
+    "debug mode": 0,
 
     "// training parameters //": 0,
     "batch size": 16,
