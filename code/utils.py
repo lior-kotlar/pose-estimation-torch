@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from sympy import re
 matplotlib.use("Agg")
 import os
@@ -38,7 +39,6 @@ class TrainConfig:
             # training configuration
             self.config = config
             self.debug_mode = bool(config["debug mode"])
-            self.batch_size = config['batch size']
             self.num_epochs = config['epochs']
             self.val_fraction = config['val fraction']
             self.loss_function_as_string = config["loss function"]
@@ -554,89 +554,82 @@ def get_start_frame(movie_dir_path):
 
 def draw_sample_with_points(sample_image, predicted_points, gt_points, save_file_path):
     """
-    Saves a visualization of ground truth and predicted landmarks on a sample image
-    using Matplotlib.
-
-    The function plots ground truth points as green circles ('o') and predicted points
-    as red crosses ('x') on the image and saves it to a file.
-
-    Args:
-        sample_image (np.ndarray): The grayscale input image, expected shape (192, 192).
-                                   Can be float [0, 1] or uint8 [0, 255].
-        gt_labels (np.ndarray): Ground truth landmarks, shape (10, 2) of (x, y) coords.
-        pred_labels (np.ndarray): Predicted landmarks, shape (10, 2) of (x, y) coords.
-        output_filename (str): The path and filename to save the output image.
+    Saves a visualization of ground truth and predicted landmarks on a sample image.
+    
+    GT: Hollow circles (color coded by index).
+    Pred: 'x' markers (color coded by index).
     """
     try:
-        # 1. Create a figure and axes for the plot
+        # 1. Create a figure and axes
         fig, ax = plt.subplots()
 
         # 2. Handle data type range for imshow
-        # imshow auto-scales uint8 [0, 255] and float [0, 1]
-        # We must manually set range if it's float [0, 255]
         img_to_show = sample_image
         v_min, v_max = None, None
         
         if img_to_show.dtype in (np.float32, np.float64):
             if img_to_show.max() > 1.0:
-                # It's a float image but with 0-255 range
                 v_min, v_max = 0, 255
 
         # 3. Display the grayscale image
-        # cmap='gray' is essential for grayscale
         ax.imshow(img_to_show, cmap='gray', vmin=v_min, vmax=v_max)
 
-        # 4. Draw Ground Truth points (as green circles)
-        # Matplotlib scatter needs x and y as separate arrays
+        # GENERATE COLORS
+        # Create a unique color for each point index.
+        # We use the 'rainbow' colormap to ensure distinction.
+        num_points = len(gt_points)
+        colors = cm.rainbow(np.linspace(0, 1, num_points))
+
+        # 4. Draw Ground Truth points 
+        # Requirement: Empty circle, very narrow line, color-coded.
         ax.scatter(
-            gt_points[:, 0],  # All x coordinates
-            gt_points[:, 1],  # All y coordinates
-            c='g',            # Color green
-            marker='o',       # Circle marker
-            s=10,             # Size of the marker
+            gt_points[:, 0], 
+            gt_points[:, 1], 
+            edgecolors=colors,    # Sets the outline color to our generated array
+            facecolors='none',    # Makes the center of the circle transparent/empty
+            marker='o', 
+            s=30,                 # Size: Increased slightly so the "hollow" part is visible
+            linewidths=0.5,       # "Very narrow" line width
             label='Ground Truth'
         )
 
-        for i, (x, y) in enumerate(gt_points):
-            # Add text index (0-9) slightly offset from the point
-            ax.text(x + 1.5, y + 1.5, str(i), color='g', fontsize=5, 
-                    bbox=dict(facecolor='white', alpha=0.4, pad=0.1, boxstyle='round,pad=0.1'))
-
-        # 5. Draw Predicted points (as red 'x' markers)
         ax.scatter(
-            predicted_points[:, 0], # All x coordinates
-            predicted_points[:, 1], # All y coordinates
-            c='r',             # Color red
-            marker='x',        # Cross marker
-            s=10,              # Size of the marker
+            gt_points[:, 0], 
+            gt_points[:, 1], 
+            c=colors,             # Color the dot (filled)
+            marker='o',           # Circle marker
+            s=2,                  # Very small size for the "dot"
+            linewidths=0,         # No border on the dot
+            label='Ground Truth (Center)'
+        )
+
+        # 5. Draw Predicted points
+        # Requirement: 'x' marker, narrower line, matching color to GT.
+        ax.scatter(
+            predicted_points[:, 0], 
+            predicted_points[:, 1], 
+            c=colors,             # Sets the line color of the 'x'
+            marker='x', 
+            s=30,                 # Size matches GT for consistency
+            linewidths=0.5,       # "Narrower" line width
             label='Prediction'
         )
 
-        for i, (x, y) in enumerate(predicted_points):
-            # Add text index (0-9) slightly offset from the point (different offset)
-            ax.text(x + 1.5, y - 1.5, str(i), color='r', fontsize=5, 
-                    bbox=dict(facecolor='white', alpha=0.4, pad=0.1, boxstyle='round,pad=0.1'))
+        # Note: The text numbering loops have been removed as requested.
 
         # 6. Clean up the plot
-        # Remove axes, ticks, and labels
         ax.axis('off')
         
-        # Optional: Add a legend. Can be placed inside:
-        ax.legend(loc='upper right', fontsize='small')
-
         # 7. Save the final image
-        # bbox_inches='tight' and pad_inches=0 remove whitespace borders
         fig.savefig(
             save_file_path, 
             bbox_inches='tight', 
             pad_inches=0, 
-            dpi=150  # Set DPI for good quality
+            dpi=150 
         )
         
-        # 8. Close the figure to free memory
+        # 8. Close the figure
         plt.close(fig)
-        
-        # print(f"Successfully saved visualization to {save_file_path}")
 
     except Exception as e:
         print(f"Error saving image to {save_file_path} using Matplotlib: {e}")

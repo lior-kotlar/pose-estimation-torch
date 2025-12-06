@@ -25,3 +25,5 @@ model_types_to_channels = {
     MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS: 4,
     MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY: 4
 }
+
+CONFIGURATION_FILE_NAME = "configuration.json"

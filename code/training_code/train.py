@@ -11,8 +11,9 @@ import Datasets
 import Network
 import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
-from utils import TrainConfig, loss_from_string, optimizer_from_string, show_interest_points_with_index, show_sample_channels, create_train_run_folders, save_training_code
+from utils import TrainConfig, loss_from_string, optimizer_from_string, create_train_run_folders, save_training_code
 import Callbacks
+from constants import CONFIGURATION_FILE_NAME
 
 
 N = 0
@@ -46,18 +47,19 @@ class Trainer:
         if general_configuration.debug_mode:
             self.batches_per_epoch = 1
 
+        self.general_configuration = general_configuration
         self.base_run_directory = base_run_directory
-        self.val_fraction = general_configuration.get_val_fraction()
-        self.preprocessor = Preprocessor.Preprocessor(general_configuration)
+        self.ensure_resume_compatibility()
+        self.val_fraction = self.general_configuration.get_val_fraction()
+        self.preprocessor = Preprocessor.Preprocessor(self.general_configuration)
         self.best_val_loss = float("inf")
         self.start_epoch = 0
-        self.num_epochs = general_configuration.get_num_epochs()
-        self.checkpoint_load_path = general_configuration.get_resume_training_checkpoint_path()
+        self.num_epochs = self.general_configuration.get_num_epochs()
+        self.checkpoint_load_path = self.general_configuration.get_resume_training_checkpoint_path()
         if self.checkpoint_load_path and len(self.checkpoint_load_path) > 0 and not os.path.exists(self.checkpoint_load_path):
             raise FileNotFoundError(
                 f"Checkpoint file not found at: {self.checkpoint_load_path}"
             )
-
 
         # Do preprocessing according to the model type
         self.preprocessor.do_preprocess()
@@ -67,42 +69,37 @@ class Trainer:
         self.img_size = (self.box.shape[C], self.box.shape[H], self.box.shape[W])
         self.number_of_input_channels = self.box.shape[C]
         self.num_output_channels = self.confmaps.shape[C]
-        self.network = Network.Network(general_configuration, image_size=self.img_size,
+        self.network = Network.Network(self.general_configuration, image_size=self.img_size,
                                        number_of_output_channels=self.num_output_channels)
         self.model = self.network.get_model()
         self.model.to(self.device)
         self.model_input_shape = (1, self.number_of_input_channels, self.img_size[1], self.img_size[2])
 
-        self.loss_function = loss_from_string[general_configuration.loss_function_as_string]()
-        self.optimizer = optimizer_from_string[general_configuration.optimizer_as_string](
+        self.loss_function = loss_from_string[self.general_configuration.loss_function_as_string]()
+        self.optimizer = optimizer_from_string[self.general_configuration.optimizer_as_string](
             self.model.parameters(),
-            lr=general_configuration.learning_rate,
-            eps=general_configuration.optimizer_epsilon
+            lr=self.general_configuration.learning_rate,
+            eps=self.general_configuration.optimizer_epsilon
             )
         
         self.lr_scheduler = lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='min',
-            factor=general_configuration.reduce_lr_factor,
-            patience=general_configuration.reduce_lr_patience,
-            cooldown=general_configuration.reduce_lr_cooldown,
+            factor=self.general_configuration.reduce_lr_factor,
+            patience=self.general_configuration.reduce_lr_patience,
+            cooldown=self.general_configuration.reduce_lr_cooldown,
             threshold=0.01,
-            min_lr=general_configuration.reduce_lr_min_lr
+            min_lr=self.general_configuration.reduce_lr_min_lr
         )
 
         if self.checkpoint_load_path:
             self._load_checkpoint(self.checkpoint_load_path)
 
-        self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split()
-        viz_sample_list = (self.val_box[:general_configuration.how_many_visualizations], self.val_confmap[:general_configuration.how_many_visualizations])
+        self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split_resume()
+        viz_sample_list = (self.val_box[:self.general_configuration.how_many_visualizations], self.val_confmap[:self.general_configuration.how_many_visualizations])
 
         print("img_size:", self.img_size, flush=True)
         print("num_output_channels:", self.num_output_channels, flush=True)
-        # show_sample_channels(self.viz_sample[0], self.base_run_directory, filename="viz_sample.png")
-        # show_interest_points_with_index(self.viz_sample[0], self.viz_sample[1], self.base_run_directory, filename="viz_sample_points.png")
-        # test_transforms(self.train_box[0], self.train_confmap[0], self.base_run_directory, [
-        #     Augmentor.Scale()
-        # ])
 
         self.callbacks = Callbacks.ModelCallbacks(
                                         model=self.model,
@@ -110,7 +107,28 @@ class Trainer:
                                         viz_sample_list=viz_sample_list,
                                         validation=(self.val_box, self.val_confmap)
                                         )
-        self.general_configuration = general_configuration
+    
+    def ensure_resume_compatibility(self):
+        original_config_path = os.path.join(self.base_run_directory, CONFIGURATION_FILE_NAME)
+        original_configuration = TrainConfig(config_path=original_config_path)
+        if original_configuration.get_val_fraction() != self.general_configuration.get_val_fraction():
+            raise ValueError("Validation fraction in the resumed configuration does not match the original configuration.")
+        if original_configuration.batch_size != self.general_configuration.batch_size:
+            raise ValueError("Batch size in the resumed configuration does not match the original configuration.")
+        if original_configuration.model_type != self.general_configuration.model_type:
+            raise ValueError("Model type in the resumed configuration does not match the original configuration.")
+        if original_configuration.kernel_size != self.general_configuration.kernel_size:
+            raise ValueError("Kernel size in the resumed configuration does not match the original configuration.")
+        if original_configuration.num_base_filters != self.general_configuration.num_base_filters:
+            raise ValueError("Number of base filters in the resumed configuration does not match the original configuration.")
+        if original_configuration.num_blocks != self.general_configuration.num_blocks:
+            raise ValueError("Number of encoder-decoder blocks in the resumed configuration does not match the original configuration.")
+        if original_configuration.loss_function_as_string != self.general_configuration.loss_function_as_string:
+            raise ValueError("Loss function in the resumed configuration does not match the original configuration.")
+        return
+
+    def create_visualization_dataset(self):
+        pass
 
     def save_model_as_scripted(self):
         file_name = "best_model.pt"
@@ -152,10 +170,19 @@ class Trainer:
 
     def _load_checkpoint(self, checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        state_dict = checkpoint["model"]
+        new_state_dict = {}
+        for key, value in state_dict.items():
+            # Replace 'model' with 'layers' in the keys to match current architecture
+            new_key = key.replace("encoder.model", "encoder.layers")
+            new_key = new_key.replace("decoder.model", "decoder.layers")
+            new_state_dict[new_key] = value
+        state_dict = new_state_dict
+
         if hasattr(self.model, "module"):
-            self.model.module.load_state_dict(checkpoint["model"])
+            self.model.module.load_state_dict(state_dict)
         else:
-            self.model.load_state_dict(checkpoint["model"])
+            self.model.load_state_dict(state_dict)
 
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.lr_scheduler.load_state_dict(checkpoint["scheduler"])
@@ -244,7 +271,6 @@ class Trainer:
         minutes, seconds = divmod(rem, 60)
         print(f'Training completed in {int(hours):0>2}:{int(minutes):0>2}:{int(seconds):0>2} (hh:mm:ss)', flush=True)
 
-        
     def train_val_split(self, shuffle=True):
         """ Splits datasets into train and validation sets. """
         val_size = int(np.round(len(self.box) * self.val_fraction))
@@ -254,6 +280,59 @@ class Trainer:
         val_idx = idx[:val_size]
         idx = idx[val_size:]
         return self.box[idx], self.confmaps[idx], self.box[val_idx], self.confmaps[val_idx], idx, val_idx
+    
+    def train_val_split_resume(self, shuffle=True):
+        """ 
+        Splits datasets into train and validation sets. 
+        Handles saving/loading of splits for reproducible resume training.
+        """
+        # 1. Check if we are resuming from a previous run
+        resume_dir = self.general_configuration.resume_training_directory
+        
+        # Define the standard filename for the split
+        split_filename = "train_val_split.npz"
+
+        # --- PATH A: RESUME TRAINING ---
+        if resume_dir is not None:
+            split_file_path = os.path.join(resume_dir, split_filename)
+            
+            if os.path.exists(split_file_path):
+                print(f"[Trainer] Resuming: Loading data split from {split_file_path}")
+                # Load the indices
+                data = np.load(split_file_path)
+                train_idx = data['train_idx']
+                val_idx = data['val_idx']
+            else:
+                raise FileNotFoundError(
+                    f"[Trainer] Resume directory provided, but {split_filename} not found in {resume_dir}. "
+                    "Cannot guarantee reproducible data split."
+                )
+
+        # --- PATH B: FRESH TRAINING ---
+        else:
+            # Standard calculation of size
+            val_size = int(np.round(len(self.box) * self.val_fraction))
+            all_idx = np.arange(len(self.box))
+            
+            # Shuffle if requested
+            if shuffle:
+                np.random.shuffle(all_idx)
+            
+            # Slice the indices
+            val_idx = all_idx[:val_size]
+            train_idx = all_idx[val_size:]
+            
+            # SAVE THE SPLIT
+            save_path = os.path.join(self.base_run_directory, split_filename)
+            np.savez(save_path, train_idx=train_idx, val_idx=val_idx)
+            print(f"[Trainer] Created new split and saved to {save_path}")
+
+        # Apply the indices to the data
+        # Note: Using .copy() is often safer to ensure memory continuity, 
+        # but strictly optional depending on your RAM constraints.
+        return (self.box[train_idx], self.confmaps[train_idx], 
+                self.box[val_idx], self.confmaps[val_idx], 
+                train_idx, val_idx)
 
 def training_main(
                 general_configuration,

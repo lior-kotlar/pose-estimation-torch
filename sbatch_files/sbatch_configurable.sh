@@ -6,6 +6,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=15:00:00
 #SBATCH --gres=gpu:1
+#SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
+#SBATCH --mail-type=END,FAIL
 
 # usage: sbatch -J <YOUR_JOB_NAME> <THIS_SBATCH_FILE_PATH> <CONFIG_PATH>
 CONFIG_PATH=$1

@@ -24,7 +24,6 @@ class Preprocessor:
         if general_configuration.get_single_time_channel():
             self.box = self.box[..., [1, -2, -1]]
         self.num_frames = self.box.shape[0]
-        self.num_channels = self.box.shape[-1]
         self.num_cams = self.box.shape[1]
         self.image_size = self.box.shape[2]
         self.preprocess_function = self.get_preprocess_function()
@@ -114,6 +113,8 @@ class Preprocessor:
             return self.preprocess_all_points_all_cams
         elif self.model_type == ALL_CAMS_18_POINTS:
             return self.preprocess_per_wing_all_cams
+        else:
+            raise NotImplementedError(f"Preprocess function for model type {self.model_type} is not implemented.")
         
         # if self.model_type == ALL_POINTS_MODEL or self.model_type == HEAD_TAIL or self.model_type == TWO_WINGS_TOGATHER or self.model_type == ALL_POINTS_MODEL_VIT:
         #     return self.reshape_to_cnn_input

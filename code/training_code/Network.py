@@ -174,7 +174,7 @@ class Network:
                      in_channels=in_channels,
                      out_channels=out_channels,
                      kernel_size=current_kernel_size,
-                     dilation=dilation_rate,
+                     dilation=1,
                      padding=1
                 ))
                 layers.append(nn.LeakyReLU(inplace=True))
@@ -182,7 +182,7 @@ class Network:
                      in_channels=out_channels,
                      out_channels=out_channels,
                      kernel_size=current_kernel_size,
-                     dilation=dilation_rate,
+                     dilation=1,
                      padding=1
                 ))
                 layers.append(nn.LeakyReLU(inplace=True))
@@ -197,17 +197,17 @@ class Network:
 
             layers.append(nn.Conv2d(in_channels, self.out_channels, current_kernel_size,
                                     padding='same',
-                                    dilation=dilation_rate))
+                                    dilation=1))
             layers.append(nn.LeakyReLU(inplace=True))
 
             layers.append(nn.Conv2d(self.out_channels, self.out_channels, current_kernel_size,
                                     padding='same',
-                                    dilation=dilation_rate))
+                                    dilation=1))
             layers.append(nn.LeakyReLU(inplace=True))
 
             layers.append(nn.Conv2d(self.out_channels, self.out_channels, current_kernel_size,
                                     padding='same',
-                                    dilation=dilation_rate))
+                                    dilation=1))
             layers.append(nn.LeakyReLU(inplace=True))
 
             layers.append(nn.Dropout(p=dropout))
