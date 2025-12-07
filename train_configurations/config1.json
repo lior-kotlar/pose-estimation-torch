@@ -2,7 +2,7 @@
     "debug mode": 0,
 
     "// training parameters //": 0,
-    "batch size": 32,
+    "batch size": 16,
     "epochs": 50,
     "batches per epoch": 2000,
     "do curriculum learning": 0,

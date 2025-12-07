@@ -106,8 +106,7 @@ class Preprocessor:
             return self.preprocess_HEAD_TAIL_PER_CAM
         elif (self.model_type == MODEL_PER_CAM_PER_WING or
               self.model_type == MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS or
-              self.model_type == MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY or
-              self.model_type == MODEL_PER_CAM_PER_WING_STANDARD):
+              self.model_type == MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY):
             return self.preprocess_per_camera_per_wing
         elif self.model_type == ALL_CAMS_ALL_POINTS:
             return self.preprocess_all_points_all_cams
