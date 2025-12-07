@@ -4,6 +4,7 @@ abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
 import torch
+from torchsummary import summary
 from datetime import date
 import time
 import Preprocessor
@@ -74,6 +75,8 @@ class Trainer:
         self.model = self.network.get_model()
         self.model.to(self.device)
         self.model_input_shape = (1, self.number_of_input_channels, self.img_size[1], self.img_size[2])
+
+        summary(self.model, input_size=(self.number_of_input_channels, self.img_size[1], self.img_size[2]))
 
         self.loss_function = loss_from_string[self.general_configuration.loss_function_as_string]()
         self.optimizer = optimizer_from_string[self.general_configuration.optimizer_as_string](
