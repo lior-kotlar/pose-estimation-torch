@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from utils import TrainConfig
-from constants import ALL_CAMS_18_POINTS, ALL_CAMS_ALL_POINTS
+from constants import ALL_CAMS_PER_WING, ALL_CAMS_ALL_WINGS
 
 
 class Network:
@@ -267,7 +267,7 @@ class Network:
         #     model = self.all_3_cams()
         # else:
         #     model = self.simple_network()
-        if self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
+        if self.model_type == ALL_CAMS_PER_WING or self.model_type == ALL_CAMS_ALL_WINGS:
             model = self.FourCamsNetwork(
                 general_configuration=general_configuration,
                 image_size=self.image_size,
