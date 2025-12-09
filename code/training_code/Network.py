@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from utils import TrainConfig
-from constants import ALL_CAMS_18_POINTS, ALL_CAMS_ALL_POINTS
+from constants import ALL_CAMS_PER_WING, ALL_CAMS_ALL_WINGS
 
 
 class Network:
@@ -133,7 +133,7 @@ class Network:
 
             layers.append(nn.Conv2d(
                 in_channels,
-                10,          # fixed output channels
+                output_channels,          # fixed output channels
                 kernel_size=1
             ))
 
@@ -201,6 +201,7 @@ class Network:
             num_blocks,\
             kernel_size,\
             dilation_rate,\
+            weight_init_str,\
             dropout = general_configuration.get_network_configuration()
 
             total_input_channels = image_size[0]
@@ -212,6 +213,7 @@ class Network:
                 num_blocks=num_blocks,
                 kernel_size=kernel_size,
                 dilation_rate=dilation_rate,
+                weight_init_method_str=weight_init_str,
                 dropout=dropout
             )
 
@@ -221,6 +223,7 @@ class Network:
             self.shared_decoder = Network.decoder(
                 input_channels=decoder_input_channels,
                 output_channels=number_of_output_channels//self.NUM_OF_CAMS,
+                weight_init_method_str=weight_init_str,
                 num_base_filters=num_base_filters,
                 num_blocks=num_blocks,
                 kernel_size=kernel_size
@@ -266,7 +269,7 @@ class Network:
         #     model = self.all_3_cams()
         # else:
         #     model = self.simple_network()
-        if self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
+        if self.model_type == ALL_CAMS_PER_WING or self.model_type == ALL_CAMS_ALL_WINGS:
             model = self.FourCamsNetwork(
                 general_configuration=general_configuration,
                 image_size=self.image_size,

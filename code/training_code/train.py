@@ -12,7 +12,7 @@ import Datasets
 import Network
 import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
-from utils import TrainConfig, loss_from_string, optimizer_from_string, create_train_run_folders, save_training_code
+from utils import TrainConfig, optimizer_from_string, create_train_run_folders, save_training_code
 import Callbacks
 from constants import CONFIGURATION_FILE_NAME
 
@@ -78,7 +78,7 @@ class Trainer:
 
         summary(self.model, input_size=(self.number_of_input_channels, self.img_size[1], self.img_size[2]))
 
-        self.loss_function = loss_from_string[self.general_configuration.loss_function_as_string]()
+        self.loss_function = self.general_configuration.configure_loss()
         self.optimizer = optimizer_from_string[self.general_configuration.optimizer_as_string](
             self.model.parameters(),
             lr=self.general_configuration.learning_rate,
@@ -200,7 +200,26 @@ class Trainer:
         self.optimizer.zero_grad()
         outputs = self.model(inputs)
         loss = self.loss_function(outputs, labels)
+        # --- CRITICAL DEBUG BLOCK ---
+        if torch.isnan(loss) or torch.isinf(loss):
+            print("CRITICAL ERROR: Loss turned to NaN/Inf during training step!")
+            print(f"Loss value: {loss.item()}")
+            
+            # Check if logits caused it
+            if torch.isnan(outputs).any():
+                print(" -> Cause: Model outputs were already NaN before loss.")
+            else:
+                print(" -> Cause: The Loss function math failed (likely log(0)).")
+            
+            # STOP execution so you can see the error
+            raise ValueError("Training stopped due to NaN loss.")
+        # -----------------------------
+
         loss.backward()
+        
+        # --- OPTIONAL: Gradient Clipping (Highly Recommended for JSD) ---
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        # --------------------------------------------------------------
         self.optimizer.step()
         return loss.item()
 
@@ -273,16 +292,6 @@ class Trainer:
         hours, rem = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(rem, 60)
         print(f'Training completed in {int(hours):0>2}:{int(minutes):0>2}:{int(seconds):0>2} (hh:mm:ss)', flush=True)
-
-    def train_val_split(self, shuffle=True):
-        """ Splits datasets into train and validation sets. """
-        val_size = int(np.round(len(self.box) * self.val_fraction))
-        idx = np.arange(len(self.box))
-        if shuffle:
-            np.random.shuffle(idx)
-        val_idx = idx[:val_size]
-        idx = idx[val_size:]
-        return self.box[idx], self.confmaps[idx], self.box[val_idx], self.confmaps[val_idx], idx, val_idx
     
     def train_val_split_resume(self, shuffle=True):
         """ 

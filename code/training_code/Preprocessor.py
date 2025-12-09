@@ -108,9 +108,9 @@ class Preprocessor:
               self.model_type == MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS or
               self.model_type == MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY):
             return self.preprocess_per_camera_per_wing
-        elif self.model_type == ALL_CAMS_ALL_POINTS:
+        elif self.model_type == ALL_CAMS_ALL_WINGS:
             return self.preprocess_all_points_all_cams
-        elif self.model_type == ALL_CAMS_18_POINTS:
+        elif self.model_type == ALL_CAMS_PER_WING:
             return self.preprocess_per_wing_all_cams
         else:
             raise NotImplementedError(f"Preprocess function for model type {self.model_type} is not implemented.")
