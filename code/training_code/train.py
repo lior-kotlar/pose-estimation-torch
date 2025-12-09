@@ -292,16 +292,6 @@ class Trainer:
         hours, rem = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(rem, 60)
         print(f'Training completed in {int(hours):0>2}:{int(minutes):0>2}:{int(seconds):0>2} (hh:mm:ss)', flush=True)
-
-    def train_val_split(self, shuffle=True):
-        """ Splits datasets into train and validation sets. """
-        val_size = int(np.round(len(self.box) * self.val_fraction))
-        idx = np.arange(len(self.box))
-        if shuffle:
-            np.random.shuffle(idx)
-        val_idx = idx[:val_size]
-        idx = idx[val_size:]
-        return self.box[idx], self.confmaps[idx], self.box[val_idx], self.confmaps[val_idx], idx, val_idx
     
     def train_val_split_resume(self, shuffle=True):
         """ 
