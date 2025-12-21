@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from utils import TrainConfig
-from constants import ALL_CAMS_PER_WING, ALL_CAMS_ALL_WINGS
+from constants import ALL_CAMS_PER_WING, ALL_CAMS_ALL_WINGS, MODEL_PER_CAM_PER_WING
 
 
 class Network:
@@ -44,7 +44,14 @@ class Network:
                      padding='same'
                 ))
                 layers.append(nn.LeakyReLU(inplace=True))
-                layers.append(nn.MaxPool2d(kernel_size=2, stride=2))  # padding=0 usually
+                layers.append(nn.Conv2d(
+                     in_channels=out_channels,
+                     out_channels=out_channels,
+                     kernel_size=kernel_size,
+                     dilation=dilation_rate,
+                     padding='same'
+                ))
+                layers.append(nn.MaxPool2d(kernel_size=2, stride=2, ceil_mode=True))
                 layers.append(nn.ReLU(inplace=True))
                 layers.append(nn.Dropout(p=dropout))
 
@@ -189,6 +196,9 @@ class Network:
             x = self.encoder(x)
             x = self.decoder(x)
             return x
+        
+        def get_model_type(self):
+            return MODEL_PER_CAM_PER_WING
 
     class FourCamsNetwork(nn.Module):
         NUM_OF_CAMS = 4
@@ -259,10 +269,12 @@ class Network:
             # Concatenate along the channel dimension (dim=1)
             x_maps_merge = torch.cat([map_out_1, map_out_2, map_out_3, map_out_4], dim=1)
             return x_maps_merge
+        
+        def get_model_type(self):
+            return ALL_CAMS_PER_WING
 
 
     def config_model(self, general_configuration: TrainConfig):
-        
         # if self.model_type == ALL_CAMS or self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
         #     model = self.all_4_cams()
         # elif self.model_type == ALL_CAMS_AND_3_GOOD_CAMS:
@@ -275,7 +287,7 @@ class Network:
                 image_size=self.image_size,
                 number_of_output_channels=self.number_of_output_channels)
         
-        else:
+        elif self.model_type == MODEL_PER_CAM_PER_WING:
             model = self.simple_network(
                 general_configuration=general_configuration,
                 image_size=self.image_size,

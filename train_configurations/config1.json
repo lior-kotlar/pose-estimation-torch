@@ -3,7 +3,7 @@
 
     "// training parameters //": 0,
     "batch size": 16,
-    "epochs": 50,
+    "epochs": 75,
     "batches per epoch": 2000,
     "do curriculum learning": 0,
     "loss function": "MSE",
@@ -32,7 +32,7 @@
 
     "// preprocess parameters //": 0,
     "rank wing size": 2,
-    "model type": "MODEL_PER_CAM_PER_WING",
+    "model type": "ALL_CAMS_PER_WING",
     "test path": "-",
     "data path": "/cs/labs/tsevi/lior.kotlar/pose-estimation/training_datasets/random_trainset_201_frames_18_joints.h5",
     "mix with test": 0,

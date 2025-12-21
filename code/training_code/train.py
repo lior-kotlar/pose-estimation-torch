@@ -280,7 +280,7 @@ class Trainer:
         training_start_time = time.time()
         self.callbacks.on_train_start()
 
-        for epoch in range(self.start_epoch, self.num_epochs):
+        for epoch in range(self.start_epoch, self.start_epoch + self.num_epochs):
             self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
             if self.general_configuration.save_every > 0 and \
                     epoch % self.general_configuration.save_every == 0:
@@ -382,7 +382,7 @@ def main():
             base_output_directory=general_configuration.get_base_output_directory(),
             run_name=run_name,
             original_config_file=general_configuration.get_config_file())
-        save_training_code(base_output_directory)
+    save_training_code(base_output_directory)
     
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}", flush=True)

@@ -11,8 +11,7 @@ from scipy.signal import medfilt
 from Visualizer import Visualizer
 from scipy.signal import savgol_filter, find_peaks
 from numpy.polynomial.polynomial import Polynomial
-from utils import get_start_frame
-from utils import find_flip_in_files
+from utils import get_start_frame, find_flip_in_files
 from scipy.spatial.transform import Rotation as R
 import re
 import pandas as pd

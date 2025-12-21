@@ -7,8 +7,7 @@ import scipy.signal
 from skimage.morphology import convex_hull_image
 from scipy.stats import median_abs_deviation
 from Triangulator import Triangulator
-import code.prediction_code_lior.Visualizer as Visualizer
-import matplotlib
+import Visualizer
 from sklearn.decomposition import PCA
 
 import matplotlib.pyplot as plt

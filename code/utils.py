@@ -650,13 +650,6 @@ def draw_sample_with_points(sample_image, predicted_points, gt_points, save_file
         print(f"Error saving image to {save_file_path} using Matplotlib: {e}")
 
 def show_pred(net, sample_image, gt_confmaps, epoch_num, save_directory):
-    """
-    Shows a prediction from the model.
-        net: network to use for prediction
-        idx: index into box/confmap to use or tuple of (box, confmap) with a single sample
-        joint_idx: index of confmap channel to overlay
-        alpha_pred: opacity of confmap overlay
-    """
     net.eval()
     x_batch = sample_image[None, ...]
     try:
@@ -678,3 +671,53 @@ def show_pred(net, sample_image, gt_confmaps, epoch_num, save_directory):
         gt_points=gt_peaks.T,
         save_file_path=save_path
     )
+
+def show_pred_multiple_cameras(net, sample, gt_confmaps, epoch_num, save_directory, num_cameras, num_points):
+    net.eval()
+    x_batch = sample[None, ...]
+    try:
+        device = next(net.parameters()).device
+    except StopIteration:
+        device = torch.device('cpu')
+    
+    x_tensor = torch.from_numpy(x_batch).float().to(device)
+    with torch.no_grad():
+        predicted_confmaps = net(x_tensor)
+        predicted_confmaps = predicted_confmaps.cpu().numpy()
+
+    predicted_peaks = torch_find_peaks(predicted_confmaps)[0,:2,:]
+    gt_peaks = torch_find_peaks(gt_confmaps[None, ...])[0,:2,:]
+    for i in range(num_cameras):
+        current_gt_peaks = gt_peaks[:, i*num_points:(i+1)*num_points]
+        current_predicted_peaks = predicted_peaks[:, i*num_points:(i+1)*num_points]
+        current_image = sample[1 + i*4]
+        save_path = os.path.join(save_directory, f"epoch_{epoch_num}_cam{i+1}.png")
+        draw_sample_with_points(
+            sample_image=np.squeeze(current_image),
+            predicted_points=current_predicted_peaks.T,
+            gt_points=current_gt_peaks.T,
+            save_file_path=save_path
+        )
+
+def find_flip_in_files(movie_dir_path):
+    # Word to search for
+    word_to_search = "flip"
+
+    # Regular expression pattern to match filenames like README_mov{some number}.txt
+    pattern = re.compile(r"README_mov\d+\.txt")
+
+    try:
+        # List all files in the directory
+        for filename in os.listdir(movie_dir_path):
+            # Check if the filename matches the pattern
+            if pattern.match(filename):
+                file_path = os.path.join(movie_dir_path, filename)
+                # Open the file and search for the word
+                with open(file_path, 'r') as file:
+                    for line in file:
+                        if word_to_search in line:
+                            return True
+        return False
+    except FileNotFoundError:
+        # If the directory does not exist, return False
+        return False

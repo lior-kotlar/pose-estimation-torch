@@ -1,5 +1,5 @@
 import torch
-from utils import torch_find_peaks, VIZ_OUTPUT_DIRECTORY_NAME, show_pred
+from utils import torch_find_peaks, VIZ_OUTPUT_DIRECTORY_NAME, show_pred, show_pred_multiple_cameras
 import matplotlib.pyplot as plt
 import os
 import sys
@@ -8,7 +8,7 @@ import numpy as np
 import logging
 from time import time
 from scipy.io import savemat
-
+from constants import MODEL_PER_CAM_PER_WING, ALL_CAMS_PER_WING
 
 class ModelCallbacks:
     def __init__(self, model, base_directory, viz_sample_list, validation):
@@ -298,10 +298,22 @@ class ModelCallbacks:
         def on_epoch_end(self, epoch, logs=None):
             for i, (sample, confmap) in enumerate(zip(self.samples, self.confmaps)):
                 sample_save_dir = os.path.join(self.save_directory, f"sample_{i}")
-                show_pred(
-                    self.model,
-                    sample,
-                    confmap,
-                    epoch_num=epoch,
-                    save_directory=sample_save_dir,
-                )
+                model_type = self.model.get_model_type()
+                if model_type == MODEL_PER_CAM_PER_WING:
+                    show_pred(
+                        self.model,
+                        sample,
+                        confmap,
+                        epoch_num=epoch,
+                        save_directory=sample_save_dir,
+                    )
+                elif model_type == ALL_CAMS_PER_WING:
+                    show_pred_multiple_cameras(
+                        self.model,
+                        sample,
+                        confmap,
+                        epoch_num=epoch,
+                        save_directory=sample_save_dir,
+                        num_cameras=4,
+                        num_points=10
+                    )
