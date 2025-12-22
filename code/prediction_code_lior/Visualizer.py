@@ -847,7 +847,9 @@ class Visualizer:
         # points_2D = points_2D[frames_from_box_and_reprojected_points]
         channel_1 = [1, 1+3, 1+6, 1+9]
         # take the negative
-        box = 1 - h5py.File(box_path, 'r')['/box'][frames_from_box_and_reprojected_points[:-first_analized_frame]][:, channel_1]
+        box = h5py.File(box_path, 'r')['/box']
+        frames_from_box = frames_from_box_and_reprojected_points[: -first_analized_frame] if first_analized_frame > 0 else frames_from_box_and_reprojected_points
+        box = 1 - box[frames_from_box][:, channel_1]
         box = add_nan_frames(box, first_analized_frame)
         # Assuming points is your (N, M, 3) array
         points = Visualizer.get_data_from_h5(h5_path_movie_path, 'points_3D')

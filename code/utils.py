@@ -13,6 +13,7 @@ from torch.optim import Adam, SGD, RMSprop
 import h5py
 import glob
 from training_code.Losses import SoftArgmaxLoss, SpatialKLLoss, JSDLoss
+import re as regex
 
 TRAINING_CODE_DIRECTORY = "code/training_code"
 PREDICTION_CODE_DIRECTORY = "code/prediction_code_lior"
@@ -248,8 +249,6 @@ class PredictConfig:
         self.use_reprojected_masks
 
     def get_triangulator_data(self):
-        if not self.tuned_configration:
-            raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
         return self.calibration_data_path, \
                 self.image_height, \
                 self.image_width
@@ -704,7 +703,7 @@ def find_flip_in_files(movie_dir_path):
     word_to_search = "flip"
 
     # Regular expression pattern to match filenames like README_mov{some number}.txt
-    pattern = re.compile(r"README_mov\d+\.txt")
+    pattern = regex.compile(r"README_mov\d+\.txt")
 
     try:
         # List all files in the directory

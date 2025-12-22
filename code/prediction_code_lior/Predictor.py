@@ -1044,11 +1044,12 @@ class Predictor2D:
                         self.sparse_box.set_frame_camera_channel_dense(frame, cam, self.num_time_channels + mask_num,
                                                                        new_mask)
 
-    def get_cropzone(self):
+    @staticmethod
+    def get_cropzone(movie_path):
         try:
-            cropzone = h5py.File(self.movie_path, "r")["/cropzone"][:]
+            cropzone = h5py.File(movie_path, "r")["/cropzone"][:]
         except:
-            cropzone = h5py.File(self.movie_path, "r")["/cropZone"][:]
+            cropzone = h5py.File(movie_path, "r")["/cropZone"][:]
         return cropzone
 
     def set_body_masks(self, opening_rad=6):

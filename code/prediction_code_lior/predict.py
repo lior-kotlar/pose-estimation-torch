@@ -13,6 +13,8 @@ from Predictor import Predictor2D
 from From_2D_to_3D import From2Dto3D
 from extract_flight_data import FlightAnalysis
 from Visualizer import Visualizer
+from Triangulator import Triangulator
+from extract_flight_data import create_movie_analysis_h5
 
 
 class PredictingManager:
@@ -74,19 +76,45 @@ class PredictingManager:
                 except Exception as e:
                     print(f"An error occurred during prediction: {e}")
         
-            cropzone = predictor.get_cropzone()
+            cropzone = Predictor2D.get_cropzone(movie_path)
+            if predictor is None:
+                calibration_data_path, image_height, image_width = self.config.get_triangulator_data()
+                triangulator = Triangulator(calibration_data_path, image_height, image_width)
+            else:
+                triangulator = predictor.triangulator
             if not only_create_mp4:
                 print("Starting to predict ensemble")
                 best_points_3D, smoothed_3D = find_3D_points_from_ensemble(movie_run_directory_path)
-                reprojected = predictor.triangulator.get_reprojections(best_points_3D, cropzone)
-                smoothed_reprojected = predictor.triangulator.get_reprojections(smoothed_3D, cropzone)
+                reprojected = triangulator.get_reprojections(best_points_3D, cropzone)
+                smoothed_reprojected = triangulator.get_reprojections(smoothed_3D, cropzone)
                 From2Dto3D.save_points_3D(movie_run_directory_path, reprojected, name="points_ensemble_reprojected.npy")
                 From2Dto3D.save_points_3D(movie_run_directory_path, smoothed_reprojected,
-                                          name="points_ensemble_smoothed_reprojected_before_analisys.npy")
-                self.create_movie_html(movie_run_directory_path, name="points_3D_smoothed_ensemble_best_method.npy")
+                                          name="points_ensemble_smoothed_reprojected_before_analysis.npy")
+                
+            self.create_movie_html(movie_run_directory_path, name="points_3D_smoothed_ensemble_best_method.npy")
+            points_3D_path = os.path.join(movie_run_directory_path, 'points_3D_smoothed_ensemble_best_method.npy')
+            reprojected_points_path = os.path.join(movie_run_directory_path, 'points_ensemble_smoothed_reprojected.npy')
+            box_path = movie_path
+            save_path = os.path.join(movie_run_directory_path, 'movie 2D and 3D.gif')
+            movie = os.path.basename(movie_run_directory_path)
+            rotate = True
+            try:
+                movie_hdf5_path, FA = create_movie_analysis_h5(movie, movie_run_directory_path, points_3D_path, smooth=True)
+                Visualizer.plot_all_body_data(movie_hdf5_path)
+                reprojected = triangulator.get_reprojections(FA.points_3D[FA.first_analysed_frame:], cropzone)
+                From2Dto3D.save_points_3D(movie_run_directory_path, reprojected,
+                                          name="points_ensemble_smoothed_reprojected.npy")  # better 2D points
+                Visualizer.create_movie_mp4(movie_hdf5_path, save_frames=None, mode='SAVE',
+                                            reprojected_points_path=reprojected_points_path,
+                                            box_path=box_path, save_path=save_path, rotate=rotate)
+            except Exception as e:
+                print(f"wasn't able to analyes the movie and reproject the points: {e}")
+                exit(1)
+
+            print(f"Finished movie {movie_path}", flush=True)
                 
             
-    def create_movie_html(movie_dir_path, name="points_3D_smoothed_ensemble_best.npy"):
+    def create_movie_html(self, movie_dir_path, name):
         print(movie_dir_path, flush=True)
         start_frame = get_start_frame(movie_dir_path)
         points_path = os.path.join(movie_dir_path, name)
@@ -192,17 +220,31 @@ def predict_3D_points_all_pairs(base_path):
         return big_array_all_points, all_points_arrays
 
 def find_3D_points_from_ensemble(base_path, test=False):
-        result, all_points_list = predict_3D_points_all_pairs(base_path)
-        final_score, best_points_3D, all_models_combinations, all_frames_scores = Predictor2D.find_3D_points_optimize_neighbors(
-            all_points_list)
-
-        print(f"score: {final_score}\n", flush=True)
-        if not test:
-            smoothed_3D = Predictor2D.smooth_3D_points(best_points_3D)
-            save_points_3D(base_path, [], best_points_3D, smoothed_3D, "best_method")
-            save_name = os.path.join(base_path, "all_models_combinations.npy")
-            np.save(save_name, all_models_combinations)
+    points_save_path = os.path.join(base_path, "points_3D_ensemble_best_method.npy")
+    smoothed_save_path = os.path.join(base_path, "points_3D_smoothed_ensemble_best_method.npy")
+    combinations_save_path = os.path.join(base_path, "all_models_combinations.npy")
+    if (os.path.exists(points_save_path) and 
+        os.path.exists(smoothed_save_path) and 
+        os.path.exists(combinations_save_path)):
+        
+        print(f"Found existing output files in {base_path}. Loading from disk and skipping optimization...", flush=True)
+        
+        # Load the arrays
+        best_points_3D = np.load(points_save_path)
+        smoothed_3D = np.load(smoothed_save_path)
         return best_points_3D, smoothed_3D
+
+    result, all_points_list = predict_3D_points_all_pairs(base_path)
+    final_score, best_points_3D, all_models_combinations, all_frames_scores = Predictor2D.find_3D_points_optimize_neighbors(
+        all_points_list)
+
+    print(f"score: {final_score}\n", flush=True)
+    if not test:
+        smoothed_3D = Predictor2D.smooth_3D_points(best_points_3D)
+        save_points_3D(base_path, [], best_points_3D, smoothed_3D, "best_method")
+        save_name = os.path.join(base_path, "all_models_combinations.npy")
+        np.save(save_name, all_models_combinations)
+    return best_points_3D, smoothed_3D
 
 @staticmethod
 def save_points_3D(base_path, best_combination, best_points_3D, smoothed_3D, type_chosen):
