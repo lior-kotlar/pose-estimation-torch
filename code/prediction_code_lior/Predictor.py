@@ -95,7 +95,7 @@ class Predictor2D:
         # else:
         #     self.load_preprocessed_box()
         self.masks_flag = is_masked
-        self.cropzone = self.get_cropzone()
+        self.cropzone = self.get_cropzone(self.movie_path)
         self.im_size = self.sparse_box.shape[2]
         self.num_frames = self.sparse_box.shape[0]
         self.num_pass = 0
@@ -645,21 +645,6 @@ class Predictor2D:
         name, ext = os.path.splitext(box_path_file)
         run_name = f"{name}_{self.model_type}_{date.today().strftime('%b %d')}"
         return run_name
-
-    def create_2D_3D_config(self):
-        json_path = self.config_path_2D_to_3D
-        with open(json_path, "r") as jsonFile:
-            data = json.load(jsonFile)
-
-        # Change the values of some variables
-        data["2D predictions path"] = self.out_path_h5
-        data["align right left"] = 1
-
-        new_json_path = os.path.join(self.run_path, "2D_to_3D_config.json")
-        # Save the JSON string to a different file
-        with open(new_json_path, "w") as jsonFile:
-            json.dump(data, jsonFile)
-        return new_json_path
 
     def create_run_folders(self):
         """ Creates subfolders necessary for outputs of vision. """

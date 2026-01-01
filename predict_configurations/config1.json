@@ -1,8 +1,8 @@
 {
-    "data directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/roni_dark_60ms/mov5/cropped",
+    "data directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/sagiv_free_flight/movie_1_10_4898_ds_3tc_7tj",
     "output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_output/debug_outputs",
     "wings detection model path" : "/cs/labs/tsevi/lior.kotlar/pose-estimation/utils/wings segmentation models/yolo_weights_6_1_24.pt",
-    "calibration path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/roni_dark_60ms/calibration file.h5",
+    "calibration path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/sagiv_free_flight/calibration file.h5",
     "config bank path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_configurations/config_bank.json",
     "specified configs path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_configurations/specified_configs.json",
     "wings detector path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/wings_detetction/yolo_weights_6_1_24.pt",

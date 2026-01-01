@@ -212,3 +212,4 @@ predict_output/debug_outputs/
 inference_datasets/
 logs/
 data_analysis_output/
+comparison_data/
