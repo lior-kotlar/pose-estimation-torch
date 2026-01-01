@@ -111,7 +111,6 @@ def cropmovie(path, cropped_movie_length_in_frames):
 
 
 def main():
-    print('inmain')
     if len(sys.argv) < 3:
         print("Usage: python h5files.py <action> <file_path> [<cropped_movie_length_in_frames> - for 'cm' action]")
         print("Actions: 'r' - read file, 'c' - crop file, 'cm' - crop movie")
