@@ -1,3 +1,4 @@
+import sys
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,6 +15,7 @@ import math
 from prediction_code_lior.extract_flight_data import FlightAnalysis
 from scipy.interpolate import CubicSpline
 
+COMPARISON_DATA_DIRECTORY = os.path.abspath("./comparison_data/comparison_output")
 
 def row_wize_dot(arr1, arr2):
     dot = np.sum(arr1 * arr2, axis=1)
@@ -865,91 +867,15 @@ def smoothness_score(array):
 
     return std, sum
 
-def compare_psi_per_movie(my_data_path, Hull_hdf5_path, movie):
-    with h5py.File(my_data_path, 'r') as my_hdf:
-        my_psi_left = my_hdf['wings_psi_left'][:]
-        my_psi_right = my_hdf['wings_psi_right'][:]
-
-        my_phi_left = my_hdf['wings_phi_left'][:]
-        my_phi_right = my_hdf['wings_phi_right'][:]
-
-    with h5py.File(Hull_hdf5_path, 'r') as h5_file:
-        # Extract Roni's data
-        Hull_group_wing = h5_file[f"mov{movie}/wing"]
-        Hull_group_vectors = h5_file[f"mov{movie}/vectors"]
-        Hull_frames = Hull_group_vectors[:, 1].astype(int) - 1  # Align frames (0-based index)
-
-        first_Hull_frame = Hull_frames[0]
-        Hull_psi_left = Hull_group_wing[:, 4 + 3]  # psi_lw
-        Hull_psi_right = Hull_group_wing[:, 4]
-
-        Hull_psi_left = FlightAnalysis.add_nan_frames(Hull_psi_left, first_Hull_frame)
-        Hull_psi_right = FlightAnalysis.add_nan_frames(Hull_psi_right, first_Hull_frame)
-
-    # mutual frames
-    min_length = min(len(my_phi_right), len(Hull_psi_right))
-    my_phi_right, my_phi_left, my_phi_right, my_psi_left = (
-        my_phi_right[:min_length],
-        my_phi_left[:min_length],
-        my_phi_right[:min_length],
-        my_psi_left[:min_length]
-    )
-    Hull_psi_right, Hull_psi_left = Hull_psi_right[:min_length], Hull_psi_left[:min_length]
-
-    # Step 1: Identify non-NaN indices for both arrays
-    non_nan_indices_my_phi_right = ~np.isnan(my_phi_right + my_phi_left + my_phi_right + my_psi_left)
-    non_nan_indices_Hull_psi_right = ~np.isnan(Hull_psi_right)
-
-    # Step 2: Find common non-NaN indices
-    valid_indices = np.logical_and(non_nan_indices_my_phi_right, non_nan_indices_Hull_psi_right)
-    valid_indices = np.arange(len(my_phi_right))[valid_indices]
-
-    aligned_my_psi_left = my_psi_left[valid_indices]
-    aligned_my_psi_right = my_psi_right[valid_indices]
-    aligned_my_phi_left = my_phi_left[valid_indices]
-    aligned_my_phi_right = my_phi_right[valid_indices]
-
-    Hull_psi_left = Hull_psi_left[valid_indices]
-    Hull_psi_right = Hull_psi_right[valid_indices]
-
-    # now the data is aligned.
-    phi_s = [aligned_my_phi_left, aligned_my_phi_right]
-    my_psi_s = [aligned_my_psi_left, aligned_my_psi_right]
-    Hull_psi_s = [Hull_psi_left, Hull_psi_right]
-
-    for wing in range(2):
-        phi = phi_s[wing]
-        my_psi = my_psi_s[wing]
-        Hull_psi = Hull_psi_s[wing]
-        try:
-            cs_my_phi = CubicSpline(np.arange(len(phi)), phi)
-            cs_my_psi = CubicSpline(np.arange(len(my_psi)), my_psi)
-            cs_Hull_psi = CubicSpline(np.arange(len(Hull_psi)), Hull_psi)
-        except:
-            print("Spline creation error")
-            continue
-
-        min_peaks_inds, min_peak_values = FlightAnalysis.get_peaks(-phi, 0, len(phi) - 1, show=False, prominence=75)
-        for wing_bit in range(len(min_peaks_inds) - 1):
-            start = min_peaks_inds[wing_bit]
-            end = min_peaks_inds[wing_bit + 1]
-            time_stamps = np.linspace(start=start, stop=end, num=100)
-            my_psi_wingbit = cs_my_psi(time_stamps)
-            Hull_psi_wingbit = cs_Hull_psi(time_stamps)
-            my_phi_wingbit = cs_my_phi(time_stamps)
-
-            all_psi_wingbits_my.append(my_psi_wingbit)
-            all_psi_wingbits_Hull.append(Hull_psi_wingbit)
-            all_phi_wingbit.append(my_phi_wingbit)
-
-def compare_psi_smoothness(specific_data_path=None):
+def compare_psi_smoothness(data_dir):
     
     Hull_hdf5_path = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/comparison_data/manipulated_05_12_22.hdf5"
     all_psi_wingbits_my = []
     all_psi_wingbits_Hull = []
     all_phi_wingbit = []
-    my_data_dir = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_output/debug_outputs/movie_1_10_4898_ds_3tc_7tj/movie_1_10_4898_ds_3tc_7tj"
-    movies = [1, 2, 8, 10, 23, 122, 165, 166, 200, 202, 246, 264, 494, 522, 529, 531]
+    my_data_dir = data_dir
+    # movies = [1, 2, 8, 10, 23, 122, 165, 166, 200, 202, 246, 264, 494, 522, 529, 531]
+    movies = [1, 2, 8, 10, 23, 122, 165]
         
     for movie in movies:
         print(f"movie is {movie}")
@@ -1072,9 +998,9 @@ def compare_psi_smoothness(specific_data_path=None):
 
         # Original scatter plots if enabled
         if scatter:
-            x_values_phi = np.full(all_phi_wingbit.shape[1], i - 0.3)
+            x_values_phi = np.full(all_phi_wingbit.shape[1], i)
             x_values_my = np.full(all_psi_wingbits_my.shape[1], i)
-            x_values_Hull = np.full(all_psi_wingbits_Hull.shape[1], i + 0.3)
+            x_values_Hull = np.full(all_psi_wingbits_Hull.shape[1], i)
 
             ax.scatter(x_values_my, y_values_my, color=color_my, alpha=alpha_value,
                        label='Our Psi Data' if i == 0 else "", s=point_size)
@@ -1112,7 +1038,7 @@ def compare_psi_smoothness(specific_data_path=None):
     plt.tight_layout()  # Adjust layout to make room for label rotation
 
     # Save first figure
-    plt.savefig(f"{base_title}.png",
+    plt.savefig(f"{COMPARISON_DATA_DIRECTORY}/{base_title}.png",
                 dpi=600,  # High DPI for print-quality
                 bbox_inches='tight',
                 format='png')
@@ -1128,8 +1054,8 @@ def compare_psi_smoothness(specific_data_path=None):
         # Center around zero
         y_values_my = all_psi_wingbits_my[i] - means_my[i]
         y_values_hull = all_psi_wingbits_Hull[i] - means_Hull[i]
-        x_values_my = np.full_like(y_values_my, i + 0.3, dtype=float)
-        x_values_hull = np.full_like(y_values_hull, i - 0.3, dtype=float)
+        x_values_my = np.full_like(y_values_my, i, dtype=float)
+        x_values_hull = np.full_like(y_values_hull, i, dtype=float)
 
         if i == 0:
             ax2.scatter(x_values_my, y_values_my, color='blue', alpha=alpha_value,
@@ -1173,7 +1099,7 @@ def compare_psi_smoothness(specific_data_path=None):
     plt.tight_layout()
     second_filename = "Distribution_of_deviations_of_ψ_measurements.png"
     print(f"Saving high-res PNG to: {second_filename}")
-    plt.savefig(second_filename, format='png', dpi=600, bbox_inches='tight')
+    plt.savefig(f"{COMPARISON_DATA_DIRECTORY}/{second_filename}", format='png', dpi=600, bbox_inches='tight')
     plt.close()
 
     #############################################################################################################
@@ -1449,37 +1375,40 @@ def compare_psi_smoothness(specific_data_path=None):
 
 if __name__ == "__main__":
     # find_movies_with_high_speed()
-    compare_psi_smoothness()
-    my_data_dir = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_output/debug_outputs/movie_1_10_4898_ds_3tc_7tj/movie_1_10_4898_ds_3tc_7tj"
-    hull_hdf5_path = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/comparison_data/manipulated_05_12_22.hdf5"
-    movie_id = "movie_1_10_4898_ds_3tc_7tj"
-    extract_and_compare_roni_psi_single(my_data_dir, hull_hdf5_path, movie_id)
+    if len(sys.argv) < 2:
+        print("usage: python script.py <data_directory>")
+        exit(1)
+    compare_psi_smoothness(sys.argv[1])
+    # my_data_dir = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_output/debug_outputs/movie_1_10_4898_ds_3tc_7tj"
+    # hull_hdf5_path = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/comparison_data/manipulated_05_12_22.hdf5"
+    # movie_id = "movie_1_10_4898_ds_3tc_7tj"
+    # extract_and_compare_roni_psi_single(my_data_dir, hull_hdf5_path, movie_id)
 
-    hdf5_path = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\Roni analisys\cliped_2023_08_09_60ms.hdf5"
-    output_base_dir = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\Roni analisys\not smoothed"
-    movies = ["mov78", "mov101", "mov104"]
-    export_to_csv_and_organize(hdf5_path, output_base_dir, movies)
-    plot_all_roni_phi_psi()
-    path_my_data = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\my analisys"
-    path_roni_data = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\Roni analisys"
-    movies = [78, 101, 104]
-    mov_num = movies[1]
-    smoothed = True
+    # hdf5_path = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\Roni analisys\cliped_2023_08_09_60ms.hdf5"
+    # output_base_dir = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\Roni analisys\not smoothed"
+    # movies = ["mov78", "mov101", "mov104"]
+    # export_to_csv_and_organize(hdf5_path, output_base_dir, movies)
+    # plot_all_roni_phi_psi()
+    # path_my_data = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\my analisys"
+    # path_roni_data = fr"C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\roni data\roni movies\Roni analisys"
+    # movies = [78, 101, 104]
+    # mov_num = movies[1]
+    # smoothed = True
     
-    comparison = DataComparison(mov_num, path_my_data, path_roni_data, smoothed, smooth_like_roni=smoothed)
-    comparison.plot_body_pitch_phi_right_phi_left()
-    comparison.plot_body_roll_phi_right_phi_left()
-    comparison.plot_body_pitch_theta_left_theta_right()
-    #
-    comparison.visualize_3D_comparison()
-    comparison.compare_CM()
-    comparison.compare_CM_velocity()
-    comparison.compare_body_vectors()
-    comparison.compare_body_angles()
-    comparison.compare_stroke_planes()
-    comparison.compare_wings_span(wing='left')
-    comparison.theta_vs_phi()
-    comparison.compare_wings_angles(wing='right')
-    comparison.compare_wings_angles(wing='left')
-    comparison.compare_wings_chords(wing='right')
-    comparison.compare_wings_tip(wing='right')
+    # comparison = DataComparison(mov_num, path_my_data, path_roni_data, smoothed, smooth_like_roni=smoothed)
+    # comparison.plot_body_pitch_phi_right_phi_left()
+    # comparison.plot_body_roll_phi_right_phi_left()
+    # comparison.plot_body_pitch_theta_left_theta_right()
+    # #
+    # comparison.visualize_3D_comparison()
+    # comparison.compare_CM()
+    # comparison.compare_CM_velocity()
+    # comparison.compare_body_vectors()
+    # comparison.compare_body_angles()
+    # comparison.compare_stroke_planes()
+    # comparison.compare_wings_span(wing='left')
+    # comparison.theta_vs_phi()
+    # comparison.compare_wings_angles(wing='right')
+    # comparison.compare_wings_angles(wing='left')
+    # comparison.compare_wings_chords(wing='right')
+    # comparison.compare_wings_tip(wing='right')

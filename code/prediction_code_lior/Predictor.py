@@ -87,13 +87,6 @@ class Predictor2D:
         calibration_data_path, image_height, image_width = predict_config.get_triangulator_data()
         self.triangulator = Triangulator(calibration_data_path, image_height, image_width)
         self.configure_sparse_box(is_masked=is_masked)
-        # if not load_box_from_sparse:
-        #     print("creating sparse box object")
-        #     self.sparse_box = SparseBox(self.movie_path, is_masked=is_masked)
-        #     # self.box = self.sparse_box.retrieve_dense_box()
-        #     print("finish creating sparse box object")
-        # else:
-        #     self.load_preprocessed_box()
         self.masks_flag = is_masked
         self.cropzone = self.get_cropzone(self.movie_path)
         self.im_size = self.sparse_box.shape[2]
@@ -883,23 +876,6 @@ class Predictor2D:
         Ypk_all = np.concatenate(Ypks, axis=1)
         Ypk_all = np.transpose(Ypk_all, [0, 1, 3, 2])
         return Ypk_all
-
-    # def predict_input(self, input_tensor):
-
-    #     '''
-    #     predicts the input tensor, returning the points peaks i.e. the coordinates of the peaks in the confidence maps
-    #     '''
-
-    #     if self.software == 'tensorflow':
-    #         Ypk, _, _, _ = self.predict_Ypk(input_tensor, self.batch_size, self.wings_pose_estimation_model)
-    #     else:
-    #         input_tensor = input_tensor.transpose([0, 3, 1, 2])
-    #         input_tensor = torch.from_numpy(input_tensor)
-    #         input_tensor = input_tensor.to(self.device)
-    #         confmaps = self.wings_pose_estimation_model(input_tensor)
-    #         Ypk = Predictor2D.get_points_from_confmaps(confmaps)
-            
-    #     return Ypk
     
     def predict_input_torch(self, input_tensor):
         with torch.no_grad():
@@ -910,22 +886,6 @@ class Predictor2D:
             confmaps = confmaps.cpu().numpy()
             Ypk = torch_find_peaks(confmaps)
         return Ypk
-
-    # @staticmethod
-    # def find_points(confmaps):
-    #     # points = find_peaks_soft_argmax(confmaps)
-    #     points = Predictor2D.tf_find_peaks(confmaps).numpy()
-    #     # points = points.transpose([0, 2, 1])
-    #     # points = points[:, :, :-1]
-    #     return points
-    
-    # @staticmethod
-    # def get_points_from_confmaps(confmaps):
-    #     confmaps = confmaps.detach().cpu().numpy()
-    #     confmaps = np.transpose(confmaps, [0, 2, 3, 1])
-    #     output_points = Predictor2D.find_points(confmaps)
-    #     # output_points = np.reshape(output_points, [-1, 2])
-    #     return output_points
 
     def add_masks(self, n=100):
         """ Add train_masks to the dataset using yolov8 segmentation model """
@@ -1106,71 +1066,10 @@ class Predictor2D:
         mask = binary_dilation(mask, iterations=radius).astype(int)
         return mask
 
-    # @staticmethod
-    # def get_pose_estimation_model_tensorflow(pose_estimation_model_path, return_model_peaks=True):
-    #     tfconfig.enable_unsafe_deserialization()
-    #     """ load a pretrained LEAP pose estimation model model"""
-    #     exists = os.path.exists(pose_estimation_model_path)
-    #     model = keras.models.load_model(pose_estimation_model_path, custom_objects={'LeakyReLU': LeakyReLU})
-    #     if return_model_peaks:
-    #         model = Predictor2D.convert_to_peak_outputs(model, include_confmaps=False)
-    #     print("weights_path:", pose_estimation_model_path)
-    #     print("Loaded model: %d layers, %d params" % (len(model.layers), model.count_params()))
-    #     return model
-
     def load_pose_estimation_model(self, pose_estimation_model_path):
         model = torch.jit.load(pose_estimation_model_path, map_location=torch.device(self.device))
         model.eval()
         return model
-
-    # @staticmethod
-    # def convert_to_peak_outputs(model, include_confmaps=False):
-    #     """ Creates a new Keras model with a wrapper to yield channel peaks from rank-4 tensors. """
-    #     if type(model.output) == list:
-    #         confmaps = model.output[-1]
-    #     else:
-    #         confmaps = model.output
-
-    #     peak_layer = Lambda(Predictor2D.tf_find_peaks, name="find_peaks_lambda")(confmaps)
-
-    #     if include_confmaps:
-    #         return keras.Model(model.input, [peak_layer, confmaps])
-    #     else:
-    #         return keras.Model(model.input, peak_layer)
-
-    # @staticmethod
-    # def tf_find_peaks(x):
-    #     """ Finds the maximum value in each channel and returns the location and value.
-    #     Args:
-    #         x: rank-4 tensor (samples, height, width, channels)
-
-    #     Returns:
-    #         peaks: rank-3 tensor (samples, [x, y, val], channels)
-    #     """
-
-    #     # Store input shape
-    #     in_shape = tf.shape(x)
-
-    #     # Flatten height/width dims
-    #     flattened = tf.reshape(x, [in_shape[0], -1, in_shape[-1]])
-
-    #     # Find peaks in linear indices
-    #     idx = tf.argmax(flattened, axis=1)
-
-    #     # Convert linear indices to subscripts
-    #     rows = tf.math.floordiv(tf.cast(idx, tf.int32), in_shape[1])
-    #     cols = tf.math.floormod(tf.cast(idx, tf.int32), in_shape[1])
-
-    #     # Dumb way to get actual values without indexing
-    #     vals = tf.math.reduce_max(flattened, axis=1)
-
-    #     # Return N x 3 x C tensor
-    #     pred = tf.stack([
-    #         tf.cast(cols, tf.float32),
-    #         tf.cast(rows, tf.float32),
-    #         vals],
-    #         axis=1)
-    #     return pred
 
     @staticmethod
     def predict_Ypk(X, batch_size, model_peaks, save_confmaps=False):

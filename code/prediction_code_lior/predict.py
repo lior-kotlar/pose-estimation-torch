@@ -39,7 +39,7 @@ class PredictingManager:
         for dir in dir_list:
             files = os.listdir(dir)
             for file in files:
-                if file.startswith('movie') and file.endswith('.h5'):
+                if file.startswith('mov') and file.endswith('.h5'):
                     file_path =  os.path.join(dir, file)
                     if os.path.isfile(file_path):
                         movie_list.append(file_path)
