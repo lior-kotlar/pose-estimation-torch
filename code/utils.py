@@ -420,17 +420,17 @@ def show_interest_points_with_index(sample, label, save_directory, filename="int
         label = label.detach().cpu().numpy()
 
     # Add batch dimension for find_peaks -> (1, num_points, H, W)
-    label_batch = label[None]
+    label_batch = label
 
     # Find peaks -> shape [B,3,C]
     peaks = torch_find_peaks(label_batch)  # (x, y, val)
     coords = peaks[:, :2, :].transpose(0, 2, 1)[0]  # shape (num_points, 2)
 
-    _, H, W = sample.shape
+    _, _, H, W = sample.shape
     num_points = coords.shape[0]
 
     # Use the 2nd channel (index 1) of sample as background
-    frame = sample[1, :, :]
+    frame = sample[0, 1, :, :]
 
     # Generate a distinct color for each point
     colors = plt.cm.get_cmap('tab10', num_points).colors

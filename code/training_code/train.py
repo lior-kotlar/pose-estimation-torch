@@ -12,7 +12,7 @@ import Datasets
 import Network
 import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
-from utils import TrainConfig, optimizer_from_string, create_train_run_folders, save_training_code
+from utils import TrainConfig, optimizer_from_string, create_train_run_folders, save_training_code, show_interest_points_with_index
 import Callbacks
 from constants import CONFIGURATION_FILE_NAME
 
@@ -100,6 +100,8 @@ class Trainer:
 
         self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split_resume()
         viz_sample_list = (self.val_box[:self.general_configuration.how_many_visualizations], self.val_confmap[:self.general_configuration.how_many_visualizations])
+
+        # show_interest_points_with_index(viz_sample_list[0], viz_sample_list[1], save_directory=self.base_run_directory, filename="viz_sample_points.png")
 
         print("img_size:", self.img_size, flush=True)
         print("num_output_channels:", self.num_output_channels, flush=True)
