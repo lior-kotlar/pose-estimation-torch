@@ -1,0 +1,12 @@
+function wing_vec = get_wing_vec(wing_pts)
+    wing_COM = mean(wing_pts);
+    num_pts = size(wing_pts, 1);
+    ancor_point = wing_pts(num_pts, :);
+    wing_tip_idx = 3;
+    wing_tip = wing_pts(wing_tip_idx, :);
+    shoulder_to_tip_vic = (wing_tip - ancor_point)/norm((wing_tip - ancor_point));
+    
+    point_2 =  squeeze(wing_pts(2, :));
+    point_1 = squeeze(wing_pts(1, :));
+    
+end

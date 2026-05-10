@@ -1,0 +1,74 @@
+2015-05-12 & 13: Notes on the zScore output and interpretation for a variety of different calibrations
+Trying to improve interpretation in all cases
+
+a0032 - prelimcal_v1
+2,1 by the new method, which fails
+2,4 by the traditional method, which works
+zScores = 22    22     8    -8
+zScores = -17    17    17    17
+
+a0034 (not aligned) case
+1,2 - by the new simplified method, which fails  [2,2] fails, [3,2] fails
+4,2 - by the traditional method, which works
+zScores = -28    28    28    28
+zScores = 18    18   -14    14
+
+a0035 (aligned v1)
+4,2 - by the new method, which works
+4,2 - by the traditional method, which works
+zScores = -15    11    41    41
+zScores = 38    38    10   -10
+
+a0037 (unaligned v1)
+2,2 - by the new method, which works
+2,2 - by the traditional method, which works
+zScores = 12    12    -4     2
+zScores = 10    10    -4     4
+
+a0037 (unaligned v3)
+3,2 - by the traditional method, which works
+1,2 - by the new method, which fails
+zScores =  -16    16   -24   -24
+zScores = 22    22     8    -6
+
+a0038 (unaligned v2)
+2,4 - by the traditional method, which works
+2,1 - by the new method, which fails
+zScores = 40    40     4    -4
+zScores = -28    28    28    28
+
+a0043 (aligned v1)
+4,4 - by the traditional method, which works
+4,4 - by the new method, which works
+zScores = -7     7    19    19
+zScores = 8    -8    18    18
+
+swallows20130513
+4,4 - by the traditional method, which works
+2,4 - by the new method, which fails
+zScores = 1812 -1812  1812  1812
+zScores = -22    22   110   110
+
+swallows20110617 (init fl = 1000)
+2,3 - by the traditional method, which works
+2,1 - by the new method, which fails.  [2,2] also fails
+zScores = 38    38    12   -12
+zScores = -28    28   -36   -36
+
+swallows20110617 (init fl = 4650,4650,5300)
+3,3 - by the traditional method, which works [4,4] works but is inverted
+1,1 - by the new method, which fails.  [2,2] also fails
+zScores = -38    38   -38   -38
+zScores = -36    36   -36   -36
+
+heron case (holly pts 1)
+2,4 - by the new simplified method, which works, 1,3 also works but with inverted output
+3,4 - by the traditional method, which fails
+zScores = 11    -1    -7    -9
+zScores = -7     7    11    11
+
+glenna 06_06.05
+1 by the new method (which fails)
+4 by the traditional method (which works)
+zScores = -119   119   119   119
+
