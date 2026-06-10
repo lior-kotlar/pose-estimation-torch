@@ -174,6 +174,14 @@ class PredictConfig:
             self.mask_increase_reprojected = config['mask increase reprojected']
             self.is_video = bool(config['is video'])
             self.batch_size = config['batch size']
+            # Optional: name of the shared parent directory grouping all
+            # movies of a batch. Set by predict_array.sh from SLURM_JOB_NAME
+            # so every task in an array lands in one parent. Falls back to
+            # the data-directory basename when absent.
+            self.general_run_name = config.get('general run name') or None
+            # Optional: append per-movie predict timing rows to this CSV.
+            # Set by predict_array.sh from pipeline.sh's TIMINGS_PATH.
+            self.pipeline_timings_path = config.get('pipeline timings path') or None
 
             config_bank_path = config['config bank path']
             specified_configs_path = config['specified configs path']
@@ -198,6 +206,12 @@ class PredictConfig:
     
     def get_output_directory(self):
         return self.output_directory
+
+    def get_general_run_name(self):
+        return self.general_run_name
+
+    def get_pipeline_timings_path(self):
+        return self.pipeline_timings_path
     
     def get_calibration_path(self):
         return self.calibration_data_path

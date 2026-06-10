@@ -429,6 +429,9 @@ class Predictor2D:
                     label = measure.label(binary)
                     props = measure.regionprops(label)
                     sizes = [prop.area for prop in props]
+                    if not sizes:
+                        self.sparse_box.set_frame_camera_channel_dense(frame, cam, channel, image)
+                        continue
                     largest = np.argmax(sizes)
                     fly_component = np.where(label == largest + 1, 1, 0)
                     image = image * fly_component
@@ -751,7 +754,8 @@ class Predictor2D:
         n = min(self.num_frames, n)
         splited_frames = np.array_split(all_frames, n)
         for i in range(n):
-            print(f"predicting part number {i + 1}")
+            if i % 25 == 0 or i == n - 1:
+                print(f"predicting part number {i + 1}/{n}", flush=True)
             all_points_i = []
             for wing in range(2):
                 input_wing_cams = []
@@ -799,7 +803,8 @@ class Predictor2D:
         n = min(self.num_frames, n)
         splited_frames = np.array_split(all_frames, n)
         for i in range(n):
-            print(f"predicting part number {i + 1}")
+            if i % 25 == 0 or i == n - 1:
+                print(f"predicting part number {i + 1}/{n}", flush=True)
             input_wing_cams = []
             for cam_idx in range(self.num_cams):
                 input_wing_cam = self.sparse_box.get_camera_dense(camera_idx=cam_idx,
@@ -896,7 +901,8 @@ class Predictor2D:
             print(f"finds wings for camera number {cam + 1}")
             results = []
             for i in range(n):
-                print(f"processing n = {i}")
+                if i % 25 == 0 or i == n - 1:
+                    print(f"processing n = {i}/{n - 1}", flush=True)
                 img_3_ch_i = self.sparse_box.get_camera_dense(cam, [0, 1, 2], frames=all_frames_split[i])
                 img_3_ch_input = np.round(img_3_ch_i * 255)
                 img_3_ch_input = [img_3_ch_input[i] for i in range(img_3_ch_input.shape[0])]
@@ -905,13 +911,13 @@ class Predictor2D:
                     self.wings_detection_model.to(cpu_device)
                     img_3_ch_input = img_3_ch_input.float().to(cpu_device)
                     with torch.no_grad():
-                        results_i = self.wings_detection_model(img_3_ch_input)
+                        results_i = self.wings_detection_model(img_3_ch_input, verbose=False)
                         results_i = results_i.cpu().numpy()
                 # if DETECT_WINGS_CPU:
                 #     with tf.device('/CPU:0'):  # Forces the operation to run on the CPU
                 #         results_i = self.wings_detection_model(img_3_ch_input)
                 else:
-                    results_i = self.wings_detection_model(img_3_ch_input)
+                    results_i = self.wings_detection_model(img_3_ch_input, verbose=False)
                 results.append(results_i)
             results = sum(results, [])
             for frame in range(self.num_frames):

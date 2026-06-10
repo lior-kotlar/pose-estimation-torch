@@ -1,13 +1,16 @@
-import shutil
 import sys
 import os
+import time
 from datetime import date
 import glob
 import numpy as np
 abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
-from utils import get_start_frame, show_interest_points_with_index, PredictConfig, PREDICTION_CODE_DIRECTORY, PREDICTION_CONFIGURATIONS_DIRECTORY
+from utils import get_start_frame, show_interest_points_with_index, PredictConfig
+from pipeline_timing import record as record_timing, earliest_start
+from plot_wing_angles import plot_one as plot_wing_angles_one
+import h5py
 import torch
 from Predictor import Predictor2D
 from From_2D_to_3D import From2Dto3D
@@ -24,7 +27,6 @@ class PredictingManager:
         self.device = device
         self.movie_path_list = self.configure_movie_list()
         self.base_run_directory = self.create_general_run_directory()
-        self.save_prediction_code_and_configurations()
 
     def configure_movie_list(self):
         movie_list = []
@@ -58,9 +60,19 @@ class PredictingManager:
 
     def predict_movies(self,
                        only_create_mp4=False):
+        timings_path = self.config.get_pipeline_timings_path()
         for movie_path in self.movie_path_list:
             movie_run_directory_path = os.path.join(self.base_run_directory, os.path.basename(movie_path).replace('.h5',''))
             os.makedirs(movie_run_directory_path, exist_ok=True)
+            # Capture post-intersection frame count so timing rows include
+            # the normalizer for elapsed-per-frame analysis.
+            n_movie_frames = None
+            try:
+                with h5py.File(movie_path, "r") as _f:
+                    n_movie_frames = int(_f["cropzone"].shape[0])
+            except Exception:
+                pass
+            t_movie_start = time.time()
             predictor = None
             for model_config in self.model_config_list:
                 
@@ -95,7 +107,7 @@ class PredictingManager:
             points_3D_path = os.path.join(movie_run_directory_path, 'points_3D_smoothed_ensemble_best_method.npy')
             reprojected_points_path = os.path.join(movie_run_directory_path, 'points_ensemble_smoothed_reprojected.npy')
             box_path = movie_path
-            save_path = os.path.join(movie_run_directory_path, 'movie 2D and 3D.gif')
+            save_path = os.path.join(movie_run_directory_path, 'movie 2D and 3D.mp4')
             movie = os.path.basename(movie_run_directory_path)
             rotate = True
             try:
@@ -111,6 +123,34 @@ class PredictingManager:
                 print(f"wasn't able to analyes the movie and reproject the points: {e}")
                 exit(1)
 
+            t_predict_end = time.time()
+            # Record under "mov<N>" (matches process_experiment.py's rows so
+            # they join on the same key). Falls back to the h5 basename
+            # when the leading "mov_<N>_" pattern is missing.
+            h5_base = os.path.basename(movie_path).replace('.h5', '')
+            parts = h5_base.split('_')
+            movie_label = f"mov{parts[1]}" if len(parts) > 1 and parts[0] == "mov" and parts[1].isdigit() else h5_base
+            record_timing(timings_path, movie_label, "predict",
+                          t_movie_start, t_predict_end,
+                          n_frames=n_movie_frames)
+            # Plot wing angles from the analysis h5 just written. Plot
+            # failure does NOT abort the pipeline.
+            t_step_end = t_predict_end
+            try:
+                plot_wing_angles_one(movie_hdf5_path, units="ms")
+                t_step_end = time.time()
+                record_timing(timings_path, movie_label, "plot",
+                              t_predict_end, t_step_end)
+            except Exception as e:
+                print(f"wing-angles plot failed: {e}", flush=True)
+            # End-to-end "total" row: from the earliest step recorded for
+            # this movie (in the prep job's CSV rows) through end of plot.
+            # Falls back to t_movie_start if no prep rows exist (predict-only
+            # runs), in which case "total" equals "predict" + "plot".
+            earliest = earliest_start(timings_path, movie_label) or t_movie_start
+            record_timing(timings_path, movie_label, "total",
+                          earliest, t_step_end,
+                          n_frames=n_movie_frames)
             print(f"Finished movie {movie_path}", flush=True)
                 
             
@@ -131,34 +171,16 @@ class PredictingManager:
                                          start_frame=start_frame, save_path=save_path)
 
     def create_general_run_directory(self):
-        experiment_name = os.path.basename(self.config.get_input_data_directory())
-        general_run_name = experiment_name
-        base_output_directory = self.config.get_output_directory()
-        run_path = os.path.join(base_output_directory, general_run_name)
+        # Prefer an explicit "general run name" from the config (set by
+        # predict_array.sh so every task in a SLURM array lands in one
+        # parent). Fall back to the data-directory basename for direct
+        # single-invocation runs on an experiment dir.
+        run_name = self.config.get_general_run_name() \
+            or os.path.basename(self.config.get_input_data_directory().rstrip(os.sep))
+        run_path = os.path.join(self.config.get_output_directory(), run_name)
         os.makedirs(run_path, exist_ok=True)
         print(f"Created run directory at: {run_path}")
         return run_path
-        
-
-    def save_prediction_code_and_configurations(self):
-        code_dir_path = os.path.join(self.base_run_directory, "predicting code")
-        config_dir_path = os.path.join(self.base_run_directory, "predicting configurations")
-        os.makedirs(code_dir_path, exist_ok=True)
-        os.makedirs(config_dir_path, exist_ok=True)
-        for file_name in os.listdir(PREDICTION_CODE_DIRECTORY):
-            if file_name.endswith('.py'):
-                full_file_path = os.path.join(PREDICTION_CODE_DIRECTORY, file_name)
-                if os.path.isfile(full_file_path):
-                    shutil.copy(full_file_path, code_dir_path)
-                    file_name_only = os.path.basename(full_file_path)
-                    print(f"Copied {full_file_path} to {code_dir_path}")
-        for file_name in os.listdir(PREDICTION_CONFIGURATIONS_DIRECTORY):
-            if file_name.endswith('.json'):
-                full_file_path = os.path.join(PREDICTION_CONFIGURATIONS_DIRECTORY, file_name)
-                if os.path.isfile(full_file_path):
-                    shutil.copy(full_file_path, config_dir_path)
-                    file_name_only = os.path.basename(full_file_path)
-                    print(f"Copied {full_file_path} to {config_dir_path}")
 
 
 def predict_sample_save(model, sample, save_directory, label=None):
@@ -260,6 +282,9 @@ def save_points_3D(base_path, best_combination, best_points_3D, smoothed_3D, typ
         f.write(f"The winning combination was {best_combination}")
 
 def main():
+    if len(sys.argv) < 2:
+        print("Usage: python predict.py <config_path>")
+        sys.exit(1)
     config_path = sys.argv[1]
     if torch.cuda.is_available():
         device = torch.device("cuda")

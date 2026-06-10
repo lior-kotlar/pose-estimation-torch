@@ -834,12 +834,12 @@ class Visualizer:
         first_analized_frame = Visualizer.get_data_from_h5(h5_path_movie_path, 'first_analysed_frame')[()]
         points_2D = add_nan_frames(points_2D, first_analized_frame)
         if save_frames is None:
-            save_frames = np.arange(len(points_2D))
-
-            save_frames = save_frames  # todo
+            # Range must satisfy `frame + first_analized < len(points_2D)`
+            # (update() adds first_analized to index the padded arrays); going
+            # the full len() causes IndexError on the last `first_analized` frames.
+            save_frames = np.arange(0, max(0, len(points_2D) - first_analized_frame))
 
             frames_from_box_and_reprojected_points = save_frames
-            pass
         else:
             frames_from_box_and_reprojected_points = save_frames - first_analized_frame
 
@@ -957,7 +957,10 @@ class Visualizer:
 
         def update(frame, plot_all_my_points=True, labels=False):
             analysis_frame = frame + first_analized_frame
-            print(f"frame : {analysis_frame}", flush=True)
+            # Print progress every 250 frames only; otherwise the renderer
+            # spams thousands of lines into batch logs.
+            if analysis_frame % 250 == 0:
+                print(f"frame : {analysis_frame}", flush=True)
             ax_3d.cla()  # Clear current axes
             if plot_all_my_points:
                 for i in range(num_points):
@@ -1033,7 +1036,6 @@ class Visualizer:
             for i, ax in enumerate(ax_2d):
                 analysis_frame = frame + first_analized_frame
                 frame_in_box = analysis_frame + first_analized_frame
-                print(frame, analysis_frame)
                 ax.cla()
                 image = box[analysis_frame, i].T
                 head_tail_pnts = points_2D[analysis_frame, i, [-2, -1], :]
@@ -1058,16 +1060,22 @@ class Visualizer:
             ani = animation.FuncAnimation(fig, update, frames=save_frames, interval=100)  # Adjust interval as needed
 
             if save_path:
-                writer = animation.PillowWriter(fps=15)
-                # writer = FFMpegWriter(fps=30, metadata=dict(artist='Me'), bitrate=1800)
+                # Stream frames to disk via ffmpeg — constant memory, much
+                # faster than PillowWriter's full-frames-in-RAM GIF path.
+                writer = animation.FFMpegWriter(fps=15, bitrate=2400,
+                                                codec='libx264')
                 ani.save(save_path, writer=writer)
 
-            dir_path = os.path.dirname(save_path)
-            gif_clip = VideoFileClip(save_path)
-            rotated = "rotated" if rotate else "not rotated"
-            save_path_mp4 = os.path.join(dir_path, f'analisys_mp4_{rotated}.mp4')
-            gif_clip.write_videofile(save_path_mp4, codec="libx264")
-            os.remove(save_path)
+            # Fallback gif→mp4 reencode (only if save_path is .gif). Silence
+            # moviepy's per-frame proglog bar (`logger=None`) — under sbatch
+            # the `\r` updates don't overwrite and flood the .err log.
+            if save_path and save_path.lower().endswith('.gif'):
+                dir_path = os.path.dirname(save_path)
+                gif_clip = VideoFileClip(save_path)
+                rotated = "rotated" if rotate else "not rotated"
+                save_path_mp4 = os.path.join(dir_path, f'analisys_mp4_{rotated}.mp4')
+                gif_clip.write_videofile(save_path_mp4, codec="libx264", logger=None)
+                os.remove(save_path)
         elif mode == DISPLAY:
             # Add a slider below the 3D plot
             ax_slider = plt.axes([0.2, 0.02, 0.65, 0.03], facecolor='lightgoldenrodyellow')
