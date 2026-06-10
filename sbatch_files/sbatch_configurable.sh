@@ -4,24 +4,27 @@
 #SBATCH -e logs/%x_%J.err
 #SBATCH --mem=256g
 #SBATCH --cpus-per-task=8
-#SBATCH --time=15:00:00
+#SBATCH --time=16:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 #SBATCH --mail-type=END,FAIL
 
-# usage: sbatch -J <YOUR_JOB_NAME> <THIS_SBATCH_FILE_PATH> <PYTHON_SCRIPT_PATH> <CONFIG_PATH>
+# usage: sbatch -J <JOB_NAME> <THIS_SBATCH_FILE_PATH> <PYTHON_SCRIPT_PATH> [ARGS...]
+#
+# Examples:
+#   sbatch -J train_run sbatch_configurable.sh code/training_code/train.py configs/foo.json
+#   sbatch -J process_exp sbatch_configurable.sh code/process_experiment.py \
+#       inference_datasets/test/2023 \
+#       --easywand inference_datasets/.../10_8_23_allmovs_easyWandData.mat \
+#       --cam cam1 --verify
+#
+# Tip: for non-GPU jobs (e.g. process_experiment.py), override the gres line
+# at submit time:  sbatch --gres=gpu:0 -J ... sbatch_configurable.sh ...
 SCRIPT_PATH=$1
-CONFIG_PATH=$2
+shift   # the rest of $@ is forwarded verbatim to python
 
-# Safety check for Python script
 if [ -z "$SCRIPT_PATH" ]; then
   echo "Error: No python script path provided (Argument 1)."
-  exit 1
-fi
-
-# Safety check for Config path
-if [ -z "$CONFIG_PATH" ]; then
-  echo "Error: No configuration file path provided (Argument 2)."
   exit 1
 fi
 
@@ -33,9 +36,8 @@ echo "Job started on $(hostname)"
 echo "Job Name: $SLURM_JOB_NAME"
 echo "GPUs allocated: $CUDA_VISIBLE_DEVICES"
 echo "Running script: $SCRIPT_PATH"
-echo "Using configuration: $CONFIG_PATH"
+echo "With args: $*"
 
-# Now executes the variable script path with the variable config path
-python "$SCRIPT_PATH" "$CONFIG_PATH"
+python "$SCRIPT_PATH" "$@"
 
 echo "finished working"
