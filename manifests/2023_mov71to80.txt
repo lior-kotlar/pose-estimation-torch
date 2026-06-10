@@ -1,0 +1,10 @@
+inference_datasets/test/2023/71to80/mov71/
+inference_datasets/test/2023/71to80/mov72/
+inference_datasets/test/2023/71to80/mov73/
+inference_datasets/test/2023/71to80/mov74/
+inference_datasets/test/2023/71to80/mov75/
+inference_datasets/test/2023/71to80/mov76/
+inference_datasets/test/2023/71to80/mov77/
+inference_datasets/test/2023/71to80/mov78/
+inference_datasets/test/2023/71to80/mov79/
+inference_datasets/test/2023/71to80/mov80/
