@@ -1,18 +1,47 @@
-clear
+clearvars -except num_cams max_frames sparse_folder_path save_path movie_num start_ind end_ind
 
 %% set paths
 % load('C:\Users\amita\OneDrive\Desktop\micro-flight-lab\micro-flight-lab\Utilities\Work_W_Leap\datasets\best_frames_21-7.mat') % load dataset (mov|frame) list
 % sparse_folder_path='C:\Users\amita\OneDrive\Desktop\micro-flight-lab\micro-flight-lab\Utilities\SelectFramesForLable\Dark2022MoviesHulls\hull\hull_Reorder'; % folder with sparse movies
 
 % sparse_folder_path = "G:\My Drive\Amitai\experiment magnet + UV 30.8\movies\";
-sparse_folder_path = "G:\My Drive\Amitai\one halter experiments\roni dark 60ms";
-save_path = sparse_folder_path;
+if ~exist('sparse_folder_path','var') || isempty(sparse_folder_path)
+    sparse_folder_path = "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/new_roni_experiments/2022_02_03/hull/hull_Reorder_test";
+end
+if ~exist('save_path','var') || isempty(save_path)
+    save_path = sparse_folder_path;
+end
 
 %% set a apecific movie
-movie_num = 1;
+if ~exist('movie_num','var') || isempty(movie_num)
+    movie_num = 1;
+end
 
-start_ind = 370;
-end_ind = 520;
+if ~exist('start_ind','var') || isempty(start_ind)
+    start_ind = 8;
+end
+if ~exist('end_ind','var') || isempty(end_ind)
+    % auto-detect from the first sparse mat's frames count
+    auto_files = dir(fullfile(sparse_folder_path, ['mov', int2str(movie_num)], '*sparse.mat'));
+    if isempty(auto_files)
+        error('No *sparse.mat files found in %s', fullfile(sparse_folder_path, ['mov', int2str(movie_num)]));
+    end
+    auto_mat = matfile(fullfile(auto_files(1).folder, auto_files(1).name));
+    end_ind = size(auto_mat, 'frames', 1) - 7;   % subtract time_jump margin
+    fprintf('end_ind auto-detected as %d (from %s)\n', end_ind, auto_files(1).name);
+end
+
+% Optional: limit to the first max_frames frames (useful for quick test runs).
+% Set here, or pass via CLI: matlab -batch "max_frames=400; run('...')"
+% Leave unset (or empty) to process the full [start_ind, end_ind] range.
+if ~exist('max_frames','var') || isempty(max_frames)
+    max_frames = [];   % default: no limit
+end
+if ~isempty(max_frames)
+    end_ind = min(end_ind, start_ind + max_frames - 1);
+    fprintf('max_frames=%d -> end_ind clamped to %d\n', max_frames, end_ind);
+end
+
 best_frames_mov_idx = zeros(end_ind - start_ind + 1, 2);
 best_frames_mov_idx(:, 2) = (start_ind:end_ind);
 best_frames_mov_idx(:, 1) = movie_num;
@@ -20,7 +49,9 @@ num_frames=size(best_frames_mov_idx,1);
 
 %%
 num_masks = 0;
-num_cams=4;
+if ~exist('num_cams','var') || isempty(num_cams)
+    num_cams = 4;   % default; override from CLI: matlab -r "num_cams=3; run('...'); exit"
+end
 crop_size=192*[1,1];
 
 
@@ -33,7 +64,7 @@ num_channels=num_cams*(num_time_channels + num_masks);
 data=zeros([crop_size,num_channels],'single');
 tic
 
-save_name=fullfile(save_path,['trainset_movie_', ...
+save_name=fullfile(save_path,['mov_', ...
     num2str(movie_num),'_', ...
     num2str(start_ind),'_', ...
     num2str(end_ind),'_','ds_',...
@@ -57,8 +88,19 @@ h5create(save_name,'/frameInds',[1,num_cams,Inf],'ChunkSize',[1,num_cams,1],...
     'Datatype','uint16','Deflate',1)
 
 %% loop on frames
+% Detect whether we're running under SLURM (sbatch). In that case the output
+% is a log file, not a TTY, and backspace characters don't erase — they just
+% accumulate into one giant line. Switch to a quieter progress format: print
+% one newline-terminated line every PROGRESS_EVERY frames.
+batch_progress = ~isempty(getenv('SLURM_JOB_ID'));
+PROGRESS_EVERY = 250;
 fprintf('\n');
-line_length = fprintf('frame: %u/%u',0,num_frames);
+if batch_progress
+    line_length = 0;
+    fprintf('frame: 0/%u\n', num_frames);
+else
+    line_length = fprintf('frame: %u/%u',0,num_frames);
+end
 h5_ind=0;
 % load frames
 
@@ -82,9 +124,18 @@ frames=cellfun(@(x) x.frames((start_ind-time_jump):(end_ind+time_jump),1),mf,'Un
 
 
 for frame_ind=(1+time_jump):(num_frames+time_jump)
-    fprintf(repmat('\b',1,line_length))
-    line_length = fprintf('frame: %u/%u',frame_ind,num_frames);
-    
+    if batch_progress
+        % print every PROGRESS_EVERY-th frame and on the last frame
+        actual = frame_ind - time_jump;
+        if mod(actual, PROGRESS_EVERY) == 0 || frame_ind == (num_frames + time_jump)
+            fprintf('frame: %u/%u\n', actual, num_frames);
+        end
+    else
+        fprintf(repmat('\b',1,line_length))
+        line_length = fprintf('frame: %u/%u',frame_ind,num_frames);
+    end
+
+
     %% loop on cameras
     for cam_ind=num_cams:-1:1
         frame=frames{cam_ind}(frame_ind);
@@ -95,6 +146,12 @@ for frame_ind=(1+time_jump):(num_frames+time_jump)
         full_im(~bwareafilt(full_im>0,1))=0;
         [r,c,v] = find(full_im);
         frame.indIm=[r,c,v];
+        % skip camera if no insect blob detected in this frame
+        if isempty(r)
+            data(:,:, num_time_channels*(cam_ind-1)+1 : num_time_channels*cam_ind) = 0;
+            crop_zone_data(:,cam_ind) = uint16([1; 1]);
+            continue
+        end
         % blob boundaries
         max_find_row=double(max(frame.indIm(:,1)));
         min_find_row=double(min(frame.indIm(:,1)));

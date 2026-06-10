@@ -1,22 +1,27 @@
 % create camera calibration h5
 
-clear
-addpath 'C:\Users\amita\OneDrive\Desktop\micro-flight-lab\micro-flight-lab\Utilities\Work_W_Leap\From_3D_utils'
-addpath 'C:\Users\amita\OneDrive\Desktop\micro-flight-lab\micro-flight-lab\Utilities\Work_W_Leap\run after experiment\get_camera_matrix_decomposition' 
-add_paths();
-easy_wand_path = "C:\Users\amita\OneDrive\Desktop\temp\roni_60ms_easyWandData.mat";
+clearvars -except easy_wand_path savePath
+addpath '/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/matlab/From_3D_utils'
+addpath '/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/matlab/run after experiment/get_camera_matrix_decomposition'
+addpath '/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/micro-flight-lab-master/Insect analysis'
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% change for each experiment
+% change for each experiment (or override from CLI / wrapper script)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% easy_wand_path = "G:\My Drive\Ronis Exp\standard_flies_sagiv\05_12_22\hull\hull_Reorder\22_12_05_calib_easyWandData.mat"
-savePath = "calibration file.h5";
+if ~exist('easy_wand_path','var') || isempty(easy_wand_path)
+    easy_wand_path = "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/new_roni_experiments/2022_02_03/calibration/1+2_03_02_2022_skip5_dltCoefs_V2_easyWandData.mat";
+end
+if ~exist('savePath','var') || isempty(savePath)
+    savePath = "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/new_roni_experiments/2022_02_03/calibration/calibration.h5";
+end
+fprintf('easy_wand_path = %s\nsavePath = %s\n', easy_wand_path, savePath);
+
 easyWandData=load(easy_wand_path);
-% wandPnts = easyWandData.easyWandData.wandPts; 
+% wandPnts = easyWandData.easyWandData.wandPts;
 % csvwrite('wandPnts.csv', wandPnts);
 allCams=HullReconstruction.Classes.all_cameras_class(easyWandData.easyWandData);
 
-%% 
+%%
 rotation_matrix = allCams.Rotation_Matrix;
 camera_centers = allCams.all_centers_cam';
 inv_camera_matrices = zeros(4,4,3);
