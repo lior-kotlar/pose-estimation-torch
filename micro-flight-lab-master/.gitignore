@@ -1,0 +1,14 @@
+# Autosaves
+*.asv
+
+# Figures
+*.fig
+
+# desktop files
+*.ini
+
+# videos
+*.avi
+
+# Images
+*.png

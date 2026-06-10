@@ -1,0 +1,34 @@
+git clone <link>
+clone repository to folder
+
+git branch <name>
+opens branch with name
+
+git checkout <name (or commit)>
+move to branch name
+
+git log
+show commit history
+
+git merge <name>
+advance current branch to name
+
+git fetch
+retreive meta data from server
+
+git pull
+download branch files
+
+git diff
+show changes since last commit
+
+git add <files(.-all)>
+add files to commit
+
+git commit -m 'commit comment'
+commit to branch
+
+git push
+pushes changes to branch
+
+git status

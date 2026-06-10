@@ -1,0 +1,686 @@
+#LyX 2.2 created this file. For more info see http://www.lyx.org/
+\lyxformat 508
+\begin_document
+\begin_header
+\save_transient_properties true
+\origin unavailable
+\textclass article
+\use_default_options true
+\maintain_unincluded_children false
+\language english
+\language_package default
+\inputencoding auto
+\fontencoding global
+\font_roman "default" "default"
+\font_sans "default" "default"
+\font_typewriter "default" "default"
+\font_math "auto" "auto"
+\font_default_family default
+\use_non_tex_fonts false
+\font_sc false
+\font_osf false
+\font_sf_scale 100 100
+\font_tt_scale 100 100
+\graphics default
+\default_output_format default
+\output_sync 0
+\bibtex_command default
+\index_command default
+\paperfontsize default
+\spacing single
+\use_hyperref false
+\papersize default
+\use_geometry true
+\use_package amsmath 1
+\use_package amssymb 1
+\use_package cancel 1
+\use_package esint 1
+\use_package mathdots 1
+\use_package mathtools 1
+\use_package mhchem 1
+\use_package stackrel 1
+\use_package stmaryrd 1
+\use_package undertilde 1
+\cite_engine basic
+\cite_engine_type default
+\biblio_style plain
+\use_bibtopic false
+\use_indices false
+\paperorientation portrait
+\suppress_date false
+\justification true
+\use_refstyle 1
+\index Index
+\shortcut idx
+\color #008000
+\end_index
+\leftmargin 1cm
+\topmargin 2cm
+\rightmargin 1cm
+\bottommargin 2cm
+\secnumdepth 3
+\tocdepth 3
+\paragraph_separation indent
+\paragraph_indentation default
+\quotes_language english
+\papercolumns 1
+\papersides 1
+\paperpagestyle default
+\tracking_changes false
+\output_changes false
+\html_math_output 0
+\html_css_as_file 0
+\html_be_strict false
+\end_header
+
+\begin_body
+
+\begin_layout Section*
+Magnet parameters:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Tabular
+<lyxtabular version="3" rows="5" columns="2">
+<features tabularvalignment="middle">
+<column alignment="center" valignment="top">
+<column alignment="center" valignment="top">
+<row>
+<cell alignment="center" valignment="top" topline="true" bottomline="true" leftline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+Material
+\end_layout
+
+\end_inset
+</cell>
+<cell alignment="center" valignment="top" topline="true" bottomline="true" leftline="true" rightline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+Remanence
+\end_layout
+
+\end_inset
+</cell>
+</row>
+<row>
+<cell alignment="center" valignment="top" topline="true" leftline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+Neodymium magnet
+\end_layout
+
+\end_inset
+</cell>
+<cell alignment="center" valignment="top" topline="true" leftline="true" rightline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+1–1.3 T
+\end_layout
+
+\end_inset
+</cell>
+</row>
+<row>
+<cell alignment="center" valignment="top" topline="true" leftline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+AlNiCo 5
+\end_layout
+
+\end_inset
+</cell>
+<cell alignment="center" valignment="top" topline="true" leftline="true" rightline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+1.28 T
+\end_layout
+
+\end_inset
+</cell>
+</row>
+<row>
+<cell alignment="center" valignment="top" topline="true" leftline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+Samarium-cobalt magnet
+\end_layout
+
+\end_inset
+</cell>
+<cell alignment="center" valignment="top" topline="true" leftline="true" rightline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+0.82–1.16 T
+\end_layout
+
+\end_inset
+</cell>
+</row>
+<row>
+<cell alignment="center" valignment="top" topline="true" bottomline="true" leftline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+Ferrite (magnet)
+\end_layout
+
+\end_inset
+</cell>
+<cell alignment="center" valignment="top" topline="true" bottomline="true" leftline="true" rightline="true" usebox="none">
+\begin_inset Text
+
+\begin_layout Plain Layout
+0.35 T
+\end_layout
+
+\end_inset
+</cell>
+</row>
+</lyxtabular>
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Section*
+Desired:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+B_{Desired}=2\times10^{-3}\left[T\right]
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+\tau_{Desired}=\frac{L}{R}=1\times10^{-3}\left[sec\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Section*
+Maximal:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+P_{channel}=50\left[W\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+I_{channel}=5\left[A\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+V_{channel}=35\left[V\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Section*
+Parameters:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+N_{turns}=100
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+coilWidth=3\times10^{-2}\left[m\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+wireRadius=5\times10^{-3}\left[m\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+wireCrossArea=0.7854\left[mm^{2}\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+innerVerticalRingRadius=0.145\left[m\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+outerHorizontalRingRadius=0.1724\left[m\right]
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+wireRadialDisplacement=8\left[mm\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\rho_{Copper}=1.7\times10^{-8}\left[\Omega\cdot m\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+wireLengthInner=88\left[m\right]
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+wireLengthOuter=100\left[m\right]
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+I_{out}=5\left[A\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+I_{tot}=N_{turns}\cdot I_{out}
+\]
+
+\end_inset
+
+
+\family roman
+\series medium
+\shape up
+\size normal
+\emph off
+\bar no
+\strikeout off
+\uuline off
+\uwave off
+\noun off
+\color none
+I_{channel}
+\end_layout
+
+\begin_layout Section*
+Results:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+B_{Outer}^{0}=2\times10^{-3}\left[T\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+B_{Inner}^{0}=2.23\times10^{-3}\left[T\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+R=2.1\left[\Omega\right]
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+L=6.3\times10^{-3}\left[H\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\tau=\frac{L}{R}=3\times10^{-3}\left[sec\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+V_{out}=10.54\left[V\right]
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+P_{out}=52.7\left[W\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Section*
+Formulas:
+\end_layout
+
+\begin_layout Standard
+Coil inductance (approximate):
+\begin_inset Formula 
+\[
+L_{c}\approx N_{turns}^{2}ringRadius\cdot\mu_{0}\left(\log\left(8\frac{ringRadius}{wireRadius}\right)-2\right)
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Coil resistance:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+R=\frac{\rho L}{A}=\frac{2\rho N_{turns}\cdot ringRadius}{wireRadius^{2}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Ring magnetic field in center:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+hyB_{RingCenter}=\frac{\mu_{0}I_{tot}}{2\cdot ringRadius}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Total desired Current:
+\begin_inset Formula 
+\[
+I_{tot}=\frac{2\cdot ringRadius\cdot B_{Desired}}{\mu_{0}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Voltage:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+V_{out}=I_{out}R=\frac{2I_{tot}\rho\cdot ringRadius}{wireRadius^{2}}=2\frac{I_{out}\rho N_{turns}\cdot ringRadius}{wireRadius^{2}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Power:
+\begin_inset Formula 
+\begin{align*}
+P & =I_{channel}^{2}\times R_{tot}=\left(\frac{I_{tot}}{N_{turns}}\right)^{2}\left(R_{coil}+R_{ext}\right)=\left(\frac{I_{tot}}{N_{turns}}\right)^{2}\left(R_{coil}+\frac{L_{c}}{\tau}-R_{coil}\right)\approx\\
+ & \approx\left(\frac{2\cdot ringRadius\cdot B_{Desired}}{\mu_{0}}\right)^{2}\frac{ringRadius\cdot\mu_{0}\left(\log\left(8\frac{ringRadius}{wireRadius}\right)-2\right)}{\tau}\propto\frac{B_{Desired}^{2}\cdot ringRadius^{3}}{\tau}
+\end{align*}
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Magnetic field torque:
+\begin_inset Formula 
+\[
+N=\frac{dL}{dt}=I\dot{\omega}=m\times B
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+L=I\omega
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+m=\frac{1}{\mu_{0}}B_{r}V
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Subsection*
+RL Circuit:
+\end_layout
+
+\begin_layout Standard
+DC response:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+I_{L}\left(t\right)=\frac{V}{R}\cdot\left(1-e^{-\frac{t}{\tau}}\right)
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+\tau=\frac{L}{R}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+AC response:
+\begin_inset Formula 
+\[
+I_{L}\left(t\right)=\frac{V}{L\sqrt{\left(\frac{R}{L}\right)^{2}+\omega^{2}}}\cdot\left(\frac{\omega}{\sqrt{\left(\frac{R}{L}\right)^{2}+\omega^{2}}}e^{-\frac{t}{\tau}}+\sin\left(\omega t-\arctan\left(\omega\tau\right)\right)\right)
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\omega=2\pi\cdot200\left[Hz\right]=1256
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\frac{R}{L}=335
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Subsection*
+RLC Circuit:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\omega_{0}=\frac{1}{\sqrt{LC}}
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+C_{Desired}=\frac{1}{L\omega_{in}^{2}}=\frac{1}{L\left(2\pi f_{in}\right)^{2}}\underbrace{=}_{\mathclap{\text{f=200Hz}}}1\times10^{-4}\left[F\right]
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Admittance:
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\left|Y\left(i\omega\right)\right|=\frac{1}{\sqrt{R^{2}+\left(L\omega\left(1-\left(\frac{\omega_{0}}{\omega}\right)^{2}\right)\right)^{2}}}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\end_body
+\end_document
