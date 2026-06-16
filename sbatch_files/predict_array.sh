@@ -75,18 +75,25 @@ echo "==========================================="
 # it to one mov dir ensures this task only processes its assigned movie.)
 # Also stamp 'general run name' = SLURM job name so every task in this array
 # lands under the same parent dir (override with `sbatch -J <name>`).
+# Derive 'calibration path' from the movie dir's parent (the experiment dir),
+# where the build step writes calibration.h5 -- so the calibration always
+# follows the data instead of trusting a stale path baked into the base config.
 TMP_CONFIG="/tmp/predict_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}_${MOV_NAME}.json"
 RUN_NAME="${SLURM_JOB_NAME:-predict_array}"
 python -c "
-import json
+import json, os
 cfg = json.load(open('$BASE_CONFIG'))
 cfg['data directory'] = '$MOVIE_DIR'
 cfg['general run name'] = '$RUN_NAME'
+calib = os.path.join(os.path.dirname('$MOVIE_DIR'.rstrip('/')), 'calibration.h5')
+if not os.path.isfile(calib):
+    raise SystemExit('calibration.h5 not found next to movie dir: ' + calib)
+cfg['calibration path'] = calib
 timings = '$TIMINGS_PATH'
 if timings:
     cfg['pipeline timings path'] = timings
 json.dump(cfg, open('$TMP_CONFIG', 'w'), indent=2)
-print('wrote', '$TMP_CONFIG  (run name: $RUN_NAME, timings:', timings or '<none>', ')')
+print('wrote', '$TMP_CONFIG  (run name: $RUN_NAME, calib:', calib, ', timings:', timings or '<none>', ')')
 "
 
 # Run prediction. Use --unbuffered so stdout/stderr stream live (useful for

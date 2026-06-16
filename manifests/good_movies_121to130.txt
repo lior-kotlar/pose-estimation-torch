@@ -1,8 +1,0 @@
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov121
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov122
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov123
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov126
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov127
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov128
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov129
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/121to130/mov130

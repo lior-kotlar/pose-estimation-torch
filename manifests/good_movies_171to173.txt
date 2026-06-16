@@ -1,2 +1,0 @@
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/171to173/mov171
-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/inference_datasets/test/2023/171to173/mov172

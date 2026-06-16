@@ -176,6 +176,7 @@ def detect_mode(input_dir: str) -> tuple:
                  f"(expected 0 or 4)")
     # Multi-movie mode.
     movies = []
+    incomplete = []   # (name, n_sparse) for mov dirs without exactly 4 mats
     for sub in sorted(glob.glob(os.path.join(input_dir, "mov*"))):
         if not os.path.isdir(sub):
             continue
@@ -187,6 +188,11 @@ def detect_mode(input_dir: str) -> tuple:
             movies.append((sub, mn))
         else:
             print(f"  (skipping {sub}: {n} *_sparse.mat, expected 4)")
+            incomplete.append((os.path.basename(sub), n))
+    if incomplete:
+        print(f"Skipped {len(incomplete)} incomplete movie(s) "
+              f"(missing/extra *_sparse.mat — dropped from the whole pipeline): "
+              + ", ".join(f"{name}({n}/4)" for name, n in incomplete))
     if not movies:
         sys.exit(f"No 'mov<N>/' subdirs with 4 *_sparse.mat in {input_dir}")
     return "multi", movies

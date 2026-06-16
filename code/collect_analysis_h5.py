@@ -5,8 +5,13 @@ Walks <src_dir> recursively (e.g. predict_output/debug_outputs, whose
 immediate subdirs are per-movie run folders) and copies every file ending in
 `analysis_smoothed.h5` into <dest_dir> (created if missing).
 
+Directories named `bad_wings` or `bad_signal` (and their subtrees) are skipped
+by default, so known-bad movies don't contaminate the collected set. Override
+with --exclude / --include-bad.
+
 Usage:
     python code/collect_analysis_h5.py <src_dir> <dest_dir> [--move] [--dry-run]
+                                       [--exclude DIR ...] [--include-bad]
 
 Examples:
     python code/collect_analysis_h5.py predict_output/debug_outputs collected_h5
@@ -23,13 +28,26 @@ import sys
 
 SUFFIX = "analysis_smoothed.h5"
 
+# Directories holding movies that must never be collected (bad/contaminating
+# data). Pruned during the walk so os.walk never descends into them.
+DEFAULT_EXCLUDE_DIRS = {"bad_wings", "bad_signal"}
 
-def find_files(src_dir):
-    """Yield absolute paths of every file ending in SUFFIX under src_dir."""
-    for root, _dirs, files in os.walk(src_dir):
+
+def find_files(src_dir, exclude_dirs):
+    """Yield absolute paths of every file ending in SUFFIX under src_dir,
+    skipping any directory whose name is in exclude_dirs (and its subtree)."""
+    skipped = []
+    for root, dirs, files in os.walk(src_dir):
+        # prune excluded dirs in place so os.walk won't descend into them
+        pruned = [d for d in dirs if d in exclude_dirs]
+        for d in pruned:
+            skipped.append(os.path.join(root, d))
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for name in files:
             if name.endswith(SUFFIX):
                 yield os.path.join(root, name)
+    for s in skipped:
+        print(f"  (excluded subtree: {s})")
 
 
 def unique_dest(dest_dir, src_path, taken):
@@ -58,6 +76,12 @@ def main():
                    help="move instead of copy (removes the originals)")
     p.add_argument("--dry-run", action="store_true",
                    help="print what would happen without touching the filesystem")
+    p.add_argument("--exclude", action="append", default=None, metavar="DIR",
+                   help=f"directory name to skip (repeatable). "
+                        f"Default: {' '.join(sorted(DEFAULT_EXCLUDE_DIRS))}")
+    p.add_argument("--include-bad", action="store_true",
+                   help="disable all exclusions and collect everything (DANGER: "
+                        "pulls in bad_wings/bad_signal too)")
     args = p.parse_args()
 
     if not os.path.isdir(args.src_dir):
@@ -65,7 +89,14 @@ def main():
     if os.path.abspath(args.src_dir) == os.path.abspath(args.dest_dir):
         sys.exit("src_dir and dest_dir must differ")
 
-    matches = sorted(find_files(args.src_dir))
+    if args.include_bad:
+        exclude_dirs = set()
+    else:
+        exclude_dirs = set(args.exclude) if args.exclude else set(DEFAULT_EXCLUDE_DIRS)
+    if exclude_dirs:
+        print(f"Excluding directories named: {', '.join(sorted(exclude_dirs))}")
+
+    matches = sorted(find_files(args.src_dir, exclude_dirs))
     if not matches:
         print(f"No *{SUFFIX} files found under {args.src_dir}")
         return

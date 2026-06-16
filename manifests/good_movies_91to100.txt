@@ -1,8 +1,0 @@
-inference_datasets/test/2023/91to100/mov91/
-inference_datasets/test/2023/91to100/mov92/
-inference_datasets/test/2023/91to100/mov93/
-inference_datasets/test/2023/91to100/mov94/
-inference_datasets/test/2023/91to100/mov95/
-inference_datasets/test/2023/91to100/mov97/
-inference_datasets/test/2023/91to100/mov98/
-inference_datasets/test/2023/91to100/mov99/
