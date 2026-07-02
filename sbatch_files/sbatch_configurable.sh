@@ -13,6 +13,9 @@
 #
 # Examples:
 #   sbatch -J train_run sbatch_configurable.sh code/training_code/train.py configs/foo.json
+#   # request a better GPU than the default (override gres + partition on the CLI):
+#   sbatch -J train_jsd -p salmon --gres=gpu:l40s:1 sbatch_configurable.sh \
+#       code/training_code/train.py train_configurations/config_per_cam_jsd.json
 #   sbatch -J process_exp sbatch_configurable.sh code/process_experiment.py \
 #       inference_datasets/test/2023 \
 #       --easywand inference_datasets/.../10_8_23_allmovs_easyWandData.mat \

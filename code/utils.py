@@ -49,6 +49,11 @@ class TrainConfig:
             self.base_output_directory = config["base output directory"]
             self.how_many_visualizations = 1 if self.debug_mode else config["how many visualizations"]
             self.model_type = config["model type"]
+            # Optional short label appended to the auto-generated run folder
+            # name (after model type) so variants that share a model type are
+            # distinguishable, e.g. "MODEL_PER_CAM_PER_WING_JSD_Jun 30".
+            # Defaults to "" -> name is unchanged.
+            self.run_tag = config.get("run tag", "")
             self.save_every = config["save every"]
             self.confmaps_orig = None
             self.box_orig = None
@@ -71,6 +76,9 @@ class TrainConfig:
             self.num_base_filters = config["number of base filters"]
             self.dilation_rate = config["dilation rate"]
             self.dropout = config["dropout ratio"]
+            # Normalization for the U-Net backbone: "none" (default, matches the
+            # norm-free encoder_atrous/decoder nets), "group", or "batch".
+            self.normalization = config.get("normalization", "none")
 
             # augmentation configuration
             self.rotation_range = config["rotation range"]
@@ -88,7 +96,10 @@ class TrainConfig:
     
     def get_model_type(self):
         return self.model_type
-    
+
+    def get_run_tag(self):
+        return self.run_tag
+
     def get_val_fraction(self):
         return self.val_fraction
     
@@ -124,6 +135,9 @@ class TrainConfig:
             self.dilation_rate,\
             self.weight_initialization_method,\
             self.dropout
+
+    def get_normalization(self):
+        return self.normalization
     
     def get_resume_training_checkpoint_path(self):
         return self.resume_training_checkpoint_path

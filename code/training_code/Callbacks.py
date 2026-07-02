@@ -8,7 +8,7 @@ import numpy as np
 import logging
 from time import time
 from scipy.io import savemat
-from constants import MODEL_PER_CAM_PER_WING, ALL_CAMS_PER_WING
+from constants import MODEL_PER_CAM_PER_WING, MODEL_PER_CAM_PER_WING_UNET, ALL_CAMS_PER_WING
 
 class ModelCallbacks:
     def __init__(self, model, base_directory, viz_sample_list, validation):
@@ -299,7 +299,7 @@ class ModelCallbacks:
             for i, (sample, confmap) in enumerate(zip(self.samples, self.confmaps)):
                 sample_save_dir = os.path.join(self.save_directory, f"sample_{i}")
                 model_type = self.model.get_model_type()
-                if model_type == MODEL_PER_CAM_PER_WING:
+                if model_type == MODEL_PER_CAM_PER_WING or model_type == MODEL_PER_CAM_PER_WING_UNET:
                     show_pred(
                         self.model,
                         sample,

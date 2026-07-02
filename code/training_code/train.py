@@ -85,14 +85,16 @@ class Trainer:
             eps=self.general_configuration.optimizer_epsilon
             )
         
-        self.lr_scheduler = lr_scheduler.ReduceLROnPlateau(
+        # Cosine annealing: smoothly decay the LR from its initial value down
+        # to eta_min over the whole run, following a half-cosine curve. Unlike
+        # ReduceLROnPlateau this is schedule-based rather than tied to the
+        # background-dominated validation MSE, so it cannot starve the LR early
+        # when that metric briefly plateaus (which previously froze training
+        # ~1/3 of the way through). T_max is the planned number of epochs.
+        self.lr_scheduler = lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            mode='min',
-            factor=self.general_configuration.reduce_lr_factor,
-            patience=self.general_configuration.reduce_lr_patience,
-            cooldown=self.general_configuration.reduce_lr_cooldown,
-            threshold=0.01,
-            min_lr=self.general_configuration.reduce_lr_min_lr
+            T_max=self.num_epochs,
+            eta_min=self.general_configuration.reduce_lr_min_lr
         )
 
         if self.checkpoint_load_path:
@@ -267,7 +269,8 @@ class Trainer:
 
         logs['validation loss'] = average_val_loss
 
-        self.lr_scheduler.step(average_val_loss)
+        # CosineAnnealingLR steps per-epoch and takes no metric argument.
+        self.lr_scheduler.step()
         logs['lr'] = self.lr_scheduler.get_last_lr()[0]
 
         self.callbacks.on_epoch_end(epoch=epoch_number, logs=logs)
@@ -372,6 +375,7 @@ def training_main(
         traceback.print_exc()
 
 def main():
+    overall_start_time = time.time()
     config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
     print(f"Using config file: {config_path}", flush=True)
     general_configuration = TrainConfig(config_path=config_path)
@@ -379,7 +383,10 @@ def main():
     base_output_directory = arrange_loaded_checkpoint(general_configuration=general_configuration)
 
     if not base_output_directory:
-        run_name = f"{general_configuration.model_type}_{date.today().strftime('%b %d')}"
+        date_str = date.today().strftime('%b %d')
+        run_tag = general_configuration.get_run_tag()
+        run_name = f"{general_configuration.model_type}_{run_tag}_{date_str}" if run_tag \
+            else f"{general_configuration.model_type}_{date_str}"
         base_output_directory = create_train_run_folders(
             base_output_directory=general_configuration.get_base_output_directory(),
             run_name=run_name,
@@ -398,7 +405,14 @@ def main():
         general_configuration=general_configuration,
         base_run_directory=base_output_directory,
         use_gpu=use_gpu
-    )    
+    )
+
+    # Total wall-clock for the whole run: preprocessing + setup + training.
+    total_elapsed = time.time() - overall_start_time
+    hours, rem = divmod(total_elapsed, 3600)
+    minutes, seconds = divmod(rem, 60)
+    print(f'Total run time (preprocessing + training): '
+          f'{int(hours):0>2}:{int(minutes):0>2}:{int(seconds):0>2} (hh:mm:ss)', flush=True)
 
 if __name__ == "__main__":
     main()

@@ -6,6 +6,7 @@ HEAD_TAIL_PER_CAM_POINTS_LOSS = "HEAD_TAIL_PER_CAM_POINTS_LOSS"
 ALL_CAMS_PER_WING = "ALL_CAMS_PER_WING" # preprocess to predict each wing separately using all cameras at once
 ALL_CAMS_ALL_WINGS = "ALL_CAMS_ALL_WINGS" # preprocess to predict all points at once using all cameras at once
 MODEL_PER_CAM_PER_WING = "MODEL_PER_CAM_PER_WING" # predicts one wing at a time, one camera at a time, including body points
+MODEL_PER_CAM_PER_WING_UNET = "MODEL_PER_CAM_PER_WING_UNET" # same I/O as MODEL_PER_CAM_PER_WING but a true U-Net (skip connections + GroupNorm); predicts as PER_WING_PER_CAM
 MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS = "MODEL_PER_CAM_PER_WING_3_GOOD_CAMERAS" # choose best 3 cameras out of 4
 MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY = "MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY" #there are only 3 cameras to begin with
 
@@ -21,6 +22,7 @@ RANDOM_TRAIN_SET = "RANDOM_TRAIN_SET"
 IMAGE_SIZE = 192
 model_types_to_channels = {
     MODEL_PER_CAM_PER_WING: 4,
+    MODEL_PER_CAM_PER_WING_UNET: 4,
     MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS: 4,
     MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY: 4
 }

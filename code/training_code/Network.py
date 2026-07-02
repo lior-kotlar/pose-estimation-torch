@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from utils import TrainConfig
-from constants import ALL_CAMS_PER_WING, ALL_CAMS_ALL_WINGS, MODEL_PER_CAM_PER_WING
+from constants import ALL_CAMS_PER_WING, ALL_CAMS_ALL_WINGS, MODEL_PER_CAM_PER_WING, MODEL_PER_CAM_PER_WING_UNET
 
 
 class Network:
@@ -273,6 +273,119 @@ class Network:
         def get_model_type(self):
             return ALL_CAMS_PER_WING
 
+    class UNet(nn.Module):
+        """
+        A true U-Net: encoder/decoder WITH skip connections, dilated convs and
+        OPTIONAL normalization. Same input/output contract as simple_network
+        (one camera, one wing):
+            input  (B, C_in, H, W)  ->  output (B, num_output_channels, H, W)
+        so it trains on the MODEL_PER_CAM_PER_WING preprocessing and is served
+        at prediction time through the existing PER_WING_PER_CAM path.
+
+        The skip connections are what make its errors decorrelate from the
+        skip-less encoder_atrous networks (the ensemble's per-point selection
+        exploits that). Dilation matches the receptive field of the proven
+        encoder_atrous recipe; normalization defaults to "none" because the
+        other models train fine without it at 2 blocks and GroupNorm appeared
+        to over-smooth the heatmap peaks (set "normalization" in the config to
+        "group"/"batch" only if you go deeper and it stops training).
+        """
+        def __init__(self, general_configuration: TrainConfig, image_size, number_of_output_channels):
+            super(Network.UNet, self).__init__()
+
+            num_base_filters, \
+            num_blocks, \
+            kernel_size, \
+            dilation_rate, \
+            weight_init_str, \
+            dropout = general_configuration.get_network_configuration()
+            norm = general_configuration.get_normalization()
+
+            in_channels = image_size[0]
+
+            # --- contracting path ---
+            self.encoders = nn.ModuleList()
+            self.pools = nn.ModuleList()
+            skip_channels = []
+            channels = in_channels
+            for block_idx in range(num_blocks):
+                out_channels = num_base_filters * (2 ** block_idx)
+                self.encoders.append(Network.UNet.double_conv(channels, out_channels, kernel_size, dilation_rate, dropout, norm))
+                self.pools.append(nn.MaxPool2d(kernel_size=2, stride=2))
+                skip_channels.append(out_channels)
+                channels = out_channels
+
+            # --- bottleneck ---
+            bottleneck_channels = num_base_filters * (2 ** num_blocks)
+            self.bottleneck = Network.UNet.double_conv(channels, bottleneck_channels, kernel_size, dilation_rate, dropout, norm)
+
+            # --- expanding path ---
+            self.ups = nn.ModuleList()
+            self.decoders = nn.ModuleList()
+            channels = bottleneck_channels
+            for block_idx in range(num_blocks - 1, -1, -1):
+                out_channels = num_base_filters * (2 ** block_idx)
+                self.ups.append(nn.ConvTranspose2d(channels, out_channels,
+                                                   kernel_size=4, stride=2, padding=1))
+                # decoder input = upsampled features (out_channels) concatenated
+                # with the matching encoder skip (skip_channels[block_idx]).
+                self.decoders.append(Network.UNet.double_conv(out_channels + skip_channels[block_idx],
+                                                              out_channels, kernel_size, dilation_rate, dropout, norm))
+                channels = out_channels
+
+            self.final = nn.Conv2d(channels, number_of_output_channels, kernel_size=1)
+
+            weight_init_function = Network.config_init_method(self, weight_init_str)
+            self.apply(lambda m: Network.init_weights(self, m, weight_init_function))
+
+        @staticmethod
+        def _num_groups(num_channels):
+            # largest group count in {8,4,2,1} that divides the channel count
+            for groups in (8, 4, 2, 1):
+                if num_channels % groups == 0:
+                    return groups
+            return 1
+
+        @staticmethod
+        def _norm_layer(norm, num_channels):
+            if norm == "group":
+                return nn.GroupNorm(Network.UNet._num_groups(num_channels), num_channels)
+            elif norm == "batch":
+                return nn.BatchNorm2d(num_channels)
+            else:  # "none" - matches the norm-free encoder_atrous/decoder nets
+                return nn.Identity()
+
+        @staticmethod
+        def double_conv(in_channels, out_channels, kernel_size, dilation, dropout, norm):
+            return nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size, padding='same', dilation=dilation),
+                Network.UNet._norm_layer(norm, out_channels),
+                nn.LeakyReLU(inplace=True),
+                nn.Conv2d(out_channels, out_channels, kernel_size, padding='same', dilation=dilation),
+                Network.UNet._norm_layer(norm, out_channels),
+                nn.LeakyReLU(inplace=True),
+                nn.Dropout(p=dropout),
+            )
+
+        def forward(self, x):
+            skips = []
+            for encoder, pool in zip(self.encoders, self.pools):
+                x = encoder(x)
+                skips.append(x)
+                x = pool(x)
+            x = self.bottleneck(x)
+            for up, decoder, skip in zip(self.ups, self.decoders, reversed(skips)):
+                x = up(x)
+                # ConvTranspose(k=4,s=2,p=1) and MaxPool(2) both halve/double
+                # exactly for the fixed 192x192 input, so spatial dims align.
+                x = torch.cat([x, skip], dim=1)
+                x = decoder(x)
+            x = self.final(x)
+            return x
+
+        def get_model_type(self):
+            return MODEL_PER_CAM_PER_WING_UNET
+
 
     def config_model(self, general_configuration: TrainConfig):
         # if self.model_type == ALL_CAMS or self.model_type == ALL_CAMS_18_POINTS or self.model_type == ALL_CAMS_ALL_POINTS:
@@ -292,7 +405,13 @@ class Network:
                 general_configuration=general_configuration,
                 image_size=self.image_size,
                 number_of_output_channels=self.number_of_output_channels)
-        
+
+        elif self.model_type == MODEL_PER_CAM_PER_WING_UNET:
+            model = self.UNet(
+                general_configuration=general_configuration,
+                image_size=self.image_size,
+                number_of_output_channels=self.number_of_output_channels)
+
         return model
     
     def config_init_method(self, weight_init_method_str):
