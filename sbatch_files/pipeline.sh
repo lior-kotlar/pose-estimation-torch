@@ -29,6 +29,7 @@
 #
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err
+#SBATCH -p glacier
 #SBATCH --mem=64g
 #SBATCH --cpus-per-task=4
 #SBATCH --time=06:00:00
@@ -45,12 +46,13 @@ ARRAY_CONCURRENCY="${5:-32}"   # optional: cap concurrent GPU tasks
 
 usage() {
     echo "Usage: sbatch -J <name> $0 <input_dir> <easywand> <cam> <predict_config> [array_concurrency]" >&2
+    echo "  <cam>: mirror cam to vertically flip (e.g. cam1), or 'none' to skip the flip" >&2
     exit 1
 }
 
 [ -z "$INPUT_DIR"    ] && { echo "input_dir required (arg 1)" >&2; usage; }
 [ -z "$EASYWAND"     ] && { echo "easywand path required (arg 2)" >&2; usage; }
-[ -z "$CAM"          ] && { echo "cam name required (arg 3)" >&2; usage; }
+[ -z "$CAM"          ] && { echo "cam name required (arg 3), or 'none' to skip the flip" >&2; usage; }
 [ -z "$PRED_CONFIG"  ] && { echo "predict config required (arg 4)" >&2; usage; }
 [ ! -d "$INPUT_DIR"  ] && { echo "input_dir not a directory: $INPUT_DIR" >&2; exit 1; }
 [ ! -f "$EASYWAND"   ] && { echo "easyWand mat not found: $EASYWAND" >&2; exit 1; }
@@ -74,8 +76,13 @@ echo "  timings     : $TIMINGS_PATH"
 echo "==========================================="
 
 # Step 1 — data prep. Per-movie timings get appended to TIMINGS_PATH.
-python -u code/process_experiment.py "$INPUT_DIR" \
-    --easywand "$EASYWAND" --cam "$CAM"
+# 'none'/'noflip'/'skip' for <cam> skips the (non-idempotent) mirror flip.
+PREP_ARGS=(--easywand "$EASYWAND")
+case "${CAM,,}" in
+    none|noflip|skip|-) echo "  flip: SKIPPED (cam='$CAM')"; PREP_ARGS+=(--skip-flip) ;;
+    *)                  PREP_ARGS+=(--cam "$CAM") ;;
+esac
+python -u code/process_experiment.py "$INPUT_DIR" "${PREP_ARGS[@]}"
 
 # Step 2 — submit the predict array if a manifest with content exists.
 MANIFEST="manifests/good_movies_${EXP_NAME}.txt"
