@@ -158,7 +158,8 @@ def scan_movie(movie_dir: str, pixel_threshold: int,
 
 
 def parse_movie_num(d: str):
-    m = re.match(r"^mov(\d+)$", os.path.basename(d))
+    # Case-insensitive and leading-zero tolerant (mov3, Mov003, MOV03 -> 3).
+    m = re.match(r"^mov(\d+)$", os.path.basename(d), re.IGNORECASE)
     return int(m.group(1)) if m else None
 
 
@@ -173,8 +174,11 @@ def detect_mode(input_dir: str) -> tuple:
     if n_direct != 0:
         sys.exit(f"Ambiguous: {input_dir} contains {n_direct} *_sparse.mat "
                  f"(expected 0 or 4)")
+    # os.listdir (not a case-sensitive glob) so 'Mov001' Windows exports are
+    # discovered alongside canonical 'mov1'.
     movies = []
-    for sub in sorted(glob.glob(os.path.join(input_dir, "mov*"))):
+    for name in sorted(os.listdir(input_dir)):
+        sub = os.path.join(input_dir, name)
         if not os.path.isdir(sub):
             continue
         mn = parse_movie_num(sub)
@@ -182,6 +186,7 @@ def detect_mode(input_dir: str) -> tuple:
             continue
         if len(glob.glob(os.path.join(sub, "*_sparse.mat"))) == 4:
             movies.append((sub, mn))
+    movies.sort(key=lambda t: t[1])
     if not movies:
         sys.exit(f"No 'mov<N>/' subdirs with 4 *_sparse.mat in {input_dir}")
     return "multi", movies

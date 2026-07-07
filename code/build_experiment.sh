@@ -60,12 +60,35 @@ count_sparse_mats() {
     find "$1" -maxdepth 1 -mindepth 1 -name '*sparse.mat' -type f | wc -l
 }
 
-# Parse the integer N from a "movN" basename. Echoes N, or empty on no match.
+# Parse the integer N from a "movN" basename, case-insensitively and ignoring
+# leading zeros (mov3, Mov003, MOV03 all -> 3). Echoes N, or empty on no match.
 parse_movie_num() {
-    local base="$(basename "$1")"
-    if [[ "$base" =~ ^mov([0-9]+)$ ]]; then
-        echo "${BASH_REMATCH[1]}"
+    local base
+    base="$(basename "$1")"
+    local n=""
+    shopt -s nocasematch
+    [[ "$base" =~ ^mov([0-9]+)$ ]] && n="$((10#${BASH_REMATCH[1]}))"
+    shopt -u nocasematch
+    echo "$n"
+}
+
+# MATLAB's dataset script hard-codes the movie subdir as ['mov', int2str(movie_num)]
+# -- lowercase 'mov', no leading zeros. Raw Windows-exported dirs look like 'Mov001',
+# so rename <dir> to the canonical <parent>/mov<N> that MATLAB expects. Echoes the
+# canonical path on stdout; returns nonzero (with a message) on a name collision.
+canonical_movie_dir() {
+    local dir="$1" mn="$2"
+    local canon
+    canon="$(dirname "$dir")/mov$mn"
+    if [ "$dir" != "$canon" ]; then
+        if [ -e "$canon" ]; then
+            echo "  Cannot rename $(basename "$dir") -> mov$mn (target already exists)" >&2
+            return 1
+        fi
+        mv "$dir" "$canon"
+        echo "  Renamed $(basename "$dir") -> mov$mn (pipeline convention)" >&2
     fi
+    echo "$canon"
 }
 
 # Build the MATLAB -batch prelude with all overrides for the dataset script.
@@ -84,6 +107,7 @@ matlab_dataset_cmd() {
 declare -a JOBS_SFP  # sparse_folder_path per job
 declare -a JOBS_SP   # save_path per job
 declare -a JOBS_MN   # movie_num per job
+njobs=0              # scalar count (nounset-safe on older bash w/ empty arrays)
 
 n_direct=$(count_sparse_mats "$INPUT_DIR")
 
@@ -95,9 +119,11 @@ if [ "$n_direct" -eq 4 ]; then
         echo "Rename it or move the 4 mats into a mov<N>/ subdirectory." >&2
         exit 1
     fi
+    INPUT_DIR=$(canonical_movie_dir "$INPUT_DIR" "$mn") || exit 1
     JOBS_SFP+=("$(dirname "$INPUT_DIR")")
     JOBS_SP+=("$INPUT_DIR")
     JOBS_MN+=("$mn")
+    njobs=$((njobs + 1))
     echo "Mode: single-movie. Movie #$mn at $INPUT_DIR"
 elif [ "$n_direct" -eq 0 ]; then
     # Multi-movie mode: scan for movN/ subdirs with 4 mats
@@ -106,18 +132,20 @@ elif [ "$n_direct" -eq 0 ]; then
         [ -z "$mn" ] && continue
         n=$(count_sparse_mats "$sub")
         if [ "$n" -eq 4 ]; then
+            canon=$(canonical_movie_dir "$sub" "$mn") || continue
             JOBS_SFP+=("$INPUT_DIR")
-            JOBS_SP+=("$sub")
+            JOBS_SP+=("$canon")
             JOBS_MN+=("$mn")
+            njobs=$((njobs + 1))
         else
             echo "Skipping $sub (expected 4 *_sparse.mat, found $n)" >&2
         fi
     done < <(find "$INPUT_DIR" -maxdepth 1 -mindepth 1 -type d -print0 | sort -z)
-    if [ "${#JOBS_MN[@]}" -eq 0 ]; then
+    if [ "$njobs" -eq 0 ]; then
         echo "Multi-movie mode: no mov<N>/ subdirs with 4 *_sparse.mat found in $INPUT_DIR" >&2
         exit 1
     fi
-    echo "Mode: multi-movie. ${#JOBS_MN[@]} movie(s) queued: ${JOBS_MN[*]}"
+    echo "Mode: multi-movie. $njobs movie(s) queued: ${JOBS_MN[*]}"
 else
     echo "Ambiguous: $INPUT_DIR contains $n_direct *_sparse.mat (expected 0 or 4)" >&2
     exit 1

@@ -155,14 +155,40 @@ def count_sparse_mats(d: str) -> int:
 
 
 def parse_movie_num(d: str) -> "int | None":
-    """Parse N from a 'movN' basename. Returns None on no match."""
-    m = re.match(r"^mov(\d+)$", os.path.basename(d))
+    """Parse N from a 'movN' basename, case-insensitively and ignoring leading
+    zeros (mov3, Mov003, MOV03 all -> 3). Returns None on no match."""
+    m = re.match(r"^mov(\d+)$", os.path.basename(d), re.IGNORECASE)
     return int(m.group(1)) if m else None
 
 
-def detect_mode(input_dir: str) -> tuple:
+def canonical_movie_dir(movie_dir: str, movie_num: int,
+                        dry_run: bool = False) -> str:
+    """MATLAB's builder reconstructs the movie subdir as ['mov', int2str(movie_num)]
+    — lowercase 'mov', no leading zeros. Raw Windows-exported dirs are named like
+    'Mov001', which MATLAB (and the mov* discovery here) won't find. Rename such a
+    dir to the canonical <parent>/mov<N> and return the path to use. On a name
+    collision, leaves the dir untouched and returns it unchanged."""
+    parent = os.path.dirname(movie_dir)
+    canon = os.path.join(parent, f"mov{movie_num}")
+    if os.path.abspath(movie_dir) == os.path.abspath(canon):
+        return movie_dir
+    if os.path.exists(canon):
+        print(f"  WARNING: cannot rename {os.path.basename(movie_dir)} -> "
+              f"mov{movie_num} (target already exists); leaving as-is")
+        return movie_dir
+    print(f"  {'would rename' if dry_run else 'renaming'} "
+          f"{os.path.basename(movie_dir)} -> mov{movie_num} (pipeline convention)")
+    if not dry_run:
+        os.rename(movie_dir, canon)
+        return canon
+    return movie_dir
+
+
+def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
     """Returns ('single', [(movie_dir, movie_num)]) or
        ('multi', [(movie_dir, movie_num), ...]) or sys.exits on error.
+    Non-canonical movie dirs (e.g. 'Mov001') are renamed to 'mov<N>' first, since
+    the whole downstream pipeline (MATLAB build included) expects that convention.
     """
     n_direct = count_sparse_mats(input_dir)
     if n_direct == 4:
@@ -170,14 +196,17 @@ def detect_mode(input_dir: str) -> tuple:
         if mn is None:
             sys.exit(f"Single-movie mode requires a 'mov<N>' basename; got "
                      f"'{os.path.basename(input_dir)}'")
+        input_dir = canonical_movie_dir(input_dir, mn, dry_run)
         return "single", [(input_dir, mn)]
     if n_direct != 0:
         sys.exit(f"Ambiguous: {input_dir} contains {n_direct} *_sparse.mat "
                  f"(expected 0 or 4)")
-    # Multi-movie mode.
+    # Multi-movie mode. Use os.listdir (not a case-sensitive glob) so 'Mov001'
+    # from a Windows export is discovered alongside canonical 'mov1'.
     movies = []
     incomplete = []   # (name, n_sparse) for mov dirs without exactly 4 mats
-    for sub in sorted(glob.glob(os.path.join(input_dir, "mov*"))):
+    for name in sorted(os.listdir(input_dir)):
+        sub = os.path.join(input_dir, name)
         if not os.path.isdir(sub):
             continue
         mn = parse_movie_num(sub)
@@ -185,10 +214,12 @@ def detect_mode(input_dir: str) -> tuple:
             continue
         n = count_sparse_mats(sub)
         if n == 4:
+            sub = canonical_movie_dir(sub, mn, dry_run)
             movies.append((sub, mn))
         else:
             print(f"  (skipping {sub}: {n} *_sparse.mat, expected 4)")
             incomplete.append((os.path.basename(sub), n))
+    movies.sort(key=lambda t: t[1])
     if incomplete:
         print(f"Skipped {len(incomplete)} incomplete movie(s) "
               f"(missing/extra *_sparse.mat — dropped from the whole pipeline): "
@@ -681,7 +712,11 @@ def main() -> None:
         print(f"  argv:      {' '.join(sys.argv)}")
         print(f"================================================================")
 
-        mode, movies = detect_mode(input_dir)
+        mode, movies = detect_mode(input_dir, args.dry_run)
+        # Single-movie mode may have renamed the input dir to canonical 'mov<N>';
+        # follow it so clean / verify / report all target the right path.
+        if mode == "single":
+            input_dir = movies[0][0]
         print(f"Mode: {mode}; movies queued: "
               f"{', '.join(f'mov{n}' for _, n in movies)}")
 
