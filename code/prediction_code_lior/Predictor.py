@@ -71,7 +71,6 @@ class Predictor2D:
         self.wings_detector_model_path, \
         self.wings_pose_estimation_model_path, \
         self.wings_pose_estimation_model_second_pass_path, \
-        self.config_path_2D_to_3D, \
         self.output_directory, \
         self.is_video, \
         self.batch_size, \

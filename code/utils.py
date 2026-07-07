@@ -188,7 +188,6 @@ class PredictConfig:
             self.output_directory = config['output directory']
             self.calibration_data_path = config['calibration path']
             self.wings_detector_path = config['wings detector path']
-            self.config_path_2D_to_3D = config['2D to 3D config path']
             self.image_height = config['IMAGE HEIGHT']
             self.image_width = config['IMAGE WIDTH']
             self.num_cams = config['number of cameras']
@@ -274,7 +273,6 @@ class PredictConfig:
         self.wings_detector_path, \
         self.wings_pose_estimation_model_path, \
         self.wings_pose_estimation_model_path_second_pass, \
-        self.config_path_2D_to_3D, \
         self.specific_output_directory, \
         self.is_video, \
         self.batch_size, \
@@ -299,7 +297,6 @@ class PredictConfig:
             "specific output directory": self.specific_output_directory,
             "calibration path": self.calibration_data_path,
             "wings detector path": self.wings_detector_path,
-            "2D to 3D config path": self.config_path_2D_to_3D,
             "IMAGE HEIGHT": self.image_height,
             "IMAGE WIDTH": self.image_width,
             "number of cameras": self.num_cams,
@@ -323,30 +320,6 @@ class PredictConfig:
         with open(file_path, 'w') as file:
             json.dump(config_dict, file, indent=4)
         print(f"Saved used configuration to {file_path}")
-
-class From2D23DConfig:
-    def __init__(self, config_path):
-        with open(config_path) as CF:
-            config = json.load(CF)
-            self.config = config
-            self.d2_predictions_path = config['2D predictions path']
-            self.output_directory_path = config['output directory path']
-            self.number_of_cameras = config['number of cameras']
-            self.calibration_data_path = config['calibration data path']
-            self.align_right_left = bool(config['align right left'])
-            self.image_height = config['IMAGE HEIGHT']
-            self.image_width = config['IMAGE WIDTH']
-
-    def get_config_data(self):
-        return self.d2_predictions_path, \
-                self.output_directory_path, \
-                self.number_of_cameras, \
-                self.align_right_left
-    
-    def get_triangulator_data(self):
-        return self.calibration_data_path, \
-                self.image_height, \
-                self.image_width
 
 
 def tf_format_find_peaks(x):

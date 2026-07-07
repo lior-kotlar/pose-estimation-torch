@@ -21,7 +21,6 @@ from scipy.interpolate import make_smoothing_spline
 from scipy.signal import medfilt
 from constants import *
 from scipy.optimize import curve_fit
-from utils import From2D23DConfig
 
 WHICH_TO_FLIP = np.array(
     [[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1], [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1]]).astype(bool)
@@ -33,7 +32,7 @@ class From2Dto3D:
     def __init__(self,
                  load_from=CONFIG,
                  h5_file_path="",
-                 config2D3D: From2D23DConfig = None):
+                 config2D3D=None):
         
         calibration_data_path, image_height, image_width = config2D3D.get_triangulator_data()
         if load_from == CONFIG:
@@ -615,63 +614,6 @@ class From2Dto3D:
         np.save(save_path, points_to_save)
 
 
-def predict_3D_points_all(base_path, config_path):
-    # Create an empty list to store the file paths
-    file_list = []
-
-    # Loop through the subdirectories of A
-    for sub in ["mov29"]:
-        # Check if the subdirectory name starts with "movie"
-        dir_path = os.path.join(base_path, sub)
-        dirs = glob.glob(os.path.join(dir_path, "*"))
-        for dir in dirs:
-            if os.path.isdir(dir):
-                # Append it to the list
-                predicts_file = os.path.join(dir, "predicted_points_and_box_reprojected.h5")
-                if os.path.isfile(predicts_file):
-                    # Append it to the list
-                    file_list.append(predicts_file)
-                else:
-                    # Otherwise, append the file "predicted_points_and_box.h5" to the list
-                    predicts_file = os.path.join(dir, "predicted_points_and_box.h5")
-                    file_list.append(predicts_file)
-    file_list = file_list[1:]
-    for preds_file in file_list:
-        print(preds_file)
-        dir_path = os.path.dirname(preds_file)
-        with open(config_path) as C:
-            config_2D = json.load(C)
-            config_2D["2D predictions path"] = preds_file
-            config_2D["out path"] = dir_path
-        new_config_path = os.path.join(dir_path, 'configuration predict 3D.json')
-        with open(new_config_path, 'w') as file:
-            json.dump(config_2D, file, indent=4)
-        try:
-            predictor = From2Dto3D(configuration_path=new_config_path, load_from=CONFIG)
-            points_3D_all, _, _ = predictor.get_all_3D_pnts_pairs(predictor.preds_2D, predictor.cropzone)
-            predictor.save_points_3D(dir_path, points_3D_all, name="points_3D_all.npy")
-
-            points_3D, alpha = predictor.get_points_3D(alpha=None)
-            smoothed_3D = predictor.smooth_3D_points(points_3D)
-            predictor.save_points_3D(dir_path, points_3D, name="points_3D.npy")
-            predictor.save_points_3D(dir_path, smoothed_3D, name="points_3D_smoothed.npy")
-
-            # Open a new file called readme.txt in write mode
-            readme_path = os.path.join(dir_path, "README.txt")
-            score1 = predictor.get_validation_score(points_3D)
-            score2 = predictor.get_validation_score(smoothed_3D)
-            print(f"score1 is {score1}, score2 is {score2}")
-            with open(readme_path, "w") as f:
-                # Write some text into the file
-                f.write(f"The score for the points was {score1}\n")
-                f.write(f"The score for the smoothed points was {score2}\n")
-                f.write(f"the alpha was {alpha}\n")
-            # Close the file
-            f.close()
-        except:
-            print("************** failed ****************")
-
-
 def predict_3D_points_all_pairs(base_path):
     # Create an empty list to store the file paths
     all_points_file_list = []
@@ -754,10 +696,6 @@ def find_3D_points_from_ensemble(base_path):
 
 
 if __name__ == '__main__':
-    config_file_path = r"2D_to_3D_config.json"
-    base_path = r"G:\My Drive\Amitai\one halter experiments\one halter experiments 23-24.1.2024\experiment 24-1-2024 undisturbed\arranged movies"
-    predict_3D_points_all(base_path, config_file_path)
-
     base_path = r"G:\My Drive\Amitai\one halter experiments\one halter experiments 23-24.1.2024\experiment 24-1-2024 undisturbed\arranged movies"
     for movie in ["mov29"]:
         movie_path = os.path.join(base_path, movie)
