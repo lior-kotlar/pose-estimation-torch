@@ -47,7 +47,7 @@ class TrainConfig:
             self.reduce_lr_cooldown = config["reduce lr cooldown"]
             self.reduce_lr_min_lr = config["reduce lr min lr"]
             self.base_output_directory = config["base output directory"]
-            self.how_many_visualizations = 1 if self.debug_mode else config["how many visualizations"]
+            self.how_many_visualizations = 1 if self.debug_mode else config.get("how many visualizations", 10)
             self.model_type = config["model type"]
             # Optional short label appended to the auto-generated run folder
             # name (after model type) so variants that share a model type are

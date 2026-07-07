@@ -12,7 +12,7 @@
     "learning rate": 0.001,
     "optimizer epsilon": 1e-07,
     "weight initialization method": "xavier_uniform",
-    "how many visualizations": 50,
+    "how many visualizations": 10,
     "training checkpoint file path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_Dec 18/weights/model_epoch_49.pth",
     "resume training directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_Dec 18",
 
@@ -36,7 +36,7 @@
     "rank wing size": 2,
     "model type": "MODEL_PER_CAM_PER_WING",
     "test path": "-",
-    "data path": "/cs/labs/tsevi/lior.kotlar/pose-estimation/training_datasets/random_trainset_201_frames_18_joints.h5",
+    "data path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.h5",
     "mix with test": 0,
     "mask dilation": 1,
     "single time channel": 0,

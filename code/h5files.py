@@ -17,8 +17,7 @@ key_to_idx = {
     'points_3d': 1,
 }
 
-# path = "/cs/labs/tsevi/lior.kotlar/pose-estimation/training_datasets/random_trainset_201_frames_18_joints.h5"
-
+# path = "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.h5"
 
 
 def readfile(path):
