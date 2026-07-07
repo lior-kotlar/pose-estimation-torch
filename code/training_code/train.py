@@ -14,7 +14,7 @@ import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
 from utils import TrainConfig, optimizer_from_string, create_train_run_folders, save_training_code, show_interest_points_with_index
 import Callbacks
-from constants import CONFIGURATION_FILE_NAME
+from constants import CONFIGURATION_FILE_NAME, LATEST_CHECKPOINT_FILE_NAME
 
 
 N = 0
@@ -164,11 +164,19 @@ class Trainer:
                 "best_val_loss": self.best_val_loss,
             }
 
+            # Keep a single rolling resume checkpoint instead of one file per
+            # epoch: the latest model+optimizer+scheduler+epoch is all the
+            # resume feature needs, and this stops weights/ from growing
+            # unbounded (which previously filled the disk and killed runs).
+            # Write to a temp file then atomically replace, so a kill mid-write
+            # can't corrupt the only resume point.
             save_directory = os.path.join(self.base_run_directory, 'weights')
-            file_name = f"model_epoch_{epoch + 1}.pth"
-            save_path = os.path.join(save_directory, file_name)
-            torch.save(ckp, save_path)
-            print(f'Epoch {epoch+1} - Training checkpoint was save to {save_path}', flush=True)
+            os.makedirs(save_directory, exist_ok=True)
+            save_path = os.path.join(save_directory, LATEST_CHECKPOINT_FILE_NAME)
+            tmp_path = save_path + ".tmp"
+            torch.save(ckp, tmp_path)
+            os.replace(tmp_path, save_path)
+            print(f'Epoch {epoch+1} - Training checkpoint was saved to {save_path}', flush=True)
         else:
             self.save_model_as_scripted()
             txt_file_path = os.path.join(self.base_run_directory, "best_model_info.txt")

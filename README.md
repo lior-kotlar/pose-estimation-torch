@@ -368,13 +368,22 @@ Watch it with `tail -f logs/train_run_*.out`.
 
 ### 7.3 Resuming from a checkpoint
 
-Point the config at the checkpoint and its original run directory (see
+Each run keeps just two artifacts: `best_model.pt` (the best-so-far scripted
+model, for inference) and `weights/last_checkpoint.pth` (a single rolling
+checkpoint — model + optimizer + scheduler + epoch — overwritten every save,
+so `weights/` never grows unbounded). Resume from the rolling checkpoint by
+pointing the config at it and its original run directory (see
 `train_configurations/config1_resume.json`):
 
 ```json
-"training checkpoint file path": ".../<run>/weights/model_epoch_49.pth",
+"training checkpoint file path": ".../<run>/weights/last_checkpoint.pth",
 "resume training directory": ".../<run>"
 ```
+
+Because `last_checkpoint.pth` always holds the latest epoch, set `"epochs"` in
+the resume config to the *remaining* count (the cosine scheduler's `T_max` is
+restored from the checkpoint, so the loop trains `epochs` more epochs from the
+resume point — e.g. resuming a 100-epoch run at epoch 40 means `"epochs": 60`).
 
 The resumed config must match the original on the structural fields (model type,
 batch size, val fraction, kernel size, filters, blocks, loss) — the trainer

@@ -28,3 +28,8 @@ model_types_to_channels = {
 }
 
 CONFIGURATION_FILE_NAME = "configuration.json"
+
+# Single rolling checkpoint holding the latest resumable training state
+# (model + optimizer + scheduler + epoch). Overwritten each save instead of
+# emitting one file per epoch, so weights/ can't grow unbounded.
+LATEST_CHECKPOINT_FILE_NAME = "last_checkpoint.pth"
