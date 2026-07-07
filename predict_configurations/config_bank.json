@@ -17,38 +17,5 @@
         "model type second pass": "PER_WING_PER_CAM",
         "predict again 3D consistency": 0,
         "use reprojected masks": 0
-    },
-
-    "config3":
-    {
-        "_comment": "ENSEMBLE MEMBER 3 - simple_network trained with JSD loss (config_per_cam_jsd.json, run tag JSD). Replace <FILL_DATE> below with the actual run date, then add \"config3\" to specified_configs.json.",
-        "wings pose estimation model path" : "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_<FILL_DATE>/best_model.pt",
-        "wings pose estimation model path second pass": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_<FILL_DATE>/best_model.pt",
-        "model type": "PER_WING_PER_CAM",
-        "model type second pass": "PER_WING_PER_CAM",
-        "predict again 3D consistency": 0,
-        "use reprojected masks": 0
-    },
-
-    "config4":
-    {
-        "_comment": "ENSEMBLE MEMBER 4 - simple_network 32 filters / 2 blocks / dilation 3, MSE (config_per_cam_dil3.json, run tag DIL3). Replace <FILL_DATE> below with the actual run date, then add \"config4\" to specified_configs.json.",
-        "wings pose estimation model path" : "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_DIL3_<FILL_DATE>/best_model.pt",
-        "wings pose estimation model path second pass": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_DIL3_<FILL_DATE>/best_model.pt",
-        "model type": "PER_WING_PER_CAM",
-        "model type second pass": "PER_WING_PER_CAM",
-        "predict again 3D consistency": 0,
-        "use reprojected masks": 0
-    },
-
-    "config5":
-    {
-        "_comment": "ENSEMBLE MEMBER 5 - true U-Net, skips + GroupNorm at config2 scale, 64f/2b (config_per_cam_unet.json). Trained as MODEL_PER_CAM_PER_WING_UNET, SERVED as PER_WING_PER_CAM. Retrained under cosine LR; replace <FILL_DATE> with the new run date (supersedes the old 32f/3b run), then add \"config5\" to specified_configs.json.",
-        "wings pose estimation model path" : "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_UNET_<FILL_DATE>/best_model.pt",
-        "wings pose estimation model path second pass": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs/MODEL_PER_CAM_PER_WING_UNET_<FILL_DATE>/best_model.pt",
-        "model type": "PER_WING_PER_CAM",
-        "model type second pass": "PER_WING_PER_CAM",
-        "predict again 3D consistency": 0,
-        "use reprojected masks": 0
     }
 }
