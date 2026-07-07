@@ -112,7 +112,8 @@ class Trainer:
                                         model=self.model,
                                         base_directory=base_run_directory,
                                         viz_sample_list=viz_sample_list,
-                                        validation=(self.val_box, self.val_confmap)
+                                        validation=(self.val_box, self.val_confmap),
+                                        training=(self.train_box, self.train_confmap)
                                         )
     
     def ensure_resume_compatibility(self):

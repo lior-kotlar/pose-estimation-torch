@@ -11,8 +11,11 @@ from scipy.io import savemat
 from constants import MODEL_PER_CAM_PER_WING, MODEL_PER_CAM_PER_WING_UNET, ALL_CAMS_PER_WING
 
 class ModelCallbacks:
-    def __init__(self, model, base_directory, viz_sample_list, validation):
+    def __init__(self, model, base_directory, viz_sample_list, validation, training=None):
         self.validation = validation
+        # (train_box, train_confmap) so the L2 callback can also report the
+        # keypoint error on the training set -> a train/val L2 history plot.
+        self.training = training
         self.base_directory = base_directory
         self.viz_sample_list = viz_sample_list
         self.model_callbacks = self.config_callbacks(model)
@@ -47,7 +50,7 @@ class ModelCallbacks:
         callbacks = []
         callbacks.append(self.TrainingLogger(log_interval=10))
         callbacks.append(self.EarlyStopping(patience=5))
-        callbacks.append(self.L2LossCallback(self.validation, self.base_directory, model))
+        callbacks.append(self.L2LossCallback(self.validation, self.base_directory, model, training_data=self.training))
         callbacks.append(self.L2PerPointLossCallback(self.validation, self.base_directory, model))
         callbacks.append(self.LossHistory(self.base_directory))
         callbacks.append(self.VizPredCallback(self.viz_sample_list, self.base_directory, model))
@@ -70,6 +73,32 @@ class ModelCallbacks:
         for callback in self.model_callbacks:
             if hasattr(callback, 'on_epoch_end'):
                 callback.on_epoch_end(epoch=epoch, logs=logs)
+
+    @staticmethod
+    def compute_l2_pixel_error(model, box, confmaps, batch_size=16):
+        """Mean L2 keypoint error (in pixels) between the predicted and the
+        ground-truth heatmap peaks.
+
+        Inference is run in mini-batches so the whole set never has to sit on
+        the GPU at once (the training set is ~9x the validation set).
+
+        Returns:
+            (mean_l2, flat_l2_distances) where flat_l2_distances is a 1-D array
+            of per-(sample, joint) distances, handy for histogramming.
+        """
+        model.eval()
+        device = next(model.parameters()).device
+        dists = []
+        with torch.no_grad():
+            for start in range(0, len(box), batch_size):
+                x = torch.tensor(box[start:start + batch_size], dtype=torch.float32).to(device)
+                preds = model(x).cpu().numpy()
+                # (b, 2, C) -> (b, C, 2)
+                pred_peaks = np.transpose(torch_find_peaks(preds)[:, :2, :], (0, 2, 1))
+                gt_peaks = np.transpose(torch_find_peaks(confmaps[start:start + batch_size])[:, :2, :], (0, 2, 1))
+                dists.append(np.linalg.norm(pred_peaks - gt_peaks, axis=2))  # (b, C)
+        l2 = np.concatenate(dists, axis=0)  # (B, C)
+        return float(l2.mean()), l2.flatten()
 
     class TrainingLogger:
         def __init__(self, log_interval=10):
@@ -159,45 +188,37 @@ class ModelCallbacks:
             plt.close(fig)
 
     class L2LossCallback():
-        def __init__(self, validation_data, base_run_directory, model):
+        def __init__(self, validation_data, base_run_directory, model, training_data=None):
             self.box, self.confmaps = validation_data
+            # training_data is optional: when provided, the training-set L2 is
+            # logged alongside the validation L2 so LossHistory can plot both.
+            self.train_box, self.train_confmaps = training_data if training_data is not None else (None, None)
             self.base_run_directory = base_run_directory
             self.model = model
 
         def on_epoch_end(self, epoch, logs=None):
-            self.model.eval()
-            device = next(self.model.parameters()).device
-
-            # ---- Predictions ----
-            with torch.no_grad():
-                x_val = torch.tensor(self.box, dtype=torch.float32).to(device)
-                preds = self.model(x_val)
-
-            # ---- Find peaks ----
-            preds = preds.cpu().numpy()
-            pred_peaks = torch_find_peaks(preds)[:, :2, :]  # shape: (B, 2, C)
-            pred_peaks = np.transpose(pred_peaks, (0, 2, 1))  # (B, C, 2)
-
-            gt_peaks = torch_find_peaks(self.confmaps)[:, :2, :]
-            gt_peaks = np.transpose(gt_peaks, (0, 2, 1))  # (B, C, 2)
-
-            # ---- L2 distances (using numpy) ----
-            l2_distances = np.sqrt(np.sum((pred_peaks - gt_peaks) ** 2, axis=2))  # [B, C]
-            l2_loss_value = np.mean(l2_distances)
-
-            # ---- Statistics ----
-            l2_numpy = l2_distances.flatten()
-            std = np.std(l2_numpy)
-
+            # ---- Validation L2 (mean pixel error + per-sample distances) ----
+            val_l2, val_l2_flat = ModelCallbacks.compute_l2_pixel_error(
+                self.model, self.box, self.confmaps
+            )
             if logs is not None:
-                logs['val_l2_loss'] = float(l2_loss_value)
+                logs['val_l2_loss'] = val_l2
 
-            # ---- Plot histogram ----
+            # ---- Training L2 (same metric on the un-augmented train set) ----
+            if self.train_box is not None:
+                train_l2, _ = ModelCallbacks.compute_l2_pixel_error(
+                    self.model, self.train_box, self.train_confmaps
+                )
+                if logs is not None:
+                    logs['train_l2_loss'] = train_l2
+
+            # ---- Plot validation histogram ----
+            std = np.std(val_l2_flat)
             plt.figure(figsize=(10, 6))
-            plt.hist(l2_numpy, bins=30, alpha=0.75)
+            plt.hist(val_l2_flat, bins=30, alpha=0.75)
             plt.title(
                 f"L2 Distance Histogram - Epoch {epoch + 1}\n"
-                f"Validation L2 loss: {l2_loss_value:.4f} std: {std:.4f}"
+                f"Validation L2 loss: {val_l2:.4f} std: {std:.4f}"
             )
             plt.xlabel("L2 Distance")
             plt.ylabel("Frequency")
@@ -232,6 +253,7 @@ class ModelCallbacks:
             self.save_directory = save_diretory
             self.csv_file_path = os.path.join(self.save_directory, "history.csv")
             self.png_file_path = os.path.join(self.save_directory, "history.png")
+            self.l2_png_file_path = os.path.join(self.save_directory, "history_l2.png")
             self.mat_file_path = os.path.join(self.save_directory, "history.mat")
 
         def plot_history(self, history, save_path):
@@ -252,6 +274,40 @@ class ModelCallbacks:
             plt.savefig(save_path)
             plt.close()
 
+        def plot_l2_history(self, history, save_path):
+            """Plots the keypoint L2 pixel-error history (train + val).
+
+            The L2 error is the quantity we actually care about, so unlike the
+            background-dominated heatmap loss it is plotted on a linear y-axis.
+            Epochs missing a value (e.g. rows restored from an older resume CSV
+            that predates L2 logging) are skipped rather than breaking the plot.
+            """
+            def series(key):
+                xs = [i for i, x in enumerate(history) if x.get(key) is not None]
+                ys = [history[i][key] for i in xs]
+                return xs, ys
+
+            train_x, train_y = series("train_l2_loss")
+            val_x, val_y = series("val_l2_loss")
+            if not train_y and not val_y:
+                return  # nothing logged yet, don't emit an empty figure
+
+            plt.figure(figsize=(8, 4))
+            legend = []
+            if train_y:
+                plt.plot(train_x, train_y)
+                legend.append("Training")
+            if val_y:
+                plt.plot(val_x, val_y)
+                legend.append("Validation")
+            plt.grid()
+            plt.xlabel("Epochs")
+            plt.ylabel("L2 error (pixels)")
+            plt.legend(legend)
+
+            plt.savefig(save_path)
+            plt.close()
+
         def on_train_start(self):
             self.history = []
             if os.path.exists(self.csv_file_path):
@@ -263,15 +319,21 @@ class ModelCallbacks:
                             'train loss': float(row['train loss']),
                             'validation loss': float(row['val loss'])
                         }
+                        # L2 columns are optional: only present in CSVs written
+                        # by this (or a newer) version, so restore them if there.
+                        if row.get('train l2') not in (None, ''):
+                            logs['train_l2_loss'] = float(row['train l2'])
+                        if row.get('val l2') not in (None, ''):
+                            logs['val_l2_loss'] = float(row['val l2'])
                         self.history.append(logs)
                 print(f"Resuming history from {self.csv_file_path}, {len(self.history)} epochs loaded.")
-            
+
             else:
                 with open(self.csv_file_path, mode='w', newline='') as file:
                     writer = csv.writer(file)
-                    writer.writerow(['epoch', 'train loss', 'val loss'])
+                    writer.writerow(['epoch', 'train loss', 'val loss', 'train l2', 'val l2'])
                 print(f"Starting new history at {self.csv_file_path}.")
-        
+
         def on_epoch_end(self, epoch, logs=None):
             self.history.append(logs.copy())
             savemat(self.mat_file_path,
@@ -279,9 +341,11 @@ class ModelCallbacks:
 
             with open(self.csv_file_path, mode='a', newline='') as file:
                 writer = csv.writer(file)
-                writer.writerow([epoch, logs['train loss'], logs.get('validation loss')])
+                writer.writerow([epoch, logs['train loss'], logs.get('validation loss'),
+                                 logs.get('train_l2_loss'), logs.get('val_l2_loss')])
 
             self.plot_history(self.history, save_path=self.png_file_path)
+            self.plot_l2_history(self.history, save_path=self.l2_png_file_path)
 
     class VizPredCallback():
         def __init__(self, sample_confmaps_list, save_directory, model):
