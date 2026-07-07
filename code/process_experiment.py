@@ -785,8 +785,11 @@ def main() -> None:
                     movies = verified
 
             # Write a manifest of good (post-prescan, post-build, post-verify)
-            # movies for `predict_array.sh`.
-            if mode == "multi" and not args.skip_build:
+            # movies for `predict_array.sh`. This runs even with --skip-build
+            # (e.g. re-verifying an already-built experiment): the manifest
+            # writer independently checks find_movie_h5 per movie, so it only
+            # lists movies that actually have a built h5.
+            if mode == "multi":
                 write_good_movies_manifest(input_dir, movies, args.dry_run)
 
     _write_report(input_dir, report_buf, args.dry_run)
