@@ -79,6 +79,11 @@ class TrainConfig:
             # Normalization for the U-Net backbone: "none" (default, matches the
             # norm-free encoder_atrous/decoder nets), "group", or "batch".
             self.normalization = config.get("normalization", "none")
+            # Cross-camera fusion for the multi-view FourCamsNetwork: "concat"
+            # (default = original behavior), or the permutation-invariant pools
+            # "max" / "mean". Only read by FourCamsNetwork; remove this line and
+            # its getter to drop the feature.
+            self.camera_fusion = config.get("camera fusion", "concat")
 
             # augmentation configuration
             self.rotation_range = config["rotation range"]
@@ -138,6 +143,9 @@ class TrainConfig:
 
     def get_normalization(self):
         return self.normalization
+
+    def get_camera_fusion(self):
+        return self.camera_fusion
     
     def get_resume_training_checkpoint_path(self):
         return self.resume_training_checkpoint_path

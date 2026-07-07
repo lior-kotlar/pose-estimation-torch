@@ -228,7 +228,17 @@ class Network:
             )
 
             encoder_out_channels = self.shared_encoder.get_out_channels()
-            decoder_input_channels = (self.NUM_OF_CAMS + 1) * encoder_out_channels
+            # --- cross-camera fusion (opt-in; "concat" == original behavior) ---
+            # concat -> global context is all NUM_OF_CAMS codes stacked on the
+            # channel axis; max/mean -> a single permutation-invariant pooled
+            # code. Decoder input = local code + global context.
+            self.camera_fusion = general_configuration.get_camera_fusion()
+            if self.camera_fusion == "concat":
+                global_channels = self.NUM_OF_CAMS * encoder_out_channels
+            else:  # "max" / "mean" pool down to one code width
+                global_channels = encoder_out_channels
+            decoder_input_channels = encoder_out_channels + global_channels
+            # --- end cross-camera fusion ---
 
             self.shared_decoder = Network.decoder(
                 input_channels=decoder_input_channels,
@@ -253,10 +263,8 @@ class Network:
             code_out_3 = self.shared_encoder(x_in_split_3)
             code_out_4 = self.shared_encoder(x_in_split_4)
 
-            # 5. Global Feature Merging
-            # Concatenate along the channel dimension (dim=1)
-            x_code_merge = torch.cat([code_out_1, code_out_2, code_out_3, code_out_4], dim=1)
-            # Shape is (B, 4 * C_enc, H_feat, W_feat)
+            # 5. Global Feature Merging (concat by default; opt-in max/mean pool)
+            x_code_merge = self._merge_cameras([code_out_1, code_out_2, code_out_3, code_out_4])
 
             # 6. Shared Decoding (Local + Global)
             # We also concatenate along the channel dimension (dim=1)
@@ -269,7 +277,18 @@ class Network:
             # Concatenate along the channel dimension (dim=1)
             x_maps_merge = torch.cat([map_out_1, map_out_2, map_out_3, map_out_4], dim=1)
             return x_maps_merge
-        
+
+        def _merge_cameras(self, codes):
+            # Global cross-camera context. "concat" is the original behavior;
+            # "max"/"mean" are permutation-invariant pooled alternatives. To
+            # remove the feature, keep only the concat return.
+            if self.camera_fusion == "concat":
+                return torch.cat(codes, dim=1)          # (B, NUM_OF_CAMS * C, h, w)
+            stacked = torch.stack(codes, dim=0)         # (NUM_OF_CAMS, B, C, h, w)
+            if self.camera_fusion == "mean":
+                return stacked.mean(dim=0)              # (B, C, h, w)
+            return stacked.amax(dim=0)                  # "max" (default pooled)
+
         def get_model_type(self):
             return ALL_CAMS_PER_WING
 
