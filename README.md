@@ -63,7 +63,9 @@ directly except for quick tests.
 | `code/build_experiment.sh` | Drives the MATLAB scripts that build `.h5` movies + `calibration.h5` |
 | `code/*.py` (misc) | Standalone tools — see [Section 8](#8-standalone--utility-tools) |
 | `train_configurations/*.json` | Training configs (hyperparameters, model type, data path) |
-| `predict_configurations/*.json` | Prediction configs + the ensemble model bank |
+| `predict_configurations/*.json` | Prediction run configs (movie/calibration/output + which model registry) |
+| `prediction_models/<name>/` | The prediction ensemble: one folder per model (`best_model.pt` + `model.json`), auto-discovered |
+| `code/register_prediction_model.py` | Register (graduate) a trained model into `prediction_models/` |
 | `sbatch_files/*.sh` | SLURM job scripts (train, predict, pipeline) |
 | `matlab/` | MATLAB scripts for building `.h5` movies, calibration, and datasets |
 | `micro-flight-lab-master/` | Vendored lab MATLAB utilities (Hull reconstruction, Cine→sparse, …) |
@@ -158,13 +160,12 @@ what it predicts:
 > **Torch serving note:** at *prediction* time only the served types
 > `PER_WING_PER_CAM` and `PER_WING_ALL_CAMS` are wired up in the torch path.
 > A model trained as `MODEL_PER_CAM_PER_WING` / `..._UNET` is **served** as
-> `PER_WING_PER_CAM` (see the ensemble bank in
-> `predict_configurations/config_bank.json`).
+> `PER_WING_PER_CAM` (set via each model's `model.json` in `prediction_models/`).
 
 **Ensemble** — Predict does not use a single model; it runs several trained
 models and combines their 2D predictions before triangulation for robustness.
-The members are declared in `config_bank.json` and selected in
-`specified_configs.json`. Keep the ensemble at roughly **4–6 members**.
+The members are **auto-discovered** from `prediction_models/` (one folder per
+model). Keep the ensemble at roughly **4–6 members**.
 
 **Mirror camera** — one camera in each rig is physically mirrored and must be
 vertically flipped in **both** the movie data and the calibration:
@@ -266,16 +267,17 @@ renders an mp4, and extracts kinematics.
 | `output directory` | where results are written (`predict_output/...`) |
 | `calibration path` | the experiment's `calibration.h5` |
 | `wings detector path` | YOLO weights for wing segmentation (`wings_detetction/yolo_weights_6_1_24.pt`) |
-| `config bank path` | the ensemble bank (`config_bank.json`) |
-| `specified configs path` | which bank entries form the ensemble (`specified_configs.json`) |
+| `prediction models directory` | the ensemble registry (`prediction_models/`); every enabled model folder is used |
+| `max ensemble models` | optional cap on the selector's per-window model-subset search (e.g. `3`); the search grows ~2^M in member count |
 | `number of cameras` | usually `4` |
 | `IMAGE HEIGHT` / `IMAGE WIDTH` | full-frame size (800 × 1280) |
 
-**Choosing the ensemble:** `specified_configs.json` lists the member names (e.g.
-`["config1", "config2"]`); each name must exist in `config_bank.json`, where it
-points at a trained model's `best_model.pt` and its served model type. To add a
-member, add its block to `config_bank.json` and its name to
-`specified_configs.json`.
+**Choosing the ensemble:** the ensemble is exactly the set of model folders under
+`prediction_models/` — each is self-contained (`best_model.pt` + a `model.json`
+giving its served `model type`). To add a member, run
+`code/register_prediction_model.py` (see [Section 7.4](#74-training-models-for-the-ensemble));
+to bench one without deleting it, set `"enabled": false` in its `model.json`.
+Nothing in `train_output/` is used for prediction until it is registered here.
 
 ### 6.2 Run on one experiment directory (simple path)
 
@@ -399,9 +401,16 @@ prediction ensemble (different loss functions and architectures over the same
 - `config_per_cam_dil3.json` — different filters/dilation
 - `config_per_cam_unet.json` — true U-Net variant
 
-After training each, register its `best_model.pt` as a new member in
-`config_bank.json` and add it to `specified_configs.json` — see
-[Section 6.1](#61-the-predict-config).
+After training each, graduate it into the prediction ensemble with one command:
+
+```bash
+python code/register_prediction_model.py --name per_cam_jsd \
+    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_Jul 02"
+```
+
+This copies its `best_model.pt` into `prediction_models/<name>/` and writes a
+`model.json` (inferring the served type from the train config). Training in
+`train_output/` never affects prediction until you register a model this way.
 
 ---
 

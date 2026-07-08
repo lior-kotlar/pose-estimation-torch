@@ -1,0 +1,7 @@
+{
+    "model type": "PER_WING_PER_CAM",
+    "enabled": true,
+    "predict again 3D consistency": 0,
+    "use reprojected masks": 0,
+    "source": "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_DIL3_Jul 02"
+}

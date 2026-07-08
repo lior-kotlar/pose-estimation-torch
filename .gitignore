@@ -213,6 +213,10 @@ inference_datasets/
 training_datasets/
 logs/
 data_analysis_output/
+
+# prediction ensemble: track the tiny model.json metadata (which models + type),
+# but ignore the weights themselves -- they are artifacts on the lab filesystem.
+prediction_models/**/*.pt
 comparison_data/manipulated_05_12_22.hdf5
 manifests/
 .claudeignore

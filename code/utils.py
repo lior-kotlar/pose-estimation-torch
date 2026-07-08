@@ -203,11 +203,56 @@ class PredictConfig:
             # Optional: append per-movie predict timing rows to this CSV.
             # Set by predict_array.sh from pipeline.sh's TIMINGS_PATH.
             self.pipeline_timings_path = config.get('pipeline timings path') or None
+            # Optional: cap the largest model-subset the ensemble selector
+            # searches over. The search is ~2^M in the number of members, so a
+            # cap (e.g. 3) keeps a large ensemble tractable. None => no cap.
+            self.max_ensemble_models = config.get('max ensemble models')
 
-            config_bank_path = config['config bank path']
-            specified_configs_path = config['specified configs path']
-            self.model_config_list = self.load_configurations_from_bank(config_bank_path, specified_configs_path)
+            # Preferred: auto-discover the ensemble from a prediction_models/
+            # directory (each subfolder is a self-contained model). Falls back
+            # to the legacy config-bank + specified-configs pair when absent.
+            pred_models_dir = config.get('prediction models directory')
+            if pred_models_dir:
+                self.model_config_list = self.load_configurations_from_models_dir(pred_models_dir)
+            else:
+                config_bank_path = config['config bank path']
+                specified_configs_path = config['specified configs path']
+                self.model_config_list = self.load_configurations_from_bank(config_bank_path, specified_configs_path)
             self.tuned_configration = False
+
+    def load_configurations_from_models_dir(self, pred_models_dir):
+        """Build the ensemble member list by scanning a prediction_models/ dir.
+
+        Every subfolder that holds ``best_model.pt`` + ``model.json`` and is not
+        disabled becomes a member, in deterministic (sorted) order. Produces the
+        same dict shape as load_configurations_from_bank so the rest of the
+        pipeline is unchanged, plus a ``name`` (the folder name) used for tidy
+        per-member output directories and the model-selection report."""
+        model_config_list = []
+        for model_dir in sorted(glob.glob(os.path.join(pred_models_dir, "*"))):
+            if not os.path.isdir(model_dir):
+                continue
+            weights_path = os.path.join(model_dir, "best_model.pt")
+            meta_path = os.path.join(model_dir, "model.json")
+            if not (os.path.isfile(weights_path) and os.path.isfile(meta_path)):
+                continue
+            with open(meta_path) as MF:
+                meta = json.load(MF)
+            if not meta.get("enabled", True):
+                continue
+            model_type = meta["model type"]
+            model_config_list.append({
+                "name": os.path.basename(model_dir.rstrip(os.sep)),
+                "wings pose estimation model path": weights_path,
+                "wings pose estimation model path second pass": weights_path,
+                "model type": model_type,
+                "model type second pass": meta.get("model type second pass", model_type),
+                "predict again 3D consistency": meta.get("predict again 3D consistency", 0),
+                "use reprojected masks": meta.get("use reprojected masks", 0),
+            })
+        if not model_config_list:
+            raise ValueError(f"No enabled prediction models found in {pred_models_dir}")
+        return model_config_list
 
     def load_configurations_from_bank(self, config_bank_path, specified_configs_path):
         with open(config_bank_path) as CBF:
@@ -233,7 +278,10 @@ class PredictConfig:
 
     def get_pipeline_timings_path(self):
         return self.pipeline_timings_path
-    
+
+    def get_max_ensemble_models(self):
+        return self.max_ensemble_models
+
     def get_calibration_path(self):
         return self.calibration_data_path
     

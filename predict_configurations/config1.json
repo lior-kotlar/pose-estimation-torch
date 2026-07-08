@@ -1,12 +1,10 @@
 {
-    "data directory": "inference_datasets/new_roni_experiments/2023_08_10_100ms",
+    "data directory": "inference_datasets/test/mov4",
     "output directory": "predict_output/debug_outputs",
-    "wings detection model path" : "wings_detetction/yolo_weights_6_1_24.pt",
-    "calibration path": "inference_datasets/test/2023/131to140/calibration.h5",
-    "config bank path": "predict_configurations/config_bank.json",
-    "specified configs path": "predict_configurations/specified_configs.json",
+    "calibration path": "inference_datasets/shalev/1to20/calibration.h5",
     "wings detector path": "wings_detetction/yolo_weights_6_1_24.pt",
-    "sub config path": "",
+    "prediction models directory": "prediction_models",
+    "max ensemble models": 3,
     "number of cameras": 4,
     "body parts to predict": "WINGS_AND_BODY",
     "mask increase initial": 1,
@@ -16,5 +14,4 @@
     "IMAGE HEIGHT": 800,
     "IMAGE WIDTH": 1280,
     "align right left": 0
-
 }

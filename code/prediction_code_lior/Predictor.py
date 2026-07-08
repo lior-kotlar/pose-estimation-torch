@@ -1113,11 +1113,16 @@ class Predictor2D:
         return inds_to_del
 
     @staticmethod
-    def all_possible_combinations(lst, fraq=0.6):
+    def all_possible_combinations(lst, fraq=0.6, max_size=None):
         start = math.ceil(len(lst) * fraq)
+        end = len(lst)
+        if max_size is not None:
+            end = min(end, int(max_size))
+        # keep at least size-1 subsets and never let the floor exceed the cap
+        start = max(1, min(start, end))
         all_combinations_list = []
 
-        for r in range(start, len(lst) + 1):
+        for r in range(start, end + 1):
             for combo in combinations(lst, r):
                 all_combinations_list.append(list(combo))
 
@@ -1135,11 +1140,16 @@ class Predictor2D:
         return points_3D
 
     @staticmethod
-    def get_best_ensemble_combination(all_points_list, score_function=From2Dto3D.get_validation_score):
+    def get_best_ensemble_combination(all_points_list, score_function=From2Dto3D.get_validation_score,
+                                      max_models=None):
         models_candidates = list(range(len(all_points_list)))
         num_points_candidates = all_points_list[0].shape[2]
         points_candidates = np.arange(0, num_points_candidates)
-        all_models_combinations_list = Predictor2D.all_possible_combinations(models_candidates, fraq=0.1)
+        # max_models caps the largest model-subset the search considers. The
+        # search is ~2^M in the number of models, so a cap (e.g. 3) tames a
+        # large ensemble. None => original behavior (all subset sizes).
+        all_models_combinations_list = Predictor2D.all_possible_combinations(models_candidates, fraq=0.1,
+                                                                             max_size=max_models)
         all_camera_pairs_list = Predictor2D.all_possible_combinations(points_candidates, fraq=0.01)
         best_score = float('inf')
         best_combination = None
@@ -1205,18 +1215,32 @@ class Predictor2D:
         return std
 
     @staticmethod
+    def _num_worker_processes():
+        """Worker count that respects the SLURM/cgroup CPU allocation.
+
+        multiprocessing.cpu_count() returns the machine's total cores (e.g. 128)
+        regardless of --cpus-per-task, so Pool(cpu_count()) oversubscribes under
+        SLURM. sched_getaffinity reflects the actual allocation on Linux."""
+        try:
+            return max(1, len(os.sched_getaffinity(0)))
+        except AttributeError:
+            return max(1, cpu_count())
+
+    @staticmethod
     def process_frame(args):
-        window_data, score_function, frame, half_window = args
+        window_data, score_function, frame, half_window, max_models = args
         best_combination_w, best_points_3D_w, score, scores_dataset = Predictor2D.get_best_ensemble_combination(
             window_data,
-            score_function=score_function)
+            score_function=score_function,
+            max_models=max_models)
         chosen_point = best_points_3D_w[half_window]
         return frame, chosen_point, best_combination_w, scores_dataset
 
     @staticmethod
     def get_best_points_per_point_multiprocessing(all_points_list, points_inds, window_size=31,
                                                   score_function=find_std_of_2_points_dists,
-                                                  candidtates_inds=(0, 1, 2, 3, 4, 5)):
+                                                  candidtates_inds=(0, 1, 2, 3, 4, 5),
+                                                  max_models=None):
         num_frames, _, num_candidates, ax = all_points_list[0].shape
         num_points = len(points_inds)
         half_window = window_size // 2
@@ -1228,9 +1252,9 @@ class Predictor2D:
         for frame in range(num_frames):
             window_start = frame
             window_data = Predictor2D.get_window(extended_data, window_size, window_start)
-            worker_args.append((window_data, score_function, frame, half_window))
+            worker_args.append((window_data, score_function, frame, half_window, max_models))
 
-        with Pool(processes=cpu_count()) as pool:
+        with Pool(processes=Predictor2D._num_worker_processes()) as pool:
             results = pool.map(Predictor2D.process_frame, worker_args)
 
         final_array = np.zeros((num_frames, num_points, 3))
@@ -1246,7 +1270,7 @@ class Predictor2D:
         return final_array, models_combinations, all_frames_scores
 
     @staticmethod
-    def find_3D_points_optimize_neighbors(all_points_list):
+    def find_3D_points_optimize_neighbors(all_points_list, max_models=None):
         left_wing_inds = list(np.arange(0, 7))
         right_wing_inds = list(np.arange(8, 15))
         head_tail_inds = [16, 17]
@@ -1256,28 +1280,28 @@ class Predictor2D:
 
         best_left_points, model_combinations_left_points, all_frames_scores_left_points = Predictor2D.get_best_points_per_point_multiprocessing(
             all_points_list, points_inds=left_wing_inds,
-            score_function=Predictor2D.find_std_of_wings_points_dists)
+            score_function=Predictor2D.find_std_of_wings_points_dists, max_models=max_models)
         score = Predictor2D.find_std_of_wings_points_dists(best_left_points)
         final_points_3D[:, left_wing_inds, :] = best_left_points
         print(f"best_left_points, score: {score}", flush=True)
 
         best_right_points, model_combinations_right_points, all_frames_scores_right_points = Predictor2D.get_best_points_per_point_multiprocessing(
             all_points_list, points_inds=right_wing_inds,
-            score_function=Predictor2D.find_std_of_wings_points_dists)
+            score_function=Predictor2D.find_std_of_wings_points_dists, max_models=max_models)
         score = Predictor2D.find_std_of_wings_points_dists(best_right_points)
         final_points_3D[:, right_wing_inds, :] = best_right_points
         print(f"best_right_points, score: {score}", flush=True)
 
         best_head_tail_points, model_combinations_head_tail_points, all_frames_scores_head_tail_points = Predictor2D.get_best_points_per_point_multiprocessing(
             all_points_list, points_inds=head_tail_inds, window_size=min(73, num_frames),
-            score_function=Predictor2D.find_std_of_2_points_dists)
+            score_function=Predictor2D.find_std_of_2_points_dists, max_models=max_models)
         final_points_3D[:, head_tail_inds, :] = best_head_tail_points
         score = Predictor2D.find_std_of_2_points_dists(best_head_tail_points)
         print(f"head tail points score: {score}", flush=True)
 
         best_side_points, model_combinations_side_points, all_frames_scores_side_points = Predictor2D.get_best_points_per_point_multiprocessing(
             all_points_list, points_inds=side_wing_inds, window_size=min(73*3, num_frames),
-            score_function=Predictor2D.find_std_of_2_points_dists)
+            score_function=Predictor2D.find_std_of_2_points_dists, max_models=max_models)
         final_points_3D[:, side_wing_inds, :] = best_side_points
         score = Predictor2D.find_std_of_2_points_dists(best_side_points)
         print(f"side points score: {score}", flush=True)

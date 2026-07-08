@@ -1307,19 +1307,27 @@ class Visualizer:
 
 
     @staticmethod
-    def visualize_models_selection(all_models_combinations):
-        model_names = ['left_wing_models', 'right_wing_models', 'head_tail_models', 'side_points_models']
+    def visualize_models_selection(all_models_combinations, output_dir='visualizations', model_labels=None):
+        # Leading axis is the joint-group; each entry is (frames, models, camera-pairs).
+        group_names = ['left_wing_models', 'right_wing_models', 'head_tail_models', 'side_points_models']
         model_data = [all_models_combinations[i][..., :6] for i in range(len(all_models_combinations))]
+        os.makedirs(output_dir, exist_ok=True)
 
-        for model_name, models in zip(model_names, model_data):
+        for group_name, models in zip(group_names, model_data):
             num_frames, num_models, num_candidates = models.shape
+
+            # Real model names (from the run directories) when available.
+            if model_labels is not None and len(model_labels) == num_models:
+                labels = list(model_labels)
+            else:
+                labels = [f'Model {i + 1}' for i in range(num_models)]
 
             # Set up the figure
             fig, ax = plt.subplots(5, 1, figsize=(16, 25))
 
             # Colors for plotting
-            candidate_colors = plt.cm.get_cmap('tab10', num_candidates)
-            model_colors = plt.cm.get_cmap('tab10', num_models)
+            candidate_colors = plt.get_cmap('tab10', num_candidates)
+            model_colors = plt.get_cmap('tab10', num_models)
 
             # Plot Candidates per Frame
             for candidate in range(num_candidates):
@@ -1338,14 +1346,14 @@ class Visualizer:
             for model in range(num_models):
                 frames = np.where(np.any(models[:, model, :], axis=1))[0]
                 ax[1].scatter(frames, np.full_like(frames, model), color=model_colors(model),
-                              label=f'Model {model + 1}',
+                              label=labels[model],
                               s=1)
 
             ax[1].set_xlabel('Frames')
             ax[1].set_ylabel('Models')
             ax[1].set_title('Models Chosen per Frame')
             ax[1].set_yticks(np.arange(num_models))
-            ax[1].set_yticklabels([f'Model {i + 1}' for i in range(num_models)])
+            ax[1].set_yticklabels(labels)
             ax[1].legend(loc='upper right', bbox_to_anchor=(1.15, 1))
 
             # Plot number of candidates chosen per frame
@@ -1369,11 +1377,11 @@ class Visualizer:
             ax[4].set_ylabel('Usage Count')
             ax[4].set_title('Model Usage Histogram')
             ax[4].set_xticks(np.arange(num_models))
-            ax[4].set_xticklabels([f'Model {i + 1}' for i in range(num_models)])
+            ax[4].set_xticklabels(labels, rotation=30, ha='right')
 
             # Display plots
             plt.tight_layout()
-            plt.savefig(f'visualizations/{model_name}_visualized_models_selection.png')
+            plt.savefig(os.path.join(output_dir, f'{group_name}_visualized_models_selection.png'))
             plt.close(fig)
 
 

@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import json
 from datetime import date
 import glob
 import numpy as np
@@ -75,8 +76,11 @@ class PredictingManager:
             t_movie_start = time.time()
             predictor = None
             for model_config in self.model_config_list:
-                
-                model_run_directory_path = self.create_model_run_directory(movie_run_directory_path, model_config["model type"])
+                # Name the per-member output dir by the model's registry name
+                # (e.g. all_cams_dil3) when available, else fall back to the
+                # model type. Keeps outputs and the selection report readable.
+                model_dir_label = model_config.get("name", model_config["model type"])
+                model_run_directory_path = self.create_model_run_directory(movie_run_directory_path, model_dir_label)
                 self.config.tune_configuration(model_config, movie_path, model_run_directory_path)
                 self.config.save_config_as_json(model_run_directory_path)
                 predictor = Predictor2D(predict_config=self.config,
@@ -96,7 +100,8 @@ class PredictingManager:
                 triangulator = predictor.triangulator
             if not only_create_mp4:
                 print("Starting to predict ensemble")
-                best_points_3D, smoothed_3D = find_3D_points_from_ensemble(movie_run_directory_path)
+                best_points_3D, smoothed_3D = find_3D_points_from_ensemble(
+                    movie_run_directory_path, max_models=self.config.get_max_ensemble_models())
                 reprojected = triangulator.get_reprojections(best_points_3D, cropzone)
                 smoothed_reprojected = triangulator.get_reprojections(smoothed_3D, cropzone)
                 From2Dto3D.save_points_3D(movie_run_directory_path, reprojected, name="points_ensemble_reprojected.npy")
@@ -224,24 +229,63 @@ def predict_sample_save(model, sample, save_directory, label=None):
                                         filename="ground_truth.png"
                                         )
 
+def resolve_member_name(member_dir):
+    """Human-readable name for an ensemble member's run directory.
+
+    The subdir itself is named by model type (e.g. PER_WING_ALL_CAMS_01), which
+    doesn't reveal which trained model it was. Each member also saved a config
+    holding the pose-estimation model path, so append the trained variant (the
+    parent dir of best_model.pt) when available: e.g.
+    "PER_WING_ALL_CAMS_01 (ALL_CAMS_PER_WING_DIL3_Jul 05_01)"."""
+    subdir = os.path.basename(member_dir.rstrip(os.sep))
+    for cfg_name in ("specific_configuration.json", "configuration.json"):
+        cfg_path = os.path.join(member_dir, cfg_name)
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path) as f:
+                    model_path = json.load(f).get("wings pose estimation model path")
+                if model_path:
+                    variant = os.path.basename(os.path.dirname(model_path))
+                    return f"{subdir} ({variant})"
+            except Exception:
+                pass
+    return subdir
+
+
+def list_model_names(base_path):
+    """Model directories that contributed an ensemble member, in the same
+    deterministic (sorted) order used to build the ensemble. The position in
+    this list is the model index used throughout the selection bookkeeping
+    (``all_models_combinations`` axis 2, ``model_combination`` entries)."""
+    names = []
+    for dir in sorted(glob.glob(os.path.join(base_path, "*"))):
+        if os.path.isdir(dir) and os.path.isfile(os.path.join(dir, "points_3D_all.npy")):
+            names.append(resolve_member_name(dir))
+    return names
+
+
 def predict_3D_points_all_pairs(base_path):
         all_points_file_list = []
         points_3D_file_list = []
+        model_names = []
         dir_path = os.path.join(base_path)
-        dirs = glob.glob(os.path.join(dir_path, "*"))
+        # Sort so the model order is deterministic (glob order is arbitrary).
+        # model_names stays aligned with all_points_arrays / the model index.
+        dirs = sorted(glob.glob(os.path.join(dir_path, "*")))
         for dir in dirs:
             if os.path.isdir(dir):
                 all_points_file = os.path.join(dir, "points_3D_all.npy")
                 points_3D_file = os.path.join(dir, "points_3D.npy")
                 if os.path.isfile(all_points_file):
                     all_points_file_list.append(all_points_file)
+                    model_names.append(resolve_member_name(dir))
                 if os.path.isfile(points_3D_file):
                     points_3D_file_list.append(points_3D_file)
         all_points_arrays = [np.load(array_path) for array_path in all_points_file_list]
         big_array_all_points = np.concatenate(all_points_arrays, axis=2)
-        return big_array_all_points, all_points_arrays
+        return big_array_all_points, all_points_arrays, model_names
 
-def find_3D_points_from_ensemble(base_path, test=False):
+def find_3D_points_from_ensemble(base_path, test=False, max_models=None):
     points_save_path = os.path.join(base_path, "points_3D_ensemble_best_method.npy")
     smoothed_save_path = os.path.join(base_path, "points_3D_smoothed_ensemble_best_method.npy")
     combinations_save_path = os.path.join(base_path, "all_models_combinations.npy")
@@ -250,15 +294,24 @@ def find_3D_points_from_ensemble(base_path, test=False):
         os.path.exists(combinations_save_path)):
         
         print(f"Found existing output files in {base_path}. Loading from disk and skipping optimization...", flush=True)
-        
+
         # Load the arrays
         best_points_3D = np.load(points_save_path)
         smoothed_3D = np.load(smoothed_save_path)
+        if not test:
+            # Optimization is cached, but the human-readable model-selection
+            # report is cheap to (re)build from the saved combinations array.
+            try:
+                all_models_combinations = np.load(combinations_save_path)
+                save_model_selection_report(base_path, all_models_combinations,
+                                            list_model_names(base_path))
+            except Exception as e:
+                print(f"could not (re)generate model-selection report from cache: {e}", flush=True)
         return best_points_3D, smoothed_3D
 
-    result, all_points_list = predict_3D_points_all_pairs(base_path)
+    result, all_points_list, model_names = predict_3D_points_all_pairs(base_path)
     final_score, best_points_3D, all_models_combinations, all_frames_scores = Predictor2D.find_3D_points_optimize_neighbors(
-        all_points_list)
+        all_points_list, max_models=max_models)
 
     print(f"score: {final_score}\n", flush=True)
     if not test:
@@ -266,6 +319,8 @@ def find_3D_points_from_ensemble(base_path, test=False):
         save_points_3D(base_path, [], best_points_3D, smoothed_3D, "best_method")
         save_name = os.path.join(base_path, "all_models_combinations.npy")
         np.save(save_name, all_models_combinations)
+        save_model_selection_report(base_path, all_models_combinations, model_names,
+                                    all_frames_scores=all_frames_scores)
     return best_points_3D, smoothed_3D
 
 @staticmethod
@@ -280,6 +335,123 @@ def save_points_3D(base_path, best_combination, best_points_3D, smoothed_3D, typ
         f.write(f"The score for the points was {score1}\n")
         f.write(f"The score for the smoothed points was {score2}\n")
         f.write(f"The winning combination was {best_combination}")
+
+
+# joint-group order of the leading axis of all_models_combinations, matching
+# find_3D_points_optimize_neighbors in Predictor.py.
+ENSEMBLE_GROUP_NAMES = ['left_wing', 'right_wing', 'head_tail', 'side_points']
+
+
+def _strip_frames_scores(all_frames_scores):
+    """Turn the raw per-frame score bookkeeping into a compact JSON-friendly
+    structure: per joint-group, per frame, the score of every model-subset that
+    was tried. The (redundant) per-combination 3D points are dropped."""
+    out = {}
+    for group_name, group in zip(ENSEMBLE_GROUP_NAMES, all_frames_scores):
+        group_out = []
+        for frame_scores in group:
+            group_out.append([
+                {'model_combination': [int(i) for i in d['model_combination']],
+                 'score': float(d['score'])}
+                for d in frame_scores
+            ])
+        out[group_name] = group_out
+    return out
+
+
+def save_model_selection_report(base_path, all_models_combinations, model_names,
+                                all_frames_scores=None):
+    """Summarise how often each ensemble member was chosen by the selector.
+
+    all_models_combinations has shape (num_groups, num_frames, num_models,
+    num_camera_pairs); a 1 marks a (model, camera-pair) that was part of the
+    winning subset for that frame/joint-group. Writes:
+      - model_index_legend.json         model index -> model directory name
+      - ensemble_model_selection_summary.json / .txt  per-model usage stats
+      - model_selection_visualizations/  per-group plots
+      - all_frames_scores.json          (optional) full score margins
+    """
+    all_models_combinations = np.asarray(all_models_combinations)
+    num_groups, num_frames, num_models, num_candidates = all_models_combinations.shape
+
+    # Fall back to positional names if the directory listing didn't line up.
+    if not model_names or len(model_names) != num_models:
+        model_names = [f"model_{m}" for m in range(num_models)]
+
+    legend = {int(m): model_names[m] for m in range(num_models)}
+    with open(os.path.join(base_path, "model_index_legend.json"), "w") as f:
+        json.dump(legend, f, indent=4)
+
+    summary = {
+        "model_index_legend": legend,
+        "num_frames": int(num_frames),
+        "num_camera_pairs": int(num_candidates),
+        "per_group": {},
+        "overall": {},
+    }
+
+    # frames_selected[g, m] = number of frames where model m was in the winning
+    # subset for joint-group g (any camera-pair). usage counts model x cam-pair.
+    frames_selected = np.zeros((num_groups, num_models), dtype=int)
+    for g in range(num_groups):
+        models_g = all_models_combinations[g]                    # (frames, models, pairs)
+        selected = np.any(models_g > 0, axis=2)                  # (frames, models)
+        frames_selected[g] = selected.sum(axis=0)
+        usage = models_g.sum(axis=(0, 2))                        # model x cam-pair count
+        summary["per_group"][ENSEMBLE_GROUP_NAMES[g]] = {
+            model_names[m]: {
+                "fraction_of_frames_selected": float(frames_selected[g, m] / num_frames)
+                if num_frames else 0.0,
+                "model_x_camerapair_selections": int(usage[m]),
+            }
+            for m in range(num_models)
+        }
+
+    total_slots = num_groups * num_frames
+    for m in range(num_models):
+        summary["overall"][model_names[m]] = {
+            "fraction_of_frames_selected": float(frames_selected[:, m].sum() / total_slots)
+            if total_slots else 0.0,
+            "model_x_camerapair_selections": int(all_models_combinations[:, :, m, :].sum()),
+        }
+
+    with open(os.path.join(base_path, "ensemble_model_selection_summary.json"), "w") as f:
+        json.dump(summary, f, indent=4)
+
+    readme_path = os.path.join(base_path, "ensemble_model_selection_summary.txt")
+    with open(readme_path, "w") as f:
+        f.write("How often each ensemble member was chosen by the selector.\n")
+        f.write("'fraction of frames selected' = share of frames where the model was "
+                "part of the winning subset (any camera-pair).\n\n")
+        f.write("Overall (averaged over the 4 joint-groups):\n")
+        for m in range(num_models):
+            frac = summary["overall"][model_names[m]]["fraction_of_frames_selected"]
+            f.write(f"  [{m}] {model_names[m]}: {frac:.3f}\n")
+        f.write("\nPer joint-group (fraction of frames selected):\n")
+        header = "  {:<40}".format("model") + "".join(
+            "{:>14}".format(g) for g in ENSEMBLE_GROUP_NAMES) + "\n"
+        f.write(header)
+        for m in range(num_models):
+            row = "  {:<40}".format(f"[{m}] {model_names[m]}")
+            for g in range(num_groups):
+                row += "{:>14.3f}".format(frames_selected[g, m] / num_frames if num_frames else 0.0)
+            f.write(row + "\n")
+
+    try:
+        vis_dir = os.path.join(base_path, "model_selection_visualizations")
+        Visualizer.visualize_models_selection(all_models_combinations,
+                                              output_dir=vis_dir,
+                                              model_labels=model_names)
+    except Exception as e:
+        print(f"model-selection visualization failed: {e}", flush=True)
+
+    if all_frames_scores is not None:
+        try:
+            with open(os.path.join(base_path, "all_frames_scores.json"), "w") as f:
+                json.dump(_strip_frames_scores(all_frames_scores), f)
+        except Exception as e:
+            print(f"saving all_frames_scores failed: {e}", flush=True)
+
 
 def main():
     if len(sys.argv) < 2:
