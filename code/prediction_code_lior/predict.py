@@ -8,7 +8,7 @@ import numpy as np
 abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
-from utils import get_start_frame, show_interest_points_with_index, PredictConfig
+from utils import get_start_frame, show_interest_points_with_index, PredictConfig, get_trigger_frame_info
 from pipeline_timing import record as record_timing, earliest_start
 from plot_wing_angles import plot_one as plot_wing_angles_one
 import h5py
@@ -18,7 +18,7 @@ from From_2D_to_3D import From2Dto3D
 from extract_flight_data import FlightAnalysis
 from Visualizer import Visualizer
 from Triangulator import Triangulator
-from extract_flight_data import create_movie_analysis_h5
+from extract_flight_data import create_movie_analysis_h5, export_analysis_csv
 
 
 class PredictingManager:
@@ -116,7 +116,22 @@ class PredictingManager:
             movie = os.path.basename(movie_run_directory_path)
             rotate = True
             try:
-                movie_hdf5_path, FA = create_movie_analysis_h5(movie, movie_run_directory_path, points_3D_path, smooth=True)
+                # Trigger-relative frame numbering (frame 0 == the hardware
+                # trigger), derived from the source movie h5 + its sibling
+                # *_sparse.mat. Written into the analysis h5 (frame_index) and
+                # reused for the CSV so both share one convention.
+                trig_off, frame_rate = get_trigger_frame_info(box_path)
+                movie_hdf5_path, FA = create_movie_analysis_h5(
+                    movie, movie_run_directory_path, points_3D_path, smooth=True,
+                    trigger_offset=trig_off, frame_rate=frame_rate)
+                # MATLAB-ready per-frame CSV (body angles, body location, wing
+                # angles) indexed by the trigger-relative frame number. Failure
+                # here must not abort the movie's prediction.
+                try:
+                    csv_path = movie_hdf5_path.replace('.h5', '.csv')
+                    export_analysis_csv(FA, csv_path, trig_off or 0, frame_rate)
+                except Exception as e:
+                    print(f"analysis CSV export failed: {e}", flush=True)
                 Visualizer.plot_all_body_data(movie_hdf5_path)
                 reprojected = triangulator.get_reprojections(FA.points_3D[FA.first_analysed_frame:], cropzone)
                 From2Dto3D.save_points_3D(movie_run_directory_path, reprojected,

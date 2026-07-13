@@ -17,6 +17,7 @@ from skimage import measure
 from plotly.subplots import make_subplots
 from scipy.integrate import simpson
 from utils import add_nan_frames
+from utils import get_trigger_frame_info
 import glob
 from scipy.optimize import curve_fit
 from scipy.linalg import svd
@@ -827,9 +828,16 @@ class Visualizer:
     @staticmethod
     def create_movie_mp4(h5_path_movie_path, mode=DISPLAY, save_frames=None,
                          reprojected_points_path=None, box_path=None,
-                         save_path="movie_gif.gif",  rotate=False):
+                         save_path="movie_gif.gif",  rotate=False,
+                         trigger_offset=None, frame_rate=None):
         # save_frames = np.arange(30, 130)
         zoom_factor = 1  # Adjust as needed
+        # Trigger-relative frame numbering for the on-screen counter/clock.
+        # box frame k -> number `trigger_offset + k` (frame 0 == the trigger),
+        # time `(trigger_offset + k) * 1000 / frame_rate` ms. Auto-derived from
+        # the source movie h5 (its filename + sibling *_sparse.mat) when not given.
+        if trigger_offset is None and box_path is not None:
+            trigger_offset, frame_rate = get_trigger_frame_info(box_path)
         points_2D = np.load(reprojected_points_path)
         first_analized_frame = Visualizer.get_data_from_h5(h5_path_movie_path, 'first_analysed_frame')[()]
         points_2D = add_nan_frames(points_2D, first_analized_frame)
@@ -903,6 +911,15 @@ class Visualizer:
         ax_3d.set_ylim([y_min, y_max])
         ax_3d.set_zlim([z_min, z_max])
 
+        # Persistent frame counter / clock, drawn in the empty middle column of
+        # the gridspec (between the 2D panels and the 3D view). update() refreshes
+        # its text every frame; a figure-level artist survives the per-frame
+        # ax.cla() calls.
+        counter_text = fig.text(0.5, 0.97, "", ha='center', va='top',
+                                fontsize=30, family='monospace', color='black',
+                                bbox=dict(boxstyle='round', facecolor='white',
+                                          alpha=0.7, edgecolor='none'))
+
         # Define the connections between points
         connections = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (0, 6),
                        (8, 9), (9, 10), (10, 11), (11, 12), (12, 13), (13, 14), (8, 14),
@@ -967,7 +984,7 @@ class Visualizer:
                     if i not in [7, 15]:
                         ax_3d.scatter(points[analysis_frame, i, 0],
                                       points[analysis_frame, i, 1],
-                                      points[analysis_frame, i, 2], color=color_array[i], s=5)
+                                      points[analysis_frame, i, 2], color=color_array[i], s=14)
                 for i, j in connections:
                     ax_3d.plot(points[analysis_frame, [i, j], 0],
                                points[analysis_frame, [i, j], 1],
@@ -1048,9 +1065,22 @@ class Visualizer:
                         point = points_2D[analysis_frame, i, j, :]
                         point[0] += shift_yx[1]
                         point[1] += shift_yx[0]
-                        ax.scatter(point[0],  point[1], color=color_array[j], s=3)
+                        ax.scatter(point[0],  point[1], color=color_array[j], s=9)
                 # ax.scatter(cm[0] + shift_yx[1], cm[1] + shift_yx[0], c='blue')
                 ax.axis('off')
+
+            # Trigger-relative frame counter + clock. `frame` is the 0-based
+            # index into the movie's box, so its number is trigger_offset + frame
+            # (frame 0 == the hardware trigger; earlier frames are negative).
+            if trigger_offset is not None:
+                disp_frame = int(round(trigger_offset + frame))
+                if frame_rate:
+                    t_ms = (trigger_offset + frame) * 1000.0 / frame_rate
+                    counter_text.set_text(f"frame {disp_frame:+d}\n{t_ms:+.2f} ms")
+                else:
+                    counter_text.set_text(f"frame {disp_frame:+d}")
+            else:
+                counter_text.set_text(f"frame {int(frame)}")
 
             fig.canvas.draw_idle()
 

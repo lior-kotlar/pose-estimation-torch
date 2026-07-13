@@ -777,3 +777,41 @@ def find_flip_in_files(movie_dir_path):
     except FileNotFoundError:
         # If the directory does not exist, return False
         return False
+
+
+def get_trigger_frame_info(box_h5_path):
+    """Map a movie's box-frame index to the lab's trigger-relative frame number.
+
+    The high-speed cameras record around a hardware trigger. Each source
+    ``*_sparse.mat`` stores ``metaData.startFrame`` — the trigger-relative index
+    of the movie's FIRST raw frame (negative => recording began before the
+    trigger) — and ``metaData.frameRate`` (Hz). The MATLAB builder then crops the
+    raw movie to the 1-based inclusive window ``[start_ind, end_ind]``, encoding
+    ``start_ind`` in the h5 filename (``mov_<n>_<start>_<end>_ds_..``). So box
+    frame ``k`` (0-based) is raw 1-based frame ``start_ind + k``, whose
+    trigger-relative number is ``startFrame + (start_ind - 1) + k``.
+
+    Returns ``(trigger_offset, frame_rate)`` where the trigger-relative number of
+    box frame ``k`` is ``trigger_offset + k`` and its time is
+    ``(trigger_offset + k) * 1000 / frame_rate`` ms (frame 0 == the trigger).
+    Returns ``(None, None)`` if the filename or sparse .mat can't be read.
+    """
+    try:
+        fname = os.path.basename(box_h5_path)
+        match = regex.match(r"mov_\d+_(\d+)_(\d+)_ds_", fname)
+        start_ind = int(match.group(1)) if match else 1
+        movie_dir = os.path.dirname(box_h5_path)
+        sparse_mats = sorted(glob.glob(os.path.join(movie_dir, "*_sparse.mat")))
+        if not sparse_mats:
+            print(f"get_trigger_frame_info: no *_sparse.mat next to {box_h5_path}",
+                  flush=True)
+            return None, None
+        # v7.3 .mat is HDF5; read the two scalars from metaData.
+        with h5py.File(sparse_mats[0], "r") as f:
+            start_frame = float(np.array(f["metaData"]["startFrame"][()]).squeeze())
+            frame_rate = float(np.array(f["metaData"]["frameRate"][()]).squeeze())
+        trigger_offset = int(round(start_frame)) + (start_ind - 1)
+        return trigger_offset, frame_rate
+    except Exception as e:
+        print(f"get_trigger_frame_info failed for {box_h5_path}: {e}", flush=True)
+        return None, None

@@ -2084,7 +2084,8 @@ def save_movies_data_to_hdf5(base_path, output_hdf5_path, smooth=True, one_h5_fo
         f"All data saved to {output_hdf5_path}" if one_h5_for_all else "All data saved to individual movie HDF5 files")
 
 
-def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_object=None):
+def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_object=None,
+                             trigger_offset=None, frame_rate=None):
     if analysis_object is None:
         FA = FlightAnalysis(points_3D_path, create_html=True)  # Assuming FlightAnalysis is properly defined
     else:
@@ -2126,9 +2127,73 @@ def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_
                 elif isinstance(attr_value, (int, float)):
                     # Check for int or float attributes
                     hdf.create_dataset(attr_name, data=attr_value)
+
+        # Trigger-relative frame index for every frame (frame 0 == the hardware
+        # trigger; earlier frames negative), so downstream code can address
+        # frames by the lab's convention. Aligned with the per-frame datasets
+        # above (same length as points_3D / center_of_mass), and consistent with
+        # the counter in the movie and the analysis CSV. Written only when the
+        # trigger info is available (see utils.get_trigger_frame_info).
+        if trigger_offset is not None and "frame_index" not in hdf:
+            n = int(np.asarray(FA.center_of_mass).shape[0])
+            first = int(getattr(FA, "first_analysed_frame", 0) or 0)
+            frame_index = trigger_offset + (np.arange(n) - first)
+            hdf.create_dataset("frame_index", data=frame_index.astype(np.int64))
+            hdf.create_dataset("trigger_offset", data=np.int64(trigger_offset))
+            if frame_rate:
+                hdf.create_dataset("frame_rate", data=float(frame_rate))
+                hdf.create_dataset("time_ms", data=frame_index * 1000.0 / frame_rate)
     print(f"Data saved for {movie} in {movie_hdf5_path}")
     Visualizer.plot_all_body_data(movie_hdf5_path)
     return movie_hdf5_path, FA
+
+
+def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None):
+    """Write a MATLAB-ready CSV of the per-frame fly state from a FlightAnalysis.
+
+    One row per frame, indexed by the trigger-relative frame number (frame 0 ==
+    the hardware trigger; earlier frames negative), matching the mp4 counter.
+    Columns:
+      - frame                          trigger-relative frame number
+      - time_ms                        trigger-relative time (if frame_rate given)
+      - CM_x_mm, CM_y_mm, CM_z_mm      body location (center of mass), lab coords
+      - body_yaw_deg/pitch/roll        body angles
+      - {left,right}_wing_phi/theta/psi_deg   wing angles
+
+    ``trigger_offset``/``frame_rate`` come from utils.get_trigger_frame_info.
+    Values outside the analysed segment are NaN (as stored on FA).
+    """
+    com = np.asarray(FA.center_of_mass, dtype=float)
+    n = com.shape[0]
+    # FlightAnalysis prepends `first_analysed_frame` NaN frames to every series,
+    # so array index i is box frame (i - first_analysed_frame); box frame 0 sits
+    # at the trigger_offset. Keep the CSV index consistent with the mp4 counter.
+    first = int(getattr(FA, "first_analysed_frame", 0) or 0)
+    frame_num = trigger_offset + (np.arange(n) - first)
+
+    com_mm = com * 1000.0  # meters -> millimeters (lab coordinates)
+    data = {"frame": frame_num.astype(int)}
+    if frame_rate:
+        data["time_ms"] = frame_num * 1000.0 / frame_rate
+    data["CM_x_mm"] = com_mm[:, 0]
+    data["CM_y_mm"] = com_mm[:, 1]
+    data["CM_z_mm"] = com_mm[:, 2]
+    # body angles (degrees)
+    data["body_yaw_deg"] = np.asarray(FA.yaw_angle, dtype=float)
+    data["body_pitch_deg"] = np.asarray(FA.pitch_angle, dtype=float)
+    data["body_roll_deg"] = np.asarray(FA.roll_angle, dtype=float)
+    # wing angles (degrees)
+    data["left_wing_phi_deg"] = np.asarray(FA.wings_phi_left, dtype=float)
+    data["left_wing_theta_deg"] = np.asarray(FA.wings_theta_left, dtype=float)
+    data["left_wing_psi_deg"] = np.asarray(FA.wings_psi_left, dtype=float)
+    data["right_wing_phi_deg"] = np.asarray(FA.wings_phi_right, dtype=float)
+    data["right_wing_theta_deg"] = np.asarray(FA.wings_theta_right, dtype=float)
+    data["right_wing_psi_deg"] = np.asarray(FA.wings_psi_right, dtype=float)
+
+    df = pd.DataFrame(data)
+    df.to_csv(csv_path, index=False)
+    print(f"Wrote analysis CSV: {csv_path}", flush=True)
+    return csv_path
 
 
 def create_one_movie_analisys():
