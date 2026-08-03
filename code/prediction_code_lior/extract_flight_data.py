@@ -258,6 +258,7 @@ class FlightAnalysis:
 
         self.y_body, self.first_y_body_frame, self.end_frame = self.get_roni_y_body()
         self.z_body = self.get_z_body()
+        self.gravity_body = self.get_gravity_body()
 
         # Visualizer.visualize_rotating_frames(self.x_body,
         #                                      self.y_body,
@@ -1033,6 +1034,7 @@ class FlightAnalysis:
         self.roll_dot_dot = FlightAnalysis.fill_with_nans(self.roll_dot_dot, indices)
         self.y_body = FlightAnalysis.fill_with_nans(self.y_body, indices)
         self.z_body = FlightAnalysis.fill_with_nans(self.z_body, indices)
+        self.gravity_body = FlightAnalysis.fill_with_nans(self.gravity_body, indices)
         self.omega_lab = FlightAnalysis.fill_with_nans(self.omega_lab, indices)
         self.omega_body = FlightAnalysis.fill_with_nans(self.omega_body, indices)
         self.omega_body_dot = FlightAnalysis.fill_with_nans(self.omega_body_dot, indices)
@@ -1055,7 +1057,7 @@ class FlightAnalysis:
 
         # add nan frames before the starting frame of the analysis
         attributes = [
-            "points_3D", "head_tail_points", "x_body", "y_body", "z_body",
+            "points_3D", "head_tail_points", "x_body", "y_body", "z_body", "gravity_body",
             "wings_tips_left", "wings_tips_right", "left_wing_CM", "right_wing_CM", "wings_joints_points",
             "CM_dot", "CM_speed",
             "left_wing_span", "right_wing_span", "left_wing_chord", "right_wing_chord",
@@ -1330,6 +1332,41 @@ class FlightAnalysis:
         z_body = np.cross(self.x_body, self.y_body, axis=-1)
         z_body = normalize(z_body, 'l2')
         return z_body
+
+    def get_gravity_body(self):
+        return FlightAnalysis.gravity_in_body_axes(self.x_body, self.y_body, self.z_body)
+
+    @staticmethod
+    def gravity_in_body_axes(x_body, y_body, z_body):
+        """The lab "down" direction (gravity) written in the fly's body axes.
+
+        The 3D points live in the lab frame fixed by the calibration's
+        rotation_matrix, which aligns the cameras' vertical with +z (see
+        all_cameras_class.m), so down in the lab is (0, 0, -1). The components
+        returned here are along (x_body, y_body, z_body) = (forward, left,
+        dorsal): a level, upright fly gives (0, 0, -1), pitching nose-up tilts
+        it towards +x and rolling tilts it towards ±y. This carries the same
+        information as pitch and roll, but with no Euler convention, no unwrap
+        and no gimbal singularity.
+
+        Only defined where y_body exists (see get_roni_y_body); every other
+        frame is NaN, here and in adjust_starting_frame.
+
+        Kept static so backfill_gravity_body.py can fill the field into movies
+        analysed before it existed using this exact definition.
+        """
+        gravity_lab = np.array([0.0, 0.0, -1.0])
+        # per frame the rows of R_lab->body, i.e. each body axis dotted with down
+        body_axes = np.stack((x_body, y_body, z_body), axis=1)
+        gravity_body = body_axes @ gravity_lab
+        # Frames without a real body frame must come out as a whole NaN row, not
+        # as a partial vector. Un-solved frames arrive either as zeros (y_body
+        # before adjust_starting_frame) or as NaN (a body axis already blanked,
+        # which would otherwise leave the x component finite and the rest NaN).
+        degenerate = (~np.isfinite(body_axes).all(axis=(1, 2))
+                      | (np.linalg.norm(y_body, axis=1) < 0.5))
+        gravity_body[degenerate] = np.nan
+        return gravity_body
 
     def set_right_left(self):
         wing_CM_left = np.mean(self.points_3D[:, self.left_inds[:-1], :], axis=1)
@@ -2159,6 +2196,12 @@ def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None):
       - CM_x_mm, CM_y_mm, CM_z_mm      body location (center of mass), lab coords
       - body_yaw_deg/pitch/roll        body angles
       - {left,right}_wing_phi/theta/psi_deg   wing angles
+      - gravity_body_x/y/z             the lab "down" direction (unit vector) in
+                                       the fly's body axes, which are
+                                       x = forward (tail->head), y = left,
+                                       z = dorsal (right-handed, z up through
+                                       the fly's back) -- NOT the aerospace
+                                       front-right-down convention
 
     ``trigger_offset``/``frame_rate`` come from utils.get_trigger_frame_info.
     Values outside the analysed segment are NaN (as stored on FA).
@@ -2189,6 +2232,12 @@ def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None):
     data["right_wing_phi_deg"] = np.asarray(FA.wings_phi_right, dtype=float)
     data["right_wing_theta_deg"] = np.asarray(FA.wings_theta_right, dtype=float)
     data["right_wing_psi_deg"] = np.asarray(FA.wings_psi_right, dtype=float)
+    # gravity ("down") in body axes: unit vector, components along
+    # (x_body, y_body, z_body) = (forward, left, dorsal)
+    gravity_body = np.asarray(getattr(FA, "gravity_body", np.full((n, 3), np.nan)), dtype=float)
+    data["gravity_body_x"] = gravity_body[:, 0]
+    data["gravity_body_y"] = gravity_body[:, 1]
+    data["gravity_body_z"] = gravity_body[:, 2]
 
     df = pd.DataFrame(data)
     df.to_csv(csv_path, index=False)

@@ -173,6 +173,9 @@ These power the pipeline but are runnable on their own:
 # Wing-angle plot from an analysis h5 (or a dir of them)
 .env/bin/python code/plot_wing_angles.py <dir>
 
+# 3D check of the gravity ("down") vector: body triad + gravity every k frames
+.env/bin/python code/plot_gravity_body.py <dir> -k 100
+
 # Shrink an h5 to its first N frames (fast iteration)
 .env/bin/python code/truncate_h5_movie.py <movie.h5> 1500
 ```

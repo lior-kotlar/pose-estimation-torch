@@ -27,8 +27,8 @@
 #SBATCH -o logs/%x_%A_%a.out     # %A = array job id, %a = task id
 #SBATCH -e logs/%x_%A_%a.err
 #SBATCH --mem=256g
-#SBATCH --cpus-per-task=8
-#SBATCH --time=04:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --time=08:00:00
 #SBATCH --gres=gpu:l40s:1
 #SBATCH -p salmon
 #SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
