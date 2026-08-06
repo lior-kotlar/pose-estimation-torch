@@ -21,6 +21,49 @@ from Triangulator import Triangulator
 from extract_flight_data import create_movie_analysis_h5, export_analysis_csv
 
 
+def source_experiment(movie_path):
+    """(experiment, movie_dir_name) for a source movie h5.
+
+    e.g. inference_datasets/roni_dark/2023_08_07_5ms/31to60/mov35/mov_35_....h5
+    -> ('roni_dark/2023_08_07_5ms/31to60', 'mov35')
+    """
+    movie_dir = os.path.dirname(os.path.abspath(movie_path))
+    parts = movie_dir.split(os.sep)
+    if "inference_datasets" in parts:
+        i = len(parts) - 1 - parts[::-1].index("inference_datasets")
+        return os.sep.join(parts[i + 1:-1]), parts[-1]
+    return os.path.dirname(movie_dir), parts[-1]
+
+
+def write_source_provenance(run_dir, movie_path):
+    """Record which recording this prediction run came from.
+
+    A run directory is named after the movie h5 basename
+    (`mov_<N>_<start>_<end>_ds_..`), which does NOT encode the experiment --
+    and movie numbers repeat across experiments, so e.g.
+    `mov_35_8_6211_ds_3tc_7tj` is ambiguous between 2023_08_07_10ms/31to60 and
+    2023_08_07_5ms/31to60. Two such movies predicted under the same run name
+    would even collide on disk. Drop a source.json next to the results so a
+    movie can be traced back without digging into a member's
+    specific_configuration.json.
+    """
+    experiment, movie_dir_name = source_experiment(movie_path)
+    source = {
+        "experiment": experiment,
+        "movie_dir": movie_dir_name,
+        "source_movie_dir": os.path.dirname(os.path.abspath(movie_path)),
+        "box_h5": os.path.abspath(movie_path),
+        "predicted_at": date.today().isoformat(),
+    }
+    try:
+        with open(os.path.join(run_dir, "source.json"), "w") as f:
+            json.dump(source, f, indent=4)
+    except OSError as e:
+        print(f"could not write source.json: {e}", flush=True)
+    print(f"source: {experiment}/{movie_dir_name}", flush=True)
+    return source
+
+
 class PredictingManager:
     def __init__(self, config_path, device):
         self.config = PredictConfig(config_path)
@@ -65,6 +108,7 @@ class PredictingManager:
         for movie_path in self.movie_path_list:
             movie_run_directory_path = os.path.join(self.base_run_directory, os.path.basename(movie_path).replace('.h5',''))
             os.makedirs(movie_run_directory_path, exist_ok=True)
+            source = write_source_provenance(movie_run_directory_path, movie_path)
             # Capture post-intersection frame count so timing rows include
             # the normalizer for elapsed-per-frame analysis.
             n_movie_frames = None
@@ -123,7 +167,7 @@ class PredictingManager:
                 trig_off, frame_rate = get_trigger_frame_info(box_path)
                 movie_hdf5_path, FA = create_movie_analysis_h5(
                     movie, movie_run_directory_path, points_3D_path, smooth=True,
-                    trigger_offset=trig_off, frame_rate=frame_rate)
+                    trigger_offset=trig_off, frame_rate=frame_rate, source=source)
                 # MATLAB-ready per-frame CSV (body angles, body location, wing
                 # angles) indexed by the trigger-relative frame number. Failure
                 # here must not abort the movie's prediction.

@@ -2122,7 +2122,7 @@ def save_movies_data_to_hdf5(base_path, output_hdf5_path, smooth=True, one_h5_fo
 
 
 def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_object=None,
-                             trigger_offset=None, frame_rate=None):
+                             trigger_offset=None, frame_rate=None, source=None):
     if analysis_object is None:
         FA = FlightAnalysis(points_3D_path, create_html=True)  # Assuming FlightAnalysis is properly defined
     else:
@@ -2180,6 +2180,15 @@ def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_
             if frame_rate:
                 hdf.create_dataset("frame_rate", data=float(frame_rate))
                 hdf.create_dataset("time_ms", data=frame_index * 1000.0 / frame_rate)
+
+        # Which recording this came from. The file is named only after the
+        # movie number and frame range, and those repeat across experiments, so
+        # without this an analysis h5 on its own cannot say which experiment it
+        # belongs to. `source` comes from predict.write_source_provenance.
+        if source:
+            for key in ("experiment", "movie_dir", "source_movie_dir", "box_h5"):
+                if source.get(key) and key not in hdf:
+                    hdf.create_dataset(key, data=np.bytes_(str(source[key])))
     print(f"Data saved for {movie} in {movie_hdf5_path}")
     Visualizer.plot_all_body_data(movie_hdf5_path)
     return movie_hdf5_path, FA
