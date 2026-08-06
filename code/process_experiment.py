@@ -57,6 +57,12 @@ Common options:
     --verify-threshold P    LOO median (px) above which a movie is marked FAIL
                             (default: 15). The known-broken cases give 100-400
                             px; the known-working cases give 2-8 px.
+    --verify-min-intersection N
+                            mark a BUILT movie BAD_DATA if fewer than N of its
+                            frames have all 4 cams tracking (default: 500).
+                            The prescan applies the same floor to the raw mats;
+                            this re-applies it to what the build actually
+                            produced, so a build that died early is caught.
     --dry-run               print what each step would do, do nothing
     -h, --help              show this message
 
@@ -354,11 +360,17 @@ def matlab_batch(cmd: str, dry_run: bool) -> int:
 def run_build(input_dir: str, mode: str, movies: list,
               easywand: str, max_frames: "int | None", dry_run: bool,
               movie_ranges: "dict | None" = None,
-              timings_path: "str | None" = None) -> None:
+              timings_path: "str | None" = None) -> list:
+    """Runs the MATLAB builder per movie. Returns the list of (movie_dir,
+    movie_num) whose build exited non-zero, so the caller can keep them out of
+    VERIFY and the manifest -- a failed build still leaves whatever frames it
+    managed to write on disk, and that partial h5 is indistinguishable from a
+    complete one unless we remember that MATLAB died."""
     print("\n===== BUILD =====")
     sparse_folder_path = input_dir if mode == "multi" else os.path.dirname(input_dir)
     n_ok = n_fail = 0
     failed = []
+    failed_movies = []
     for movie_dir, mn in movies:
         start_ind = end_ind = None
         if movie_ranges and movie_dir in movie_ranges:
@@ -392,9 +404,12 @@ def run_build(input_dir: str, mode: str, movies: list,
         else:
             n_fail += 1
             failed.append(f"mov{mn}")
+            failed_movies.append((movie_dir, mn))
     print(f"\nBuild dataset: {n_ok} ok, {n_fail} failed.")
     if failed:
         print(f"Failed: {', '.join(failed)}")
+        print("  (a failed build can still leave a partial h5 on disk; "
+              "these are excluded from VERIFY and the manifest)")
 
     # Build the calibration.h5 inside input_dir (matches build_experiment.sh).
     calib_out = os.path.join(input_dir, "calibration.h5")
@@ -405,6 +420,8 @@ def run_build(input_dir: str, mode: str, movies: list,
     cmd = build_calibration_matlab_cmd(easywand, calib_out)
     matlab_batch(cmd, dry_run)
 
+    return failed_movies
+
 
 # ---------------------------------------------------------------------------
 # Prescan + manifest helpers
@@ -413,6 +430,13 @@ def run_build(input_dir: str, mode: str, movies: list,
 # after end_ind for its time-channel windows; keep this in sync with the
 # script's `time_jump` (=7).
 MATLAB_TIME_JUMP_MARGIN = 7
+
+# Fewest frames with all 4 cams tracking the fly for a movie to be worth
+# processing. Applied twice: by the prescan to the raw sparse mats (so we never
+# build a hopeless movie) and by verify to the h5 the build actually produced
+# (so a build that died partway is caught rather than passed on with a fraction
+# of its frames).
+DEFAULT_MIN_INTERSECTION = 500
 
 
 def run_prescan(input_dir: str, movies: list,
@@ -509,10 +533,40 @@ def find_calibration_h5(input_dir: str, mode: str, movies: list) -> "str | None"
     return None
 
 
+def check_build_complete(f) -> "dict | None":
+    """Detect a movie h5 the MATLAB builder never finished writing.
+
+    The builder creates `best_frames_mov_idx` up front at the full requested
+    size, then appends to the extendable `box` / `cropzone` / `frameInds`
+    datasets one frame at a time, in that order, with no atomic commit
+    (CreateDatasetHDF5_from_list_fixed.m). A build that dies partway therefore
+    leaves a perfectly well-formed HDF5 file holding only the frames it got to
+    — nothing in it says "incomplete". Two signatures give it away:
+
+      - the three per-frame datasets disagree in length: killed mid-frame,
+        between two of the three h5write calls;
+      - they agree but fall short of `best_frames_mov_idx`: killed cleanly
+        between frames.
+
+    Returns None when the build looks complete, else a dict of the counts.
+    """
+    n_box = int(f["box"].shape[0])
+    n_crop = int(f["cropzone"].shape[0])
+    n_find = int(f["frameInds"].shape[0])
+    n_expected = (int(f["best_frames_mov_idx"].shape[-1])
+                  if "best_frames_mov_idx" in f else None)
+    ragged = not (n_box == n_crop == n_find)
+    short = n_expected is not None and n_crop < n_expected
+    if not (ragged or short):
+        return None
+    return {"n_box": n_box, "n_cropzone": n_crop, "n_frameinds": n_find,
+            "n_expected": n_expected, "ragged": ragged}
+
+
 def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
                      image_height: int = 800, num_cams: int = 4,
                      subsample_frames: int = 500,
-                     min_intersection: int = 30) -> tuple:
+                     min_intersection: int = DEFAULT_MIN_INTERSECTION) -> tuple:
     """Verify a movie's calibration by reprojection-error.
 
     Samples from the intersection of frames where ALL cameras have a tracked
@@ -521,10 +575,14 @@ def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
     errors that look like calibration failures but are actually just data gaps.
 
     Returns (status, medians, info) where:
-      - status: 'PASS' | 'FAIL' | 'BAD_DATA' | 'ERR'
+      - status: 'PASS' | 'FAIL' | 'INCOMPLETE' | 'BAD_DATA' | 'ERR'
       - medians: per-cam LOO medians (list[float]) for PASS/FAIL,
-                 None for BAD_DATA, error message list for ERR.
+                 None for INCOMPLETE/BAD_DATA, error message list for ERR.
       - info: dict with diagnostic counts, or None.
+
+    INCOMPLETE outranks the calibration checks on purpose: a truncated build
+    reprojects perfectly well over the frames it did write (mov40 scored
+    2.3-4.3 px on 143 of 3085 frames), so geometry alone can never catch it.
     """
     try:
         M = load_calibration(calib_path)
@@ -532,6 +590,9 @@ def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
         return "ERR", [f"calib load err: {e}"], None
     try:
         with h5py.File(h5_path, "r") as f:
+            partial = check_build_complete(f)
+            if partial is not None:
+                return "INCOMPLETE", None, partial
             cropzone_full = f["cropzone"][:]
             n_total = int(cropzone_full.shape[0])
             # All-cams intersection: frames where every cam has a real blob
@@ -566,11 +627,18 @@ def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
 
 def run_verify(input_dir: str, mode: str, movies: list,
                threshold: float, dry_run: bool,
-               timings_path: "str | None" = None) -> "list | None":
+               timings_path: "str | None" = None,
+               min_intersection: int = DEFAULT_MIN_INTERSECTION,
+               build_failed: "list | None" = None) -> "list | None":
     """Returns the list of (movie_dir, movie_num) that PASSED, or None when
     no filtering happened (calibration missing, or dry-run) so the caller
-    falls back to the input list."""
-    print(f"\n===== VERIFY (threshold: {threshold:.1f} px per-cam LOO median) =====")
+    falls back to the input list.
+
+    `build_failed` is run_build's list of movies whose MATLAB build exited
+    non-zero. They are reported and dropped without being opened: their h5 (if
+    any) holds only the frames the builder got to before it died."""
+    print(f"\n===== VERIFY (threshold: {threshold:.1f} px per-cam LOO median, "
+          f"min intersection: {min_intersection} frames) =====")
     calib_path = find_calibration_h5(input_dir, mode, movies)
     if calib_path is None:
         print(f"  ERROR: calibration.h5 not found near {input_dir}; skipping verify.")
@@ -581,17 +649,26 @@ def run_verify(input_dir: str, mode: str, movies: list,
         return None
 
     passed_movies = []
-    n_pass = n_fail = n_bad = n_err = n_missing = 0
+    n_pass = n_fail = n_bad = n_err = n_missing = n_incomplete = 0
     failed_lines = []
     bad_lines = []
+    incomplete_lines = []
+    build_failed_dirs = {d for d, _ in (build_failed or [])}
     for movie_dir, mn in movies:
+        if movie_dir in build_failed_dirs:
+            n_incomplete += 1
+            print(f"  [mov{mn}] BUILD_FAILED — MATLAB exited non-zero during "
+                  f"BUILD; any h5 on disk is partial; skipping")
+            incomplete_lines.append(f"mov{mn}  build exited non-zero (rebuild)")
+            continue
         h5 = find_movie_h5(movie_dir)
         if h5 is None:
             print(f"  [mov{mn}] no dataset h5 found; skipping")
             n_missing += 1
             continue
         t0 = time.time()
-        status, medians, info = verify_one_movie(h5, calib_path, threshold)
+        status, medians, info = verify_one_movie(h5, calib_path, threshold,
+                                                 min_intersection=min_intersection)
         t1 = time.time()
         n_inter = info["n_intersection"] if (info and "n_intersection" in info) else None
         record_timing(timings_path, f"mov{mn}", "verify", t0, t1,
@@ -601,12 +678,29 @@ def run_verify(input_dir: str, mode: str, movies: list,
             print(f"  [mov{mn}] ERR  {medians}")
             failed_lines.append(f"mov{mn} load error: {medians}")
             continue
+        if status == "INCOMPLETE":
+            n_incomplete += 1
+            exp = info["n_expected"]
+            got = info["n_cropzone"]
+            pct = f"{100.0 * got / exp:.1f}%" if exp else "?"
+            why = ("killed mid-frame" if info["ragged"]
+                   else "killed between frames")
+            print(f"  [mov{mn}] INCOMPLETE — build wrote {got}/{exp} frames "
+                  f"({pct}); {why}: box/cropzone/frameInds = "
+                  f"{info['n_box']}/{info['n_cropzone']}/{info['n_frameinds']}; "
+                  f"skipping")
+            incomplete_lines.append(
+                f"mov{mn}  {got}/{exp} frames ({pct})  "
+                f"box/cropzone/frameInds={info['n_box']}/"
+                f"{info['n_cropzone']}/{info['n_frameinds']}")
+            continue
         if status == "BAD_DATA":
             n_bad += 1
             inter = info["n_intersection"]
             total = info["n_total"]
             print(f"  [mov{mn}] BAD_DATA — only {inter}/{total} frames have "
-                  f"all 4 cams tracking simultaneously; skipping")
+                  f"all 4 cams tracking simultaneously (need {min_intersection}); "
+                  f"skipping")
             bad_lines.append(f"mov{mn}  intersection={inter}/{total}")
             continue
         # PASS or FAIL
@@ -627,11 +721,15 @@ def run_verify(input_dir: str, mode: str, movies: list,
             failed_lines.append(f"mov{mn} {meds_str}")
 
     print(f"\nVerify summary: {n_pass} PASSED, {n_fail} FAILED, "
-          f"{n_bad} BAD_DATA, {n_err} ERR, "
+          f"{n_incomplete} INCOMPLETE, {n_bad} BAD_DATA, {n_err} ERR, "
           f"{n_missing} missing (of {len(movies)} total).")
     if failed_lines:
         print("Failed details:")
         for line in failed_lines:
+            print(f"  {line}")
+    if incomplete_lines:
+        print("INCOMPLETE details (the build died partway — rebuild these movies):")
+        for line in incomplete_lines:
             print(f"  {line}")
     if bad_lines:
         print("BAD_DATA details (recording problem — fly not tracked by all 4 cams):")
@@ -667,7 +765,8 @@ def main() -> None:
                         "movies where the fly is rarely tracked by all 4 cams")
     p.add_argument("--prescan-only", action="store_true",
                    help="run only the prescan; do not flip / build / verify")
-    p.add_argument("--prescan-min-intersection", type=int, default=500,
+    p.add_argument("--prescan-min-intersection", type=int,
+                   default=DEFAULT_MIN_INTERSECTION,
                    help="movies with fewer than N frames where all 4 cams "
                         "see the fly are flagged BAD and skipped (default: 500)")
     p.add_argument("--prescan-pixel-threshold", type=int, default=50,
@@ -688,6 +787,11 @@ def main() -> None:
     p.add_argument("--verify-only", action="store_true",
                    help="skip clean / prescan / flip / build; just verify "
                         "existing files")
+    p.add_argument("--verify-min-intersection", type=int,
+                   default=DEFAULT_MIN_INTERSECTION,
+                   help="a built movie with fewer than this many all-cams "
+                        f"tracked frames is BAD_DATA (default: "
+                        f"{DEFAULT_MIN_INTERSECTION})")
     p.add_argument("--verify-threshold", type=float, default=15.0,
                    help="per-cam LOO median above which a movie is marked FAIL "
                         "(default: 15.0)")
@@ -725,7 +829,8 @@ def main() -> None:
 
         if args.verify_only:
             run_verify(input_dir, mode, movies, args.verify_threshold,
-                       args.dry_run, timings_path=timings_path)
+                       args.dry_run, timings_path=timings_path,
+                       min_intersection=args.verify_min_intersection)
         else:
             if not args.skip_clean:
                 run_clean(input_dir, mode, movies, args.dry_run)
@@ -734,6 +839,10 @@ def main() -> None:
             # of movies we won't process. It also computes the per-movie build
             # range so BUILD emits only the contiguous all-cams-visible window.
             movie_ranges = {}
+            # Movies whose MATLAB build exited non-zero. Stays empty under
+            # --skip-build (re-verifying an already-built experiment), where
+            # the completeness check in verify is the only guard available.
+            build_failed = []
             if not args.skip_prescan:
                 movies, movie_ranges = run_prescan(
                     input_dir, movies,
@@ -769,10 +878,11 @@ def main() -> None:
                     print(f"easyWand .mat not found: {args.easywand}")
                     _write_report(input_dir, report_buf, args.dry_run)
                     sys.exit(1)
-                run_build(input_dir, mode, movies,
-                          os.path.abspath(args.easywand), args.max_frames,
-                          args.dry_run, movie_ranges=movie_ranges,
-                          timings_path=timings_path)
+                build_failed = run_build(input_dir, mode, movies,
+                                         os.path.abspath(args.easywand),
+                                         args.max_frames, args.dry_run,
+                                         movie_ranges=movie_ranges,
+                                         timings_path=timings_path)
 
             # Verification is on by default; --no-verify skips it. When
             # verify ran and produced a PASS list, restrict the manifest to it
@@ -780,7 +890,9 @@ def main() -> None:
             if not args.no_verify:
                 verified = run_verify(input_dir, mode, movies,
                                       args.verify_threshold, args.dry_run,
-                                      timings_path=timings_path)
+                                      timings_path=timings_path,
+                                      min_intersection=args.verify_min_intersection,
+                                      build_failed=build_failed)
                 if verified is not None:
                     movies = verified
 
