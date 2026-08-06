@@ -335,6 +335,14 @@ def build_dataset_matlab_cmd(sparse_folder_path: str, save_path: str,
                              movie_num: int, max_frames: "int | None",
                              start_ind: "int | None" = None,
                              end_ind: "int | None" = None) -> str:
+    # Absolute paths are mandatory, not cosmetic: the command ends in
+    # `run('<abs>/CreateDatasetHDF5_from_list_fixed.m')`, and MATLAB's `run`
+    # changes the working directory to the script's own folder for the
+    # duration of the script. A relative sparse_folder_path/save_path would
+    # therefore be resolved against matlab/ and fail with a confusing
+    # "File or folder not found" from h5create.
+    sparse_folder_path = os.path.abspath(sparse_folder_path)
+    save_path = os.path.abspath(save_path)
     cmd = (f"sparse_folder_path='{sparse_folder_path}'; "
            f"save_path='{save_path}'; "
            f"movie_num={movie_num};")
@@ -349,8 +357,10 @@ def build_dataset_matlab_cmd(sparse_folder_path: str, save_path: str,
 
 
 def build_calibration_matlab_cmd(easywand_path: str, save_path: str) -> str:
-    return (f"easy_wand_path='{easywand_path}'; "
-            f"savePath='{save_path}'; "
+    # Absolute for the same reason as build_dataset_matlab_cmd: `run` cds into
+    # the script's folder before the script sees these variables.
+    return (f"easy_wand_path='{os.path.abspath(easywand_path)}'; "
+            f"savePath='{os.path.abspath(save_path)}'; "
             f"run('{CALIB_SCRIPT}')")
 
 
