@@ -395,6 +395,64 @@ def matlab_batch(cmd: str, dry_run: bool, log_path: "str | None" = None,
     return result.returncode
 
 
+def build_one_movie(sparse_folder_path: str, movie_dir: str, movie_num: int,
+                    max_frames: "int | None" = None,
+                    start_ind: "int | None" = None,
+                    end_ind: "int | None" = None,
+                    dry_run: bool = False) -> "tuple[int, int | None]":
+    """Build one movie's dataset h5, staged so a partial build never lands.
+
+    MATLAB writes into a private `.build_tmp/` inside the movie dir; the h5 is
+    moved into place with os.replace only once MATLAB exits 0. The builder
+    appends to extendable datasets with no atomic commit, so a build that dies
+    partway leaves a well-formed but truncated h5 that nothing downstream can
+    distinguish from a complete one. Staging confines that debris to a
+    directory nobody looks in (find_movie_h5 globs the movie dir itself, not
+    sub-dirs), turning "silently truncated dataset" into "no dataset" -- which
+    the pipeline already handles correctly. It also sidesteps the h5create
+    collision that makes a rebuild over an existing h5 fail outright, since
+    MATLAB always writes into a fresh empty directory.
+
+    Returns (returncode, n_frames_built). Split out of run_build so a targeted
+    rebuild of individual movies runs through exactly this code path.
+    """
+    build_dir = os.path.join(movie_dir, ".build_tmp")
+    log_path = os.path.join(movie_dir, f"build_mov{movie_num}.log")
+    if not dry_run:
+        shutil.rmtree(build_dir, ignore_errors=True)
+        os.makedirs(build_dir, exist_ok=True)
+    cmd = build_dataset_matlab_cmd(sparse_folder_path, build_dir, movie_num,
+                                   max_frames, start_ind, end_ind)
+    rc = matlab_batch(cmd, dry_run, log_path=None if dry_run else log_path)
+    if rc == 0 and not dry_run:
+        staged = sorted(glob.glob(os.path.join(build_dir,
+                                               "mov_*_ds_*tc_*tj.h5")))
+        if staged:
+            # os.replace is atomic within one filesystem, and build_dir lives
+            # inside movie_dir, so there is no window in which a half-copied
+            # file is visible under the committed name.
+            final = os.path.join(movie_dir, os.path.basename(staged[0]))
+            os.replace(staged[0], final)
+            print(f"   committed: {final}")
+        else:
+            print("   MATLAB exited 0 but produced no h5; treating as failed")
+            rc = 1
+    if not dry_run:
+        # The staged remains of a failed build are pure waste (hundreds of MB);
+        # the frame counts in the MATLAB log say how far it got.
+        shutil.rmtree(build_dir, ignore_errors=True)
+    n_built = None
+    if rc == 0 and not dry_run:
+        built = find_movie_h5(movie_dir)
+        if built is not None:
+            try:
+                with h5py.File(built, "r") as f:
+                    n_built = int(f["cropzone"].shape[0])
+            except Exception:
+                pass
+    return rc, n_built
+
+
 def run_build(input_dir: str, mode: str, movies: list,
               easywand: str, max_frames: "int | None", dry_run: bool,
               movie_ranges: "dict | None" = None,
@@ -419,55 +477,10 @@ def run_build(input_dir: str, mode: str, movies: list,
         if start_ind is not None:
             print(f"   build range: start_ind={start_ind}, end_ind={end_ind} "
                   f"({end_ind - start_ind + 1} frames)")
-        # Build into a private temp dir and move the finished h5 into place
-        # only once MATLAB exits 0. The builder appends to extendable datasets
-        # with no atomic commit, so a build that dies partway leaves a
-        # well-formed but truncated h5 that nothing downstream can tell from a
-        # complete one. Staging confines that debris to a directory nobody
-        # looks in (find_movie_h5 globs the movie dir itself, not sub-dirs),
-        # turning "silently truncated dataset" into "no dataset" -- which the
-        # pipeline already handles correctly. It also sidesteps the h5create
-        # collision that makes a rebuild over an existing h5 fail outright,
-        # since MATLAB always writes into a fresh empty directory.
-        build_dir = os.path.join(movie_dir, ".build_tmp")
-        log_path = os.path.join(movie_dir, f"build_mov{mn}.log")
-        if not dry_run:
-            shutil.rmtree(build_dir, ignore_errors=True)
-            os.makedirs(build_dir, exist_ok=True)
-        cmd = build_dataset_matlab_cmd(sparse_folder_path, build_dir, mn,
-                                       max_frames, start_ind, end_ind)
         t0 = time.time()
-        rc = matlab_batch(cmd, dry_run,
-                          log_path=None if dry_run else log_path)
+        rc, n_built = build_one_movie(sparse_folder_path, movie_dir, mn,
+                                      max_frames, start_ind, end_ind, dry_run)
         t1 = time.time()
-        if rc == 0 and not dry_run:
-            staged = sorted(glob.glob(os.path.join(build_dir,
-                                                   "mov_*_ds_*tc_*tj.h5")))
-            if staged:
-                # os.replace is atomic within one filesystem, and build_dir
-                # lives inside movie_dir, so there is no window in which a
-                # half-copied file is visible under the committed name.
-                final = os.path.join(movie_dir, os.path.basename(staged[0]))
-                os.replace(staged[0], final)
-                print(f"   committed: {final}")
-            else:
-                print("   MATLAB exited 0 but produced no h5; treating as failed")
-                rc = 1
-        if not dry_run:
-            # The staged remains of a failed build are pure waste (hundreds of
-            # MB); the frame counts in the MATLAB log say how far it got.
-            shutil.rmtree(build_dir, ignore_errors=True)
-        # On success, read the committed h5 to capture the post-intersection
-        # frame count for the timing ledger.
-        n_built = None
-        if rc == 0 and not dry_run:
-            built = find_movie_h5(movie_dir)
-            if built is not None:
-                try:
-                    with h5py.File(built, "r") as f:
-                        n_built = int(f["cropzone"].shape[0])
-                except Exception:
-                    pass
         record_timing(timings_path, f"mov{mn}", "build", t0, t1,
                       n_frames=n_built)
         if rc == 0:
