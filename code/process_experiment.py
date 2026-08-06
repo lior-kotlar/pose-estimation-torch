@@ -12,9 +12,15 @@ End-to-end wrapper around the pose-estimation data-prep pipeline. Drives:
     3. FLIP  — vertically flip the mirror camera's sparse .mat (e.g. cam1 in
        2023, cam5 in 2022) using `code/flip_sparse_cam_mat.py`'s logic.
     4. BUILD — invoke MATLAB to produce one h5 per movie plus one shared
-       calibration.h5 (same logic as `code/build_experiment.sh`).
+       calibration.h5 (same logic as `code/build_experiment.sh`). MATLAB
+       writes into a per-movie `.build_tmp/` staging dir and the h5 is moved
+       into place only once MATLAB exits 0, so a build that dies partway
+       leaves no dataset rather than a silently truncated one. MATLAB's own
+       output is captured to `<movie_dir>/build_mov<N>.log`.
     5. VERIFY (optional) — per-movie reprojection-error sanity check using
-       `code/verify_calibration.py`'s machinery.
+       `code/verify_calibration.py`'s machinery. Also rejects movies whose
+       build never finished (INCOMPLETE) or whose all-cams intersection is
+       under --verify-min-intersection frames (BAD_DATA).
 
 After BUILD (multi-movie mode), a manifest is written to
 `manifests/good_movies_<experiment>.txt` containing one movie directory per
@@ -348,12 +354,44 @@ def build_calibration_matlab_cmd(easywand_path: str, save_path: str) -> str:
             f"run('{CALIB_SCRIPT}')")
 
 
-def matlab_batch(cmd: str, dry_run: bool) -> int:
+def matlab_batch(cmd: str, dry_run: bool, log_path: "str | None" = None,
+                 tail_on_error: int = 40) -> int:
+    """Run `matlab -batch <cmd>`, capturing its output instead of losing it.
+
+    subprocess hands the child the inherited OS fd 1, while the report only
+    captures Python's `sys.stdout` object -- so MATLAB's own stdout/stderr used
+    to sail straight past process_report.txt. Every build failure in the
+    archive was recorded as a bare "Failed: mov<N>" with not one line of
+    MATLAB's output to explain it. Keep the full stream in `log_path` and echo
+    its tail into the report on failure, so the report alone is diagnostic.
+    """
     if dry_run:
         print(f"  would run MATLAB: {cmd}")
         return 0
     print(f"  MATLAB: {cmd}")
-    result = subprocess.run([MATLAB_BIN, "-batch", cmd])
+    result = subprocess.run([MATLAB_BIN, "-batch", cmd],
+                            capture_output=True, text=True)
+    output = (result.stdout or "") + (result.stderr or "")
+    if log_path:
+        try:
+            with open(log_path, "w") as f:
+                f.write(output)
+            print(f"   MATLAB log: {log_path}")
+        except OSError as e:
+            print(f"   (could not write MATLAB log {log_path}: {e})")
+    if result.returncode != 0:
+        lines = output.splitlines()
+        # A negative returncode means a signal (e.g. -9 = SIGKILL, the
+        # signature of an OOM kill or an external teardown).
+        signal_note = (f" (killed by signal {-result.returncode})"
+                       if result.returncode < 0 else "")
+        print(f"   MATLAB exited {result.returncode}{signal_note}")
+        if lines:
+            print(f"   last {min(tail_on_error, len(lines))} line(s) of its output:")
+            for line in lines[-tail_on_error:]:
+                print(f"     | {line}")
+        else:
+            print("     | (no output at all — died before writing anything)")
     return result.returncode
 
 
@@ -381,12 +419,45 @@ def run_build(input_dir: str, mode: str, movies: list,
         if start_ind is not None:
             print(f"   build range: start_ind={start_ind}, end_ind={end_ind} "
                   f"({end_ind - start_ind + 1} frames)")
-        cmd = build_dataset_matlab_cmd(sparse_folder_path, movie_dir, mn,
+        # Build into a private temp dir and move the finished h5 into place
+        # only once MATLAB exits 0. The builder appends to extendable datasets
+        # with no atomic commit, so a build that dies partway leaves a
+        # well-formed but truncated h5 that nothing downstream can tell from a
+        # complete one. Staging confines that debris to a directory nobody
+        # looks in (find_movie_h5 globs the movie dir itself, not sub-dirs),
+        # turning "silently truncated dataset" into "no dataset" -- which the
+        # pipeline already handles correctly. It also sidesteps the h5create
+        # collision that makes a rebuild over an existing h5 fail outright,
+        # since MATLAB always writes into a fresh empty directory.
+        build_dir = os.path.join(movie_dir, ".build_tmp")
+        log_path = os.path.join(movie_dir, f"build_mov{mn}.log")
+        if not dry_run:
+            shutil.rmtree(build_dir, ignore_errors=True)
+            os.makedirs(build_dir, exist_ok=True)
+        cmd = build_dataset_matlab_cmd(sparse_folder_path, build_dir, mn,
                                        max_frames, start_ind, end_ind)
         t0 = time.time()
-        rc = matlab_batch(cmd, dry_run)
+        rc = matlab_batch(cmd, dry_run,
+                          log_path=None if dry_run else log_path)
         t1 = time.time()
-        # On success, read the built h5 to capture the post-intersection
+        if rc == 0 and not dry_run:
+            staged = sorted(glob.glob(os.path.join(build_dir,
+                                                   "mov_*_ds_*tc_*tj.h5")))
+            if staged:
+                # os.replace is atomic within one filesystem, and build_dir
+                # lives inside movie_dir, so there is no window in which a
+                # half-copied file is visible under the committed name.
+                final = os.path.join(movie_dir, os.path.basename(staged[0]))
+                os.replace(staged[0], final)
+                print(f"   committed: {final}")
+            else:
+                print("   MATLAB exited 0 but produced no h5; treating as failed")
+                rc = 1
+        if not dry_run:
+            # The staged remains of a failed build are pure waste (hundreds of
+            # MB); the frame counts in the MATLAB log say how far it got.
+            shutil.rmtree(build_dir, ignore_errors=True)
+        # On success, read the committed h5 to capture the post-intersection
         # frame count for the timing ledger.
         n_built = None
         if rc == 0 and not dry_run:
@@ -408,8 +479,10 @@ def run_build(input_dir: str, mode: str, movies: list,
     print(f"\nBuild dataset: {n_ok} ok, {n_fail} failed.")
     if failed:
         print(f"Failed: {', '.join(failed)}")
-        print("  (a failed build can still leave a partial h5 on disk; "
-              "these are excluded from VERIFY and the manifest)")
+        print("  (nothing was committed for these — whatever the builder had "
+              "written was discarded with its staging dir, so they have no "
+              "dataset h5 and are excluded from VERIFY and the manifest)")
+        print("  (see build_mov<N>.log in each movie dir for MATLAB's output)")
 
     # Build the calibration.h5 inside input_dir (matches build_experiment.sh).
     calib_out = os.path.join(input_dir, "calibration.h5")
@@ -418,7 +491,9 @@ def run_build(input_dir: str, mode: str, movies: list,
         print(f"   (removing pre-existing {calib_out} to avoid h5create collision)")
         os.remove(calib_out)
     cmd = build_calibration_matlab_cmd(easywand, calib_out)
-    matlab_batch(cmd, dry_run)
+    matlab_batch(cmd, dry_run,
+                 log_path=None if dry_run else os.path.join(
+                     input_dir, "build_calibration.log"))
 
     return failed_movies
 
