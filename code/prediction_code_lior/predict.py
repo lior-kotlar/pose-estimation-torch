@@ -157,7 +157,7 @@ class PredictingManager:
             # failure does NOT abort the pipeline.
             t_step_end = t_predict_end
             try:
-                plot_wing_angles_one(movie_hdf5_path, units="ms")
+                plot_wing_angles_one(movie_hdf5_path, units="frames")
                 t_step_end = time.time()
                 record_timing(timings_path, movie_label, "plot",
                               t_predict_end, t_step_end)

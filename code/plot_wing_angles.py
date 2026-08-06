@@ -4,6 +4,12 @@ Quick validation plot: wing angles vs time from *_analysis_smoothed.h5 files.
 Plots phi (stroke), theta (deviation), psi (rotation) for left and right wing
 on three stacked subplots. Saves a PNG next to each h5.
 
+The x-axis is trigger-relative (frame 0 == the hardware trigger, earlier frames
+negative), the same numbering as the counter burnt into the prediction mp4 and
+as the `frame` column of the analysis CSV -- so a disturbance spotted here can
+be looked up directly in the video. A second axis on top gives the same instant
+in the other unit (ms when the primary axis is frames, and vice versa).
+
 Usage:
     python code/plot_wing_angles.py <dir>
 
@@ -45,11 +51,41 @@ def find_h5(directory):
     return matches
 
 
+def frame_axis(h5, n_frames):
+    """Trigger-relative frame number of every array index, plus the frame rate.
+
+    create_movie_analysis_h5 stores `frame_index` (and `trigger_offset` /
+    `frame_rate`) next to the per-frame series, using the same convention as the
+    counter drawn in the prediction mp4 and the analysis CSV: frame 0 is the
+    hardware trigger, frames recorded before it are negative. Reusing it is what
+    makes this plot and the video share one x-axis.
+
+    Returns (frames, frame_rate, is_trigger_relative). Movies analysed before
+    those datasets existed fall back to plain box-frame numbering, which does
+    NOT line up with the video counter.
+    """
+    rate = load(h5, "frame_rate")
+    rate = float(rate) if rate is not None else None
+    # Every per-frame series is NaN-padded at the front by `first_analysed_frame`,
+    # so array index i is box frame (i - first_analysed_frame).
+    first = int(load(h5, "first_analysed_frame")) if "first_analysed_frame" in h5 else 0
+
+    frame_index = load(h5, "frame_index")
+    if frame_index is not None and len(frame_index) >= n_frames:
+        return np.asarray(frame_index[:n_frames], dtype=float), rate, True
+
+    trigger_offset = load(h5, "trigger_offset")
+    if trigger_offset is not None:
+        # box frame 0 sits at trigger_offset
+        return int(trigger_offset) + (np.arange(n_frames) - first), rate, True
+
+    return np.arange(n_frames) - first, rate, False
+
+
 def plot_one(h5_path, units):
     out_path = os.path.join(os.path.dirname(h5_path), "wing_angles.png")
 
     with h5py.File(h5_path, "r") as h5:
-        first = int(load(h5, "first_analysed_frame")) if "first_analysed_frame" in h5 else 0
         series = []
         for left_k, right_k, label in ANGLE_PAIRS:
             l = load(h5, left_k)
@@ -59,20 +95,29 @@ def plot_one(h5_path, units):
                 continue
             series.append((label, l, r))
 
-    if not series:
-        print(f"No wing angle datasets found in {h5_path}.", file=sys.stderr)
-        return False
+        if not series:
+            print(f"No wing angle datasets found in {h5_path}.", file=sys.stderr)
+            return False
 
-    n_frames = max(len(l) for _, l, _ in series)
+        n_frames = max(len(l) for _, l, _ in series)
+        frames, rate, trigger_relative = frame_axis(h5, n_frames)
+
+    if rate is None:
+        rate = SAMPLING_RATE
+    if not trigger_relative:
+        print(f"warning: no trigger info in {h5_path}; x-axis is box frames and "
+              f"will NOT match the mp4 counter", file=sys.stderr)
+    relative = " relative to trigger" if trigger_relative else " (box index)"
+
     if units == "s":
-        x = (np.arange(n_frames) + first) / SAMPLING_RATE
-        xlabel = "time (s)"
+        x = frames / rate
+        xlabel = f"time (s){relative}"
     elif units == "ms":
-        x = (np.arange(n_frames) + first) / SAMPLING_RATE * 1000
-        xlabel = "time (ms)"
+        x = frames / rate * 1000
+        xlabel = f"time (ms){relative}"
     else:
-        x = np.arange(n_frames) + first
-        xlabel = "frame"
+        x = frames
+        xlabel = f"frame{relative}"
 
     fig, axes = plt.subplots(len(series), 1, figsize=(14, 3 * len(series)),
                              sharex=True)
@@ -85,6 +130,21 @@ def plot_one(h5_path, units):
         ax.set_ylabel(f"{label}\n(deg)")
         ax.grid(alpha=0.3)
         ax.legend(loc="upper right", fontsize=9)
+        # Mark the trigger itself, the one landmark shared with the video.
+        if trigger_relative and x[0] <= 0 <= x[-1]:
+            ax.axvline(0, color="0.4", linestyle="--", linewidth=0.8)
+
+    # Second scale on top: the same instant in the other unit, so a feature can
+    # be read off either as the mp4's frame counter or as its clock.
+    if units == "frames":
+        secondary = axes[0].secondary_xaxis(
+            "top", functions=(lambda f: f / rate * 1000, lambda t: t * rate / 1000))
+        secondary.set_xlabel(f"time (ms){relative}")
+    else:
+        scale = rate if units == "s" else rate / 1000
+        secondary = axes[0].secondary_xaxis(
+            "top", functions=(lambda t: t * scale, lambda f: f / scale))
+        secondary.set_xlabel(f"frame{relative}")
 
     axes[-1].set_xlabel(xlabel)
     fig.suptitle(os.path.basename(h5_path), fontsize=11)
@@ -101,8 +161,10 @@ def main():
     ap.add_argument("directory",
                     help="Directory containing one *_analysis_smoothed.h5, "
                          "or a directory of such sub-directories")
-    ap.add_argument("--units", choices=["s", "ms", "frames"], default="ms",
-                    help="X-axis units (default: ms)")
+    ap.add_argument("--units", choices=["s", "ms", "frames"], default="frames",
+                    help="Primary x-axis units, always trigger-relative "
+                         "(default: frames, matching the mp4 counter). The "
+                         "other unit is drawn as a second axis on top.")
     args = ap.parse_args()
 
     if not os.path.isdir(args.directory):
