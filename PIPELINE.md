@@ -100,6 +100,7 @@ Useful flags (see `--help` for the full list):
 |------|--------|
 | `--max-frames N` | cap each movie to N frames (quick test runs) |
 | `--prescan-min-intersection N` | min all-4-cam single-fly run to keep a movie (default 500) |
+| `--prescan-min-edge-margin N` | px of clearance the fly must keep from every image border (default 5; 0 disables) |
 | `--prescan-only` | only run the prescan, then stop |
 | `--verify-only` / `--no-verify` | run only / skip the reprojection sanity check |
 | `--verify-threshold PX` | flag movies whose reprojection error exceeds PX (default 15) |
@@ -114,6 +115,15 @@ Outputs of prep:
 - `<input_dir>/pipeline_timings.csv` (per-step timings).
 
 Inspect `process_report.txt` and the prescan/verify output before predicting.
+
+The prescan's `out-of-frame` line is worth reading: it counts, per camera, the
+frames where the fly's blob ran into an image border. Those frames hold a
+truncated fly, the network's 2D detections on them are meaningless, and via
+triangulation they poison the 3D pose for *all four* cameras at once. Because
+a fly usually leaves the field of view and does not come back, this is what
+puts a burst of nonsense at the very end of a movie. The build range is cut
+before the first such frame, so a high count simply means the movie got
+trimmed — not that anything is wrong.
 
 ### 2b. Predict only (movies already built)
 

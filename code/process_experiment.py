@@ -8,7 +8,10 @@ End-to-end wrapper around the pose-estimation data-prep pipeline. Drives:
        project: *.csv, desktop.ini, hull_op/ and Segmentation/ folders.
     2. PRESCAN — scan source *_sparse.mat files; flag movies where the fly is
        tracked by all 4 cams for fewer than --prescan-min-intersection frames
-       (default 500). Flagged movies are dropped from FLIP/BUILD/VERIFY.
+       (default 500). Flagged movies are dropped from FLIP/BUILD/VERIFY. A
+       frame counts as tracked only if every cam sees a single fly that is
+       WHOLLY inside its field of view (--prescan-min-edge-margin), so the
+       build range stops before the fly flies off the edge of any camera.
     3. FLIP  — vertically flip the mirror camera's sparse .mat (e.g. cam1 in
        2023, cam5 in 2022) using `code/flip_sparse_cam_mat.py`'s logic.
     4. BUILD — invoke MATLAB to produce one h5 per movie plus one shared
@@ -58,6 +61,13 @@ Common options:
     --prescan-pixel-threshold N
                             non-zero pixel count per frame above which a cam
                             is considered to "see the fly" (default: 50)
+    --prescan-min-edge-margin N
+                            px of clearance the fly's blob must keep from
+                            every image border (default: 5, 0 disables). A
+                            fly leaving the field of view keeps far more than
+                            --prescan-pixel-threshold pixels on its way out,
+                            so without this the build range runs on into
+                            frames holding half a fly.
     --skip-flip             skip the flip step (e.g. if already flipped)
     --skip-build            skip the h5 build step
     --verify-threshold P    LOO median (px) above which a movie is marked FAIL
@@ -118,7 +128,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flip_sparse_cam_mat import flip_sparse_cam_mat
 from pipeline_timing import record as record_timing
-from scan_sparse_movies import scan_experiment
+from scan_sparse_movies import DEFAULT_MIN_EDGE_MARGIN, scan_experiment
 from verify_calibration import (
     load_calibration,
     collect_measurements,
@@ -138,6 +148,19 @@ DATASET_SCRIPT = os.path.join(REPO_ROOT, "matlab", "CreateDatasetHDF5_from_list_
 CALIB_SCRIPT = os.path.join(REPO_ROOT, "matlab", "run after experiment",
                             "create_camera_calibration_h5.m")
 MATLAB_BIN = os.environ.get("MATLAB_BIN", "matlab")
+
+# Returned by matlab_batch when MATLAB had to be killed for not exiting. 124 is
+# the conventional exit code for a timeout (coreutils `timeout` uses it) and is
+# distinct from anything MATLAB itself returns.
+MATLAB_TIMEOUT_RC = 124
+# Budget for one movie's build. Observed throughput is ~10 frames/s, so the
+# slack below is ~40x the expected time -- generous enough that a merely slow
+# node is never killed, tight enough that a hang does not eat the whole
+# walltime. The floor covers short movies where the fixed startup dominates.
+BUILD_SECONDS_PER_FRAME = 0.1
+BUILD_TIMEOUT_SLACK = 4.0
+BUILD_TIMEOUT_FLOOR = 1200          # 20 min
+BUILD_TIMEOUT_UNKNOWN = 4 * 3600    # when the frame count is not known upfront
 
 
 # ---------------------------------------------------------------------------
@@ -364,8 +387,16 @@ def build_calibration_matlab_cmd(easywand_path: str, save_path: str) -> str:
             f"run('{CALIB_SCRIPT}')")
 
 
+def _as_text(stream) -> str:
+    """TimeoutExpired can carry bytes even when the run was text=True."""
+    if stream is None:
+        return ""
+    return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+
+
 def matlab_batch(cmd: str, dry_run: bool, log_path: "str | None" = None,
-                 tail_on_error: int = 40) -> int:
+                 tail_on_error: int = 40,
+                 timeout: "float | None" = None) -> int:
     """Run `matlab -batch <cmd>`, capturing its output instead of losing it.
 
     subprocess hands the child the inherited OS fd 1, while the report only
@@ -374,14 +405,28 @@ def matlab_batch(cmd: str, dry_run: bool, log_path: "str | None" = None,
     archive was recorded as a bare "Failed: mov<N>" with not one line of
     MATLAB's output to explain it. Keep the full stream in `log_path` and echo
     its tail into the report on failure, so the report alone is diagnostic.
+
+    `timeout` guards against a MATLAB that never exits. `-batch` is supposed to
+    quit when the command returns, but it has been observed finishing its work
+    and then sitting idle forever (see build_one_movie). With no timeout the
+    parent blocks on it for the whole SLURM walltime and every remaining movie
+    in the run is silently starved. Returns MATLAB_TIMEOUT_RC in that case.
     """
     if dry_run:
         print(f"  would run MATLAB: {cmd}")
         return 0
-    print(f"  MATLAB: {cmd}")
-    result = subprocess.run([MATLAB_BIN, "-batch", cmd],
-                            capture_output=True, text=True)
-    output = (result.stdout or "") + (result.stderr or "")
+    print(f"  MATLAB: {cmd}", flush=True)
+    try:
+        result = subprocess.run([MATLAB_BIN, "-batch", cmd],
+                                capture_output=True, text=True, timeout=timeout)
+        returncode, output = result.returncode, (_as_text(result.stdout)
+                                                 + _as_text(result.stderr))
+    except subprocess.TimeoutExpired as e:
+        # subprocess.run has already killed the child by the time this lands.
+        returncode = MATLAB_TIMEOUT_RC
+        output = _as_text(e.stdout) + _as_text(e.stderr)
+        print(f"   MATLAB still alive after {timeout:.0f}s and was killed; "
+              f"treating as a hang, not a build error")
     if log_path:
         try:
             with open(log_path, "w") as f:
@@ -389,20 +434,24 @@ def matlab_batch(cmd: str, dry_run: bool, log_path: "str | None" = None,
             print(f"   MATLAB log: {log_path}")
         except OSError as e:
             print(f"   (could not write MATLAB log {log_path}: {e})")
-    if result.returncode != 0:
+    if returncode != 0:
         lines = output.splitlines()
-        # A negative returncode means a signal (e.g. -9 = SIGKILL, the
-        # signature of an OOM kill or an external teardown).
-        signal_note = (f" (killed by signal {-result.returncode})"
-                       if result.returncode < 0 else "")
-        print(f"   MATLAB exited {result.returncode}{signal_note}")
+        if returncode == MATLAB_TIMEOUT_RC:
+            note = f"   MATLAB timed out after {timeout:.0f}s"
+        else:
+            # A negative returncode means a signal (e.g. -9 = SIGKILL, the
+            # signature of an OOM kill or an external teardown).
+            signal_note = (f" (killed by signal {-returncode})"
+                           if returncode < 0 else "")
+            note = f"   MATLAB exited {returncode}{signal_note}"
+        print(note)
         if lines:
             print(f"   last {min(tail_on_error, len(lines))} line(s) of its output:")
             for line in lines[-tail_on_error:]:
                 print(f"     | {line}")
         else:
             print("     | (no output at all — died before writing anything)")
-    return result.returncode
+    return returncode
 
 
 def build_one_movie(sparse_folder_path: str, movie_dir: str, movie_num: int,
@@ -433,7 +482,38 @@ def build_one_movie(sparse_folder_path: str, movie_dir: str, movie_num: int,
         os.makedirs(build_dir, exist_ok=True)
     cmd = build_dataset_matlab_cmd(sparse_folder_path, build_dir, movie_num,
                                    max_frames, start_ind, end_ind)
-    rc = matlab_batch(cmd, dry_run, log_path=None if dry_run else log_path)
+    if start_ind is not None and end_ind is not None:
+        n_planned = end_ind - start_ind + 1
+    else:
+        n_planned = max_frames
+    timeout = (max(BUILD_TIMEOUT_FLOOR,
+                   n_planned * BUILD_SECONDS_PER_FRAME * BUILD_TIMEOUT_SLACK)
+               if n_planned else BUILD_TIMEOUT_UNKNOWN)
+    rc = matlab_batch(cmd, dry_run, log_path=None if dry_run else log_path,
+                      timeout=timeout)
+    if rc == MATLAB_TIMEOUT_RC and not dry_run:
+        # A hang is not the same as a failed build. MATLAB has been seen to
+        # write a complete, verifiable dataset and only then fail to exit
+        # (100ms mov26: h5 finished at 13:06, the process still alive and
+        # burning no CPU 1h45m later). Throwing that away would waste a good
+        # build and, worse, leave the movie with no h5 at all now that the old
+        # one is archived. Commit it if -- and only if -- it is complete.
+        staged = sorted(glob.glob(os.path.join(build_dir,
+                                               "mov_*_ds_*tc_*tj.h5")))
+        if not staged:
+            print("   hung before writing any h5; treating as failed")
+        else:
+            try:
+                with h5py.File(staged[0], "r") as f:
+                    partial = check_build_complete(f)
+            except Exception as e:                      # unreadable == unusable
+                partial = {"error": str(e)}
+            if partial is None:
+                print("   hung AFTER writing a complete dataset; committing it")
+                rc = 0
+            else:
+                print(f"   hung with an incomplete dataset ({partial}); "
+                      f"discarding")
     if rc == 0 and not dry_run:
         staged = sorted(glob.glob(os.path.join(build_dir,
                                                "mov_*_ds_*tc_*tj.h5")))
@@ -540,18 +620,25 @@ DEFAULT_MIN_INTERSECTION = 500
 def run_prescan(input_dir: str, movies: list,
                 min_intersection: int, pixel_threshold: int,
                 blob_ratio: float, blob_distance: float,
-                dry_run: bool) -> tuple:
+                dry_run: bool,
+                min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN) -> tuple:
     """Returns (filtered_movies, movie_ranges):
       - filtered_movies: list of (movie_dir, movie_num) — only OK movies
       - movie_ranges:    dict {movie_dir: (start_ind, end_ind)} in MATLAB's
                          1-based inclusive convention, clamped to leave
                          `MATLAB_TIME_JUMP_MARGIN` frames of padding so the
                          builder's time-channel windows stay in range.
-    BAD movies are reported to stdout and dropped from subsequent steps."""
+    BAD movies are reported to stdout and dropped from subsequent steps.
+
+    The range is also what trims a movie before the fly flies out of the
+    field of view: frames where any cam sees a blob running into an image
+    border fail the scan's in-frame test, so the longest contiguous run ends
+    there and BUILD never reaches the truncated-fly tail."""
     print(f"\n===== PRESCAN =====")
     results = scan_experiment(input_dir, min_intersection,
                               pixel_threshold, blob_ratio, blob_distance,
-                              print_results=True)
+                              print_results=True,
+                              min_edge_margin=min_edge_margin)
     ok_dirs = {r["movie_dir"] for r in results if r["verdict"] == "OK"}
     n_before = len(movies)
     filtered = [(d, n) for d, n in movies if d in ok_dirs]
@@ -878,6 +965,13 @@ def main() -> None:
                    help="prescan: a 2nd blob counts as a separate fly only if "
                         "its centroid is at least this many px from the "
                         "largest blob's centroid (default: 100)")
+    p.add_argument("--prescan-min-edge-margin", type=float,
+                   default=DEFAULT_MIN_EDGE_MARGIN,
+                   help="prescan: the fly's blob must stay this many px clear "
+                        "of every image border. A frame where it doesn't is "
+                        "one where the fly is partly outside the field of "
+                        "view, so the build range is cut before it (default: "
+                        f"{DEFAULT_MIN_EDGE_MARGIN}, 0 disables)")
     p.add_argument("--skip-flip", action="store_true")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--no-verify", action="store_true",
@@ -949,6 +1043,7 @@ def main() -> None:
                     args.prescan_blob_ratio,
                     args.prescan_blob_distance,
                     args.dry_run,
+                    min_edge_margin=args.prescan_min_edge_margin,
                 )
                 if not movies:
                     print("\nAll movies flagged BAD by prescan; nothing to do.")

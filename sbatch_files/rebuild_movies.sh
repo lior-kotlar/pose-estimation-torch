@@ -24,18 +24,22 @@
 # No GPU: this is MATLAB I/O, not inference. ~10 frames/s per movie.
 #
 # usage:
-#   sbatch sbatch_files/rebuild_movies.sh <rebuild_script.py>
+#   sbatch sbatch_files/rebuild_movies.sh <rebuild_script.py> [args...]
 #
-# <rebuild_script.py> holds the movie list with per-movie build ranges.
+# <rebuild_script.py> either holds the movie list itself (the original
+# rebuild_truncated_movies form, no args) or takes a manifest, as
+# code/rebuild_edge_cut_movies.py does. Anything after the script path is
+# forwarded to it untouched.
 
 set -eo pipefail
 REBUILD_SCRIPT="${1:?rebuild script required (arg 1)}"
+shift
 
 cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch
 source .env/bin/activate
 
-echo "script: $REBUILD_SCRIPT"
+echo "script: $REBUILD_SCRIPT $*"
 echo "host  : $(hostname) | cpus: ${SLURM_CPUS_ON_NODE:-?} | job: ${SLURM_JOB_ID:-?}"
 df -h /cs/labs/tsevi | tail -1
 
-python -u "$REBUILD_SCRIPT"
+python -u "$REBUILD_SCRIPT" "$@"
