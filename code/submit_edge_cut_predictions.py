@@ -30,6 +30,7 @@ usage:
 """
 
 import argparse
+import datetime
 import os
 import subprocess
 import sys
@@ -44,6 +45,8 @@ from process_experiment import (check_build_complete, find_calibration_h5,  # no
                                 find_movie_h5, verify_one_movie)
 
 LAUNCHER = "sbatch_files/predict_array.sh"
+JOB_WRAPPER = "sbatch_files/submit_predictions.sh"
+CHECKER = "code/check_run_complete.py"
 MANIFEST_DIR = "manifests"
 
 
@@ -123,25 +126,45 @@ def main():
             print(f"  {d}: {why}")
 
     os.makedirs(MANIFEST_DIR, exist_ok=True)
+    # Timestamped, never reused. The per-run manifest is the only record of what
+    # a given array was asked to produce, and re-submitting (a retry, a second
+    # batch of movies) used to overwrite it -- after which a completeness check
+    # against it would compare the new array's output to the new array's list
+    # and always pass, which is precisely when the check is needed.
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     for run, dirs in by_run.items():
-        mpath = os.path.join(MANIFEST_DIR, f"edge_cut_{run}.txt")
+        mpath = os.path.join(MANIFEST_DIR, f"edge_cut_{run}_{stamp}.txt")
         if not args.dry_run:
             with open(mpath, "w") as f:
                 for d in dirs:
                     f.write(d + "\n")
         n = len(dirs)
         cap = min(args.concurrency, n)
-        cmd = ["sbatch", f"--array=0-{n - 1}%{cap}", "-J", run,
+        cmd = ["sbatch", "--parsable", f"--array=0-{n - 1}%{cap}", "-J", run,
                LAUNCHER, mpath, args.config]
         print(f"\n{run}: {n} movie(s) -> {mpath}")
         print(f"  {' '.join(cmd)}")
         if args.dry_run:
+            print(f"  would chain: {CHECKER} {mpath} {run}")
             continue
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             print(f"  sbatch FAILED: {r.stderr.strip()}")
             continue
-        print(f"  {r.stdout.strip()}")
+        array_id = r.stdout.strip().split(";")[0]
+        print(f"  submitted array {array_id}")
+
+        # Chained on afterany, not afterok: an array where some tasks failed is
+        # exactly the case worth reconciling, and afterok would skip it.
+        check = ["sbatch", "--parsable", f"--dependency=afterany:{array_id}",
+                 "-J", f"check_{run}", JOB_WRAPPER, CHECKER, mpath, run]
+        rc = subprocess.run(check, capture_output=True, text=True)
+        if rc.returncode != 0:
+            print(f"  completeness check NOT chained: {rc.stderr.strip()}")
+            print(f"  run it by hand: .env/bin/python {CHECKER} {mpath} {run}")
+        else:
+            print(f"  chained completeness check {rc.stdout.strip()} "
+                  f"(emails on FAIL if anything is missing)")
 
     print("\noutput -> predict_output/debug_outputs/<run name>/<movie h5 "
           "basename>/ ; every analysis h5 in one experiment will report the "

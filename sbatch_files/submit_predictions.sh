@@ -12,16 +12,19 @@
 # terminal by the time a multi-hour rebuild has chained into it.
 #SBATCH --mail-type=FAIL,END
 
-# Run a prediction-submitting script as a SLURM job, so it can be chained off a
-# build/rebuild with --dependency and does not depend on an interactive
-# allocation staying alive for the hours a rebuild takes.
+# Run a short CPU-side pipeline step as a SLURM job, so it can be chained with
+# --dependency and does not depend on an interactive allocation staying alive
+# for the hours the step it follows may take. Two users so far:
 #
-# It only pre-flights movies and calls sbatch, so it is small and short; the GPU
-# work is in the array it submits, not here.
+#   code/submit_edge_cut_predictions.py  chained off a rebuild, queues the array
+#   code/check_run_complete.py           chained off the array, reconciles it
+#
+# Both only read h5 headers and call sbatch, so they are small and short; the
+# GPU work is in the array, not here.
 #
 # usage:
-#   sbatch --dependency=afterany:<rebuild jobid> \
-#          sbatch_files/submit_predictions.sh <submit_script.py> [args...]
+#   sbatch --dependency=afterany:<jobid> \
+#          sbatch_files/submit_predictions.sh <script.py> [args...]
 #
 # afterany rather than afterok on purpose: the rebuild script exits non-zero if
 # ANY single movie failed to build, and that must not block predictions for the
