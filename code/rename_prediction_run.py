@@ -76,6 +76,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", help="existing run directory to rename")
     ap.add_argument("new_name", help="new run directory basename")
+    ap.add_argument("--merge-into", action="store_true",
+                    help="allow <new_name> to already exist, and move this "
+                         "run's movie dirs into it instead of renaming. Use "
+                         "when one experiment was predicted under several run "
+                         "names (e.g. per input batch) and the consumer needs "
+                         "them to share one dirname(dir).")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -87,8 +93,21 @@ def main():
     new_dir = os.path.join(parent, args.new_name)
     if old_name == args.new_name:
         sys.exit("old and new names are the same")
-    if os.path.exists(new_dir):
-        sys.exit(f"target already exists: {new_dir}")
+    if os.path.exists(new_dir) and not args.merge_into:
+        sys.exit(f"target already exists: {new_dir}\n"
+                 f"(pass --merge-into to fold this run into it)")
+    if args.merge_into:
+        if not os.path.isdir(new_dir):
+            sys.exit(f"--merge-into given but target is not a directory: {new_dir}")
+        # A movie dir carries the movie number and frame range, so a clash means
+        # two runs predicted the same movie -- exactly the "source claimed
+        # twice" state the consumer refuses. Refuse here rather than let one
+        # silently overwrite the other.
+        clashes = sorted(set(os.listdir(run_dir)) & set(os.listdir(new_dir)))
+        if clashes:
+            sys.exit(f"cannot merge: {len(clashes)} name(s) exist in both "
+                     f"{run_dir} and {new_dir}:\n  "
+                     + "\n  ".join(clashes[:10]))
 
     # The substring rewritten inside each `dir` value. Anchored on the parent
     # so a run whose name happens to occur elsewhere in the path is untouched.
@@ -129,19 +148,29 @@ def main():
         print(f"\n   {len(missing)} file(s) with no 'dir' dataset")
 
     if args.dry_run:
-        print(f"\n[dry run] would patch {len(plan)} file(s), then rename the "
-              f"directory")
+        print(f"\n[dry run] would patch {len(plan)} file(s), then "
+              + (f"move {len(os.listdir(run_dir))} movie dir(s) into {new_dir}"
+                 if args.merge_into else "rename the directory"))
         return 0
 
-    # Patch first, rename second: every path printed above is still valid while
+    # Patch first, move second: every path printed above is still valid while
     # the patching runs, so an interruption leaves a directory whose name and
     # contents disagree only in the direction that is trivially re-runnable.
     for i, (p, _, new) in enumerate(plan, 1):
         patch_dir_field(p, new)
         if i % 10 == 0 or i == len(plan):
             print(f"   patched {i}/{len(plan)}")
-    os.rename(run_dir, new_dir)
-    print(f"\nrenamed -> {new_dir}")
+    if args.merge_into:
+        moved = 0
+        for name in sorted(os.listdir(run_dir)):
+            os.rename(os.path.join(run_dir, name), os.path.join(new_dir, name))
+            moved += 1
+        os.rmdir(run_dir)          # empty by construction; fails loudly if not
+        print(f"\nmerged {moved} movie dir(s) into {new_dir}; "
+              f"removed empty {run_dir}")
+    else:
+        os.rename(run_dir, new_dir)
+        print(f"\nrenamed -> {new_dir}")
 
     bad = []
     for p, _, expected in plan:
