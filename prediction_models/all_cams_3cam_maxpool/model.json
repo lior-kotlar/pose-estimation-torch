@@ -1,8 +1,8 @@
 {
     "model type": "PER_WING_ALL_CAMS",
-    "num cameras": 4,
+    "num cameras": 3,
     "enabled": true,
     "predict again 3D consistency": 0,
     "use reprojected masks": 0,
-    "source": "train_output/debug_outputs/ALL_CAMS_PER_WING_DIL3_Jul 05_01"
+    "source": "train_output/debug_outputs/ALL_CAMS_PER_WING_3CAM_MAXPOOL_Aug 20"
 }

@@ -11,7 +11,12 @@ from scipy.io import savemat
 from constants import MODEL_PER_CAM_PER_WING, MODEL_PER_CAM_PER_WING_UNET, ALL_CAMS_PER_WING
 
 class ModelCallbacks:
-    def __init__(self, model, base_directory, viz_sample_list, validation, training=None):
+    def __init__(self, model, base_directory, viz_sample_list, validation,
+                 training=None, num_cams=1):
+        # How many camera streams a sample carries. The multi-view callbacks
+        # regroup channels per camera, so a hard-coded 4 breaks on the
+        # 3-camera rig; the Trainer knows the real count.
+        self.num_cams = num_cams
         self.validation = validation
         # (train_box, train_confmap) so the L2 callback can also report the
         # keypoint error on the training set -> a train/val L2 history plot.
@@ -51,9 +56,11 @@ class ModelCallbacks:
         callbacks.append(self.TrainingLogger(log_interval=10))
         callbacks.append(self.EarlyStopping(patience=5))
         callbacks.append(self.L2LossCallback(self.validation, self.base_directory, model, training_data=self.training))
-        callbacks.append(self.L2PerPointLossCallback(self.validation, self.base_directory, model))
+        callbacks.append(self.L2PerPointLossCallback(self.validation, self.base_directory, model,
+                                                    num_cams=self.num_cams))
         callbacks.append(self.LossHistory(self.base_directory))
-        callbacks.append(self.VizPredCallback(self.viz_sample_list, self.base_directory, model))
+        callbacks.append(self.VizPredCallback(self.viz_sample_list, self.base_directory, model,
+                                              num_cams=self.num_cams))
         return callbacks
     
     def on_train_start(self):
@@ -122,10 +129,11 @@ class ModelCallbacks:
 
     class L2PerPointLossCallback():
 
-        def __init__(self, validation_data, base_run_directory, model):
+        def __init__(self, validation_data, base_run_directory, model, num_cams=1):
             self.box, self.confmaps = validation_data
             self.base_run_directory = base_run_directory
             self.model = model
+            self.num_cams = num_cams
 
         def on_epoch_end(self, epoch, n_bins=20,  logs=None):
 
@@ -149,11 +157,15 @@ class ModelCallbacks:
             # shape: (B, C) → then transpose to (C, B) for plotting per joint
             l2_per_point_dists = np.linalg.norm(pred_peaks - gt_peaks, axis=-1).T  
 
-            # Handle case when joints are grouped (e.g. 4 cameras)
+            # A multi-view model emits one channel block per camera, so pool
+            # the cameras back together to get one histogram per JOINT rather
+            # than one per (camera, joint). Split by the real camera count:
+            # np.array_split(x, 4) on a 3-camera model's 30 channels yields
+            # uneven 8/8/7/7 blocks that cannot be concatenated.
             num_joints = gt_peaks.shape[1]
-            if num_joints > 20:
-                cam1, cam2, cam3, cam4 = np.array_split(l2_per_point_dists, 4)
-                l2_per_point_dists = np.concatenate((cam1, cam2, cam3, cam4), axis=1)
+            if self.num_cams > 1 and num_joints % self.num_cams == 0:
+                per_cam = np.array_split(l2_per_point_dists, self.num_cams)
+                l2_per_point_dists = np.concatenate(per_cam, axis=1)
 
             num_points = l2_per_point_dists.shape[0]
 
@@ -348,10 +360,11 @@ class ModelCallbacks:
             self.plot_l2_history(self.history, save_path=self.l2_png_file_path)
 
     class VizPredCallback():
-        def __init__(self, sample_confmaps_list, save_directory, model):
+        def __init__(self, sample_confmaps_list, save_directory, model, num_cams=1):
             self.samples, self.confmaps = sample_confmaps_list
             self.save_directory = os.path.join(save_directory, VIZ_OUTPUT_DIRECTORY_NAME)
             self.model = model
+            self.num_cams = num_cams
             self.create_sample_directories()
 
         def create_sample_directories(self):
@@ -372,12 +385,17 @@ class ModelCallbacks:
                         save_directory=sample_save_dir,
                     )
                 elif model_type == ALL_CAMS_PER_WING:
+                    # Points per camera follows from the real camera count; a
+                    # hard-coded 4 slices a camera the 3-camera model does not
+                    # have.
+                    num_cameras = max(self.num_cams, 1)
+                    num_points = confmap.shape[0] // num_cameras
                     show_pred_multiple_cameras(
                         self.model,
                         sample,
                         confmap,
                         epoch_num=epoch,
                         save_directory=sample_save_dir,
-                        num_cameras=4,
-                        num_points=10
+                        num_cameras=num_cameras,
+                        num_points=num_points
                     )

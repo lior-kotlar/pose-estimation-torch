@@ -71,7 +71,8 @@ class Trainer:
         self.number_of_input_channels = self.box.shape[C]
         self.num_output_channels = self.confmaps.shape[C]
         self.network = Network.Network(self.general_configuration, image_size=self.img_size,
-                                       number_of_output_channels=self.num_output_channels)
+                                       number_of_output_channels=self.num_output_channels,
+                                       num_cams=self.preprocessor.cams_per_sample)
         self.model = self.network.get_model()
         self.model.to(self.device)
         self.model_input_shape = (1, self.number_of_input_channels, self.img_size[1], self.img_size[2])
@@ -113,7 +114,8 @@ class Trainer:
                                         base_directory=base_run_directory,
                                         viz_sample_list=viz_sample_list,
                                         validation=(self.val_box, self.val_confmap),
-                                        training=(self.train_box, self.train_confmap)
+                                        training=(self.train_box, self.train_confmap),
+                                        num_cams=self.preprocessor.cams_per_sample
                                         )
     
     def ensure_resume_compatibility(self):
@@ -133,6 +135,10 @@ class Trainer:
             raise ValueError("Number of encoder-decoder blocks in the resumed configuration does not match the original configuration.")
         if original_configuration.loss_function_as_string != self.general_configuration.loss_function_as_string:
             raise ValueError("Loss function in the resumed configuration does not match the original configuration.")
+        if original_configuration.get_num_cameras() != self.general_configuration.get_num_cameras():
+            raise ValueError("Number of cameras in the resumed configuration does not match the original configuration.")
+        if original_configuration.get_camera_fusion() != self.general_configuration.get_camera_fusion():
+            raise ValueError("Camera fusion in the resumed configuration does not match the original configuration.")
         return
 
     def create_visualization_dataset(self):
@@ -307,6 +313,45 @@ class Trainer:
         minutes, seconds = divmod(rem, 60)
         print(f'Training completed in {int(hours):0>2}:{int(minutes):0>2}:{int(seconds):0>2} (hh:mm:ss)', flush=True)
     
+    def split_indices(self, shuffle=True):
+        """Train/val sample indices, split by SOURCE LABELLED FRAME.
+
+        Preprocessing turns one labelled frame into several samples: its left
+        and right wing, and (for multi-view models trained on fewer cameras
+        than the dataset has) one per camera subset. Those samples share the
+        same underlying images, so splitting them independently -- which is
+        what shuffling raw sample indices does -- puts near-duplicates of
+        training data in the validation set. That makes the validation loss
+        optimistic and corrupts best-model selection.
+
+        Falls back to per-sample splitting when the preprocessor did not
+        report groups, which keeps any model type it does not cover working.
+        """
+        groups = self.preprocessor.sample_group_ids
+        n_samples = len(self.box)
+        if groups is None or len(groups) != n_samples:
+            if groups is not None:
+                print(f"[Trainer] group ids ({len(groups)}) do not match "
+                      f"{n_samples} samples; splitting per sample")
+            all_idx = np.arange(n_samples)
+            if shuffle:
+                np.random.shuffle(all_idx)
+            val_size = int(np.round(n_samples * self.val_fraction))
+            return all_idx[val_size:], all_idx[:val_size]
+
+        unique_groups = np.unique(groups)
+        if shuffle:
+            np.random.shuffle(unique_groups)
+        n_val_groups = int(np.round(len(unique_groups) * self.val_fraction))
+        val_groups = set(unique_groups[:n_val_groups].tolist())
+        is_val = np.array([g in val_groups for g in groups])
+        val_idx = np.flatnonzero(is_val)
+        train_idx = np.flatnonzero(~is_val)
+        print(f"[Trainer] split by source frame: "
+              f"{len(unique_groups) - n_val_groups} train / {n_val_groups} val "
+              f"frames -> {len(train_idx)} / {len(val_idx)} samples")
+        return train_idx, val_idx
+
     def train_val_split_resume(self, shuffle=True):
         """ 
         Splits datasets into train and validation sets. 
@@ -336,18 +381,8 @@ class Trainer:
 
         # --- PATH B: FRESH TRAINING ---
         else:
-            # Standard calculation of size
-            val_size = int(np.round(len(self.box) * self.val_fraction))
-            all_idx = np.arange(len(self.box))
-            
-            # Shuffle if requested
-            if shuffle:
-                np.random.shuffle(all_idx)
-            
-            # Slice the indices
-            val_idx = all_idx[:val_size]
-            train_idx = all_idx[val_size:]
-            
+            train_idx, val_idx = self.split_indices(shuffle)
+
             # SAVE THE SPLIT
             save_path = os.path.join(self.base_run_directory, split_filename)
             np.savez(save_path, train_idx=train_idx, val_idx=val_idx)

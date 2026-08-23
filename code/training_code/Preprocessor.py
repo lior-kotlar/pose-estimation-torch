@@ -1,3 +1,5 @@
+import itertools
+
 import numpy as np
 from constants import *
 from utils import TrainConfig, tf_format_find_peaks
@@ -26,6 +28,29 @@ class Preprocessor:
         self.num_frames = self.box.shape[0]
         self.num_cams = self.box.shape[1]
         self.image_size = self.box.shape[2]
+        # How many cameras one multi-view sample carries. Defaults to every
+        # camera in the dataset (the original behavior). Configuring fewer
+        # turns each labelled frame into one sample per camera SUBSET, which
+        # is how a 3-camera model is trained from the 4-camera labelled set:
+        # it multiplies the data AND forces the model across several camera
+        # geometries instead of memorising one.
+        self.cams_per_sample = general_configuration.get_num_cameras() or self.num_cams
+        if not 1 <= self.cams_per_sample <= self.num_cams:
+            raise ValueError(
+                f"'number of cameras' = {self.cams_per_sample} but the dataset "
+                f"has {self.num_cams}")
+        self.camera_subsets = list(
+            itertools.combinations(range(self.num_cams), self.cams_per_sample))
+        if self.cams_per_sample != self.num_cams:
+            print(f"{self.cams_per_sample} of {self.num_cams} cameras per "
+                  f"sample -> {len(self.camera_subsets)} subsets per frame: "
+                  f"{self.camera_subsets}")
+        # Which SOURCE labelled frame each output sample came from. The
+        # train/val split groups on this so the several samples derived from
+        # one frame (its wings, and its camera subsets) cannot straddle the
+        # split -- they share the same underlying images, so splitting them
+        # leaks the validation set into training.
+        self.sample_group_ids = None
         self.preprocess_function = self.get_preprocess_function()
 
         # get useful indexes
@@ -149,16 +174,13 @@ class Preprocessor:
         # self.box = self.box[..., :3]
         self.box = np.concatenate((self.box[0, ...],
                                    self.box[1, ...]))
-        self.box = np.concatenate((self.box[:, 0, ...],
-                                   self.box[:, 1, ...],
-                                   self.box[:, 2, ...],
-                                   self.box[:, 3, ...]), axis=-1)
         self.confmaps = np.concatenate((self.confmaps[0, ...],
                                         self.confmaps[1, ...]))
-        self.confmaps = np.concatenate((self.confmaps[:, 0, ...],
-                                        self.confmaps[:, 1, ...],
-                                        self.confmaps[:, 2, ...],
-                                        self.confmaps[:, 3, ...]), axis=-1)
+        n_cams = self.box.shape[1]
+        self.box = np.concatenate([self.box[:, c, ...]
+                                   for c in range(n_cams)], axis=-1)
+        self.confmaps = np.concatenate([self.confmaps[:, c, ...]
+                                        for c in range(n_cams)], axis=-1)
         self.num_samples = self.box.shape[0]
 
     def preprocess_all_points_all_cams(self):
@@ -172,23 +194,22 @@ class Preprocessor:
         wings_confmaps = self.confmaps[..., :-2]
         self.box, wings_confmaps = self.split_per_wing(self.box, wings_confmaps, ALL_POINTS_MODEL, RANDOM_TRAIN_SET)
         self.confmaps = np.concatenate((wings_confmaps, head_tail_confmaps), axis=-1)
-        cam_boxes = []
-        cam_confmaps = []
-        for cam in range(self.num_cams):
-            box_cam_i = self.box[:, cam, :, :, :]
-            cam_confmaps_i = self.confmaps[:, cam, :, :, :]
-            cam_boxes.append(box_cam_i)
-            cam_confmaps.append(cam_confmaps_i)
-        self.box = np.concatenate(cam_boxes, axis=-1)
-        self.confmaps = np.concatenate(cam_confmaps, axis=-1)
+        group_ids = np.arange(self.box.shape[0])
+        self.box, self.confmaps, self.sample_group_ids = \
+            self.expand_camera_subsets(self.box, self.confmaps, group_ids)
         self.adjust_masks_size_ALL_CAMS_ALL_POINTS()
         self.box = self.box.transpose(0, 3, 1, 2)
         self.confmaps = self.confmaps.transpose(0, 3, 1, 2)
         self.num_samples = self.box.shape[0]
 
     def adjust_masks_size_ALL_CAMS_ALL_POINTS(self):
-        masks_inds = [3, 4, 8, 9, 13, 14, 18, 19]
-        for frame in range(self.num_frames):
+        # Channels are per camera: num_time_channels images then 2 wing masks.
+        # Derived rather than the old literal [3,4,8,9,13,14,18,19], which
+        # assumed exactly 4 cameras of 5 channels.
+        n_ch = self.num_time_channels + 2
+        masks_inds = [c * n_ch + self.num_time_channels + w
+                      for c in range(self.cams_per_sample) for w in range(2)]
+        for frame in range(self.box.shape[0]):
             for mask_ind in masks_inds:
                 mask = self.box[frame, ..., mask_ind]
                 mask = self.adjust_mask(mask)
@@ -211,33 +232,53 @@ class Preprocessor:
         right_confmaps = np.concatenate((right_confmaps, head_tail_confmaps), axis=-1)
         self.confmaps = np.concatenate((left_confmaps, right_confmaps), axis=0)
         self.adjust_masks_size_per_wing()
-        cam_boxes = []
-        cam_confmaps = []
-        for cam in range(num_cams):
-            box_cam_i = self.box[:, cam, :, :, :]
-            cam_confmaps_i = self.confmaps[:, cam, :, :, :]
-            cam_boxes.append(box_cam_i)
-            cam_confmaps.append(cam_confmaps_i)
-        self.box = np.concatenate(cam_boxes, axis=-1)
-        self.confmaps = np.concatenate(cam_confmaps, axis=-1)
+        # split_per_wing stacked left- and right-wing samples on the batch
+        # axis, so a sample's source frame is its index modulo the frame count.
+        group_ids = np.tile(np.arange(num_of_frames), 2)
+        self.box, self.confmaps, self.sample_group_ids = \
+            self.expand_camera_subsets(self.box, self.confmaps, group_ids)
         self.box = self.box.transpose(0, 3, 1, 2)
         self.confmaps = self.confmaps.transpose(0, 3, 1, 2)
         self.num_samples = self.box.shape[0]
     
+    def expand_camera_subsets(self, box, confmaps, group_ids):
+        """Turn per-camera arrays into one sample per camera SUBSET.
+
+        In:  box (B, num_cams, H, W, C), confmaps (B, num_cams, H, W, P)
+        Out: box (B * n_subsets, H, W, C * cams_per_sample),
+             confmaps likewise, with each subset's cameras concatenated on the
+             channel axis in ascending camera order -- the same order a real
+             rig produces (cameras sorted by file name), which is why subsets
+             and not permutations.
+
+        With cams_per_sample == num_cams there is exactly one subset and this
+        reduces to the original single concatenation, byte for byte."""
+        box_subsets, cm_subsets, ids = [], [], []
+        for sub in self.camera_subsets:
+            box_subsets.append(
+                np.concatenate([box[:, c, ...] for c in sub], axis=-1))
+            cm_subsets.append(
+                np.concatenate([confmaps[:, c, ...] for c in sub], axis=-1))
+            ids.append(group_ids)
+        return (np.concatenate(box_subsets, axis=0),
+                np.concatenate(cm_subsets, axis=0),
+                np.concatenate(ids, axis=0))
+
     def preprocess_HEAD_TAIL_PER_CAM(self):
         self.box = self.box[..., :3]
         self.box = np.concatenate((self.box[0, ...],
                                    self.box[1, ...]))
-        self.box = np.concatenate((self.box[:, 0, ...],
-                                   self.box[:, 1, ...],
-                                   self.box[:, 2, ...],
-                                   self.box[:, 3, ...]), axis=0)
         self.confmaps = np.concatenate((self.confmaps[0, ...],
                                         self.confmaps[1, ...]))
-        self.confmaps = np.concatenate((self.confmaps[:, 0, ...],
-                                        self.confmaps[:, 1, ...],
-                                        self.confmaps[:, 2, ...],
-                                        self.confmaps[:, 3, ...]), axis=0)
+        n_cams = self.box.shape[1]
+        n_per_cam = self.box.shape[0]
+        self.box = np.concatenate([self.box[:, c, ...]
+                                   for c in range(n_cams)], axis=0)
+        self.confmaps = np.concatenate([self.confmaps[:, c, ...]
+                                        for c in range(n_cams)], axis=0)
+        # cameras are stacked on the batch axis, so sample i came from the
+        # same source row as sample i % n_per_cam
+        self.sample_group_ids = np.tile(np.arange(n_per_cam), n_cams)
         self.num_samples = self.box.shape[0]
 
     def preprocess_per_camera_per_wing(self):
@@ -263,7 +304,12 @@ class Preprocessor:
         if self.model_type == MODEL_PER_CAM_PER_WING_PICK_3_BEST_CAMERAS:
             self.box, self.confmaps, _, _, _ = self.take_n_good_cameras(self.box, self.confmaps, wings_sizes_all, 3)
         elif self.model_type == MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY and self.box.shape[1] == 4:
-            self.box, self.confmaps, _, _, _ = self.remove_bottom_camera(self.box, self.confmaps)
+            self.box, self.confmaps = self.remove_bottom_camera(self.box, self.confmaps)
+        # Samples are about to be flattened (frame, cam) -> frame*num_cams + cam,
+        # on top of split_per_wing's left/right stacking on the batch axis.
+        # Every one of those comes from the same labelled frame.
+        self.sample_group_ids = np.repeat(np.tile(np.arange(num_of_frames), 2),
+                                          self.box.shape[1])
         self.box = np.reshape(self.box, shape=[self.box.shape[0] * self.box.shape[1],
                                                   self.box.shape[2], self.box.shape[3],
                                                   self.box.shape[4]])
@@ -479,7 +525,16 @@ class Preprocessor:
             small_wings_confmaps[frame, ...] = confmaps[frame, d_size_wing_ind, ...]
         return new_box, new_confmap, small_wings_box, small_wings_confmaps, d_size_wings_inds.astype(int)
     
-    def remove_bottom_camera(box, confmaps, bottom_camera_ind=0):
+    def remove_bottom_camera(self, box, confmaps, bottom_camera_ind=0):
+        """Drop one camera from every sample.
+
+        The missing `self` here meant `box` bound to the instance and the call
+        below silently passed the wrong arguments, so
+        MODEL_PER_CAM_PER_WING_3_CAMERAS_ONLY could never actually run. Note
+        that a per-camera model does not need this at all -- it sees one
+        camera at a time, so a 4-camera-trained one already applies to
+        3-camera movies. Only the multi-view models care about the count, and
+        those use camera_subsets instead."""
         new_box = np.delete(box, bottom_camera_ind, axis=1)
         new_confmaps = np.delete(confmaps, bottom_camera_ind, axis=1)
         return new_box, new_confmaps

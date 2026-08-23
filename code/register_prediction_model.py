@@ -8,7 +8,7 @@ A model folder is self-contained:
 
     prediction_models/<name>/
         best_model.pt      # torchscript weights
-        model.json         # {"model type": "PER_WING_ALL_CAMS", "enabled": true, ...}
+        model.json         # {"model type": "PER_WING_ALL_CAMS", "num cameras": 4, "enabled": true, ...}
 
 This script creates such a folder from either a finished training run directory
 (inferring the predict model type from its saved config) or an explicit
@@ -44,6 +44,26 @@ TRAIN_TO_PREDICT_TYPE = {
 
 WEIGHTS_FILE = "best_model.pt"
 META_FILE = "model.json"
+
+# Predict types that fuse a FIXED number of camera streams, so their weights
+# only fit a movie with that many cameras. Everything else runs one camera at
+# a time and is registered as "any".
+FIXED_CAM_PREDICT_TYPES = {"PER_WING_ALL_CAMS"}
+ANY_NUM_CAMS = "any"
+
+
+def _read_train_num_cams(train_dir):
+    """Camera count from a train run's saved configuration.json, if it says."""
+    if not train_dir:
+        return None
+    cfg_path = os.path.join(train_dir, "configuration.json")
+    if not os.path.isfile(cfg_path):
+        return None
+    try:
+        with open(cfg_path) as f:
+            return json.load(f).get("number of cameras")
+    except Exception:
+        return None
 
 
 def _read_train_type(train_dir):
@@ -92,6 +112,12 @@ def main():
                     help="predict model type (overrides / required when not using --from)")
     ap.add_argument("--prediction-models-dir", default="prediction_models",
                     help="target registry directory (default: prediction_models)")
+    ap.add_argument("--num-cams", type=int, default=None,
+                    help="how many cameras this model needs. Only meaningful "
+                         f"for {sorted(FIXED_CAM_PREDICT_TYPES)}, which fuse a "
+                         "fixed number of camera streams; per-cam models are "
+                         f"always registered as '{ANY_NUM_CAMS}'. Defaults to "
+                         "the training config's 'number of cameras', then 4.")
     ap.add_argument("--disabled", action="store_true",
                     help="write the model with enabled=false (staged, not used yet)")
     ap.add_argument("--force", action="store_true", help="overwrite an existing model folder")
@@ -107,9 +133,20 @@ def main():
         sys.exit(f"error: {dest_dir} already exists (use --force to overwrite)")
     os.makedirs(dest_dir, exist_ok=True)
 
+    if model_type in FIXED_CAM_PREDICT_TYPES:
+        num_cams = (args.num_cams
+                    or _read_train_num_cams(args.from_dir)
+                    or 4)
+    else:
+        num_cams = ANY_NUM_CAMS
+        if args.num_cams:
+            print(f"  (ignoring --num-cams {args.num_cams}: {model_type} runs "
+                  f"one camera at a time and works with any count)")
+
     shutil.copy2(weights_path, os.path.join(dest_dir, WEIGHTS_FILE))
     meta = {
         "model type": model_type,
+        "num cameras": num_cams,
         "enabled": not args.disabled,
         "predict again 3D consistency": 0,
         "use reprojected masks": 0,
@@ -118,7 +155,8 @@ def main():
     with open(os.path.join(dest_dir, META_FILE), "w") as f:
         json.dump(meta, f, indent=4)
 
-    print(f"registered '{args.name}': type={model_type}, enabled={not args.disabled}")
+    print(f"registered '{args.name}': type={model_type}, "
+          f"num cameras={num_cams}, enabled={not args.disabled}")
     print(f"  weights <- {weights_path}")
     print(f"  wrote   -> {dest_dir}/")
 

@@ -79,11 +79,17 @@ class TrainConfig:
             # Normalization for the U-Net backbone: "none" (default, matches the
             # norm-free encoder_atrous/decoder nets), "group", or "batch".
             self.normalization = config.get("normalization", "none")
-            # Cross-camera fusion for the multi-view FourCamsNetwork: "concat"
+            # Cross-camera fusion for the multi-view MultiCamNetwork: "concat"
             # (default = original behavior), or the permutation-invariant pools
-            # "max" / "mean". Only read by FourCamsNetwork; remove this line and
+            # "max" / "mean". Only read by MultiCamNetwork; remove this line and
             # its getter to drop the feature.
             self.camera_fusion = config.get("camera fusion", "concat")
+            # How many cameras a multi-view training sample should carry.
+            # None (the default) = every camera the dataset has, i.e. exactly
+            # the behavior before 3-camera support. Setting it BELOW the
+            # dataset's count turns each labelled frame into one sample per
+            # camera subset -- see Preprocessor.camera_subsets.
+            self.num_cameras = config.get("number of cameras")
 
             # augmentation configuration
             self.rotation_range = config["rotation range"]
@@ -146,6 +152,9 @@ class TrainConfig:
 
     def get_camera_fusion(self):
         return self.camera_fusion
+
+    def get_num_cameras(self):
+        return self.num_cameras
     
     def get_resume_training_checkpoint_path(self):
         return self.resume_training_checkpoint_path
@@ -180,17 +189,57 @@ class TrainConfig:
             raise ValueError(f"Loss function {self.loss_function_as_string} not recognized.")
 
 
+# Marker for a model that runs on any camera count (every PER_CAM model, and
+# any model.json predating the "num cameras" field).
+ANY_NUM_CAMS = "any"
+
+
+def model_accepts_num_cams(model_config, num_cams):
+    """Can this ensemble member run on a movie with `num_cams` cameras?"""
+    declared = model_config.get("num cameras", ANY_NUM_CAMS)
+    if declared is None or declared == ANY_NUM_CAMS:
+        return True
+    return int(declared) == int(num_cams)
+
+
+# Config value meaning "read this off the data instead of trusting me".
+AUTO = "auto"
+
+
+def _explicit_or_auto(value):
+    """None when a config field is absent or the literal "auto", else itself."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() == AUTO:
+        return None
+    return value
+
+
 class PredictConfig:
     def __init__(self, config_path):
         with open(config_path) as CF:
             config = json.load(CF)
             self.input_data_directory = config['data directory']
             self.output_directory = config['output directory']
-            self.calibration_data_path = config['calibration path']
+            # Camera count and calibration are properties of the DATA, not of
+            # the config: the old rig recorded 3 cameras and the current one
+            # records 4, and every experiment has its own calibration.h5 next
+            # to its movies. Leave either out (or set it to "auto") and
+            # apply_movie_geometry resolves it per movie, so one config covers
+            # both rigs and a stale path can no longer quietly triangulate one
+            # experiment's movies against another's calibration.
+            # The `_declared_*` pair holds what the config actually said; the
+            # public attributes are re-resolved for each movie in
+            # apply_movie_geometry. Keeping them apart is what lets one config
+            # cover several movies -- if the resolved value stuck, the first
+            # movie's camera count would be enforced on every later one.
+            self._declared_calibration_path = _explicit_or_auto(config.get('calibration path'))
+            self._declared_num_cams = _explicit_or_auto(config.get('number of cameras'))
+            self.calibration_data_path = self._declared_calibration_path
+            self.num_cams = self._declared_num_cams
             self.wings_detector_path = config['wings detector path']
             self.image_height = config['IMAGE HEIGHT']
             self.image_width = config['IMAGE WIDTH']
-            self.num_cams = config['number of cameras']
             self.mask_increase_initial = config['mask increase initial']
             self.mask_increase_reprojected = config['mask increase reprojected']
             self.is_video = bool(config['is video'])
@@ -249,6 +298,13 @@ class PredictConfig:
                 "model type second pass": meta.get("model type second pass", model_type),
                 "predict again 3D consistency": meta.get("predict again 3D consistency", 0),
                 "use reprojected masks": meta.get("use reprojected masks", 0),
+                # How many cameras this model's weights are shaped for. An
+                # ALL_CAMS model fuses a fixed number of camera streams and
+                # simply cannot run on a movie with a different count; a
+                # PER_CAM model sees one camera at a time and works with any.
+                # Absent => "any", so every model.json written before this
+                # existed keeps working.
+                "num cameras": meta.get("num cameras", ANY_NUM_CAMS),
             })
         if not model_config_list:
             raise ValueError(f"No enabled prediction models found in {pred_models_dir}")
@@ -296,8 +352,73 @@ class PredictConfig:
     def get_batch_size(self):
         return self.batch_size
     
-    def get_model_config_list(self):
-        return self.model_config_list
+    def get_model_config_list(self, num_cams=None):
+        """The ensemble members, optionally restricted to those that can run
+        on a `num_cams`-camera movie. Called per movie, since the count is a
+        property of the data and one config may cover several movies."""
+        if num_cams is None:
+            return self.model_config_list
+        return [m for m in self.model_config_list
+                if model_accepts_num_cams(m, num_cams)]
+
+    @staticmethod
+    def resolve_calibration_path(movie_path):
+        """The calibration.h5 that belongs to this movie, nearest first.
+
+        The build step writes one calibration.h5 per experiment directory in
+        multi-movie mode, and into the movie directory itself for a
+        single-movie build -- so check both, and fail loudly rather than fall
+        back to some other experiment's file."""
+        movie_dir = os.path.dirname(os.path.abspath(movie_path))
+        for cand in (os.path.join(movie_dir, "calibration.h5"),
+                     os.path.join(os.path.dirname(movie_dir), "calibration.h5")):
+            if os.path.isfile(cand):
+                return cand
+        raise SystemExit(
+            f"no calibration.h5 in {movie_dir} or its parent, and the config "
+            f"gives no explicit 'calibration path'. Run the build step first.")
+
+    def apply_movie_geometry(self, movie_path, num_cams):
+        """Resolve the config fields that belong to the movie, not the config.
+
+        `num_cams` is read off the box's own cropzone, so a 3-camera movie is
+        recognised as such whatever the config says, and the ensemble members
+        that cannot run on it are dropped by describe_model_selection. An
+        explicit config value still wins, but a value that CONTRADICTS the box
+        is fatal: every downstream tensor shape is derived from this number,
+        so a silent mismatch would produce garbage rather than an error.
+        """
+        declared = self._declared_num_cams
+        if declared is None:
+            if num_cams is None:
+                raise SystemExit(
+                    f"could not read the camera count from {movie_path} and "
+                    f"the config does not set 'number of cameras'.")
+            self.num_cams = int(num_cams)
+        elif num_cams is not None and int(declared) != int(num_cams):
+            raise SystemExit(
+                f"config says 'number of cameras': {declared} but "
+                f"{os.path.basename(movie_path)} has {num_cams} cameras in "
+                f"its box. Set the field to \"auto\", or point the config at "
+                f"the right experiment.")
+        else:
+            self.num_cams = int(declared)
+        self.calibration_data_path = (
+            self._declared_calibration_path
+            if self._declared_calibration_path is not None
+            else self.resolve_calibration_path(movie_path))
+        return self.num_cams, self.calibration_data_path
+
+    def describe_model_selection(self, num_cams):
+        """(kept, [(name, why-skipped)]) for logging which members will run."""
+        kept, skipped = [], []
+        for m in self.model_config_list:
+            if model_accepts_num_cams(m, num_cams):
+                kept.append(m)
+            else:
+                skipped.append((m.get("name", m["model type"]),
+                                f"needs {m['num cameras']} cameras"))
+        return kept, skipped
     
     def tune_configuration(self, config_as_dict, movie_path, specific_output_directory):
         self.wings_pose_estimation_model_path = config_as_dict["wings pose estimation model path"]
@@ -743,10 +864,12 @@ def show_pred_multiple_cameras(net, sample, gt_confmaps, epoch_num, save_directo
 
     predicted_peaks = torch_find_peaks(predicted_confmaps)[0,:2,:]
     gt_peaks = torch_find_peaks(gt_confmaps[None, ...])[0,:2,:]
+    channels_per_cam = sample.shape[0] // num_cameras
     for i in range(num_cameras):
         current_gt_peaks = gt_peaks[:, i*num_points:(i+1)*num_points]
         current_predicted_peaks = predicted_peaks[:, i*num_points:(i+1)*num_points]
-        current_image = sample[1 + i*4]
+        # the "present" time channel of camera i
+        current_image = sample[1 + i*channels_per_cam]
         save_path = os.path.join(save_directory, f"epoch_{epoch_num}_cam{i+1}.png")
         draw_sample_with_points(
             sample_image=np.squeeze(current_image),
@@ -777,6 +900,168 @@ def find_flip_in_files(movie_dir_path):
     except FileNotFoundError:
         # If the directory does not exist, return False
         return False
+
+
+# Written next to each movie by process_experiment's prescan; see
+# process_experiment.write_cam_validity_sidecar.
+# Declared by process_experiment.py --perturbation, and read back at predict
+# time. It sits next to calibration.h5 so the declaration follows the data
+# rather than a config that is shared across experiments; its mere presence is
+# what marks an experiment as a perturbation experiment.
+PERTURBATION_FILE = "perturbation.json"
+
+# Per-frame perturbation state. UNKNOWN is a first-class value, not a failure:
+# an experiment whose log recorded the onset but never the duration genuinely
+# cannot say whether a frame past the onset is still during the perturbation or
+# after it, and labelling those frames "not after" would assert something the
+# record does not support.
+PERT_UNKNOWN = -1
+PERT_BEFORE = 0
+PERT_DURING = 1
+PERT_AFTER = 2
+PERT_STATE_NAMES = {PERT_UNKNOWN: "unknown", PERT_BEFORE: "before",
+                    PERT_DURING: "during", PERT_AFTER: "after"}
+
+
+def resolve_perturbation_path(movie_path):
+    """perturbation.json for a movie, nearest first, or None when absent.
+
+    Same search order as PredictConfig.resolve_calibration_path: the movie's
+    own directory (single-movie builds) then its parent (the experiment dir,
+    where a multi-movie build puts calibration.h5)."""
+    movie_dir = os.path.dirname(os.path.abspath(movie_path))
+    for cand in (os.path.join(movie_dir, PERTURBATION_FILE),
+                 os.path.join(os.path.dirname(movie_dir), PERTURBATION_FILE)):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def load_perturbation(movie_path, frame_rate=None):
+    """The perturbation window declared for this movie, or None if undeclared.
+
+    Returns a dict with `onset_frame` (trigger-relative), `duration_ms`,
+    `end_frame` (trigger-relative, None when the duration was never recorded)
+    and `end_known`. The duration is stored in MILLISECONDS and converted here
+    using the movie's own `frame_rate`, so an experiment recorded at more than
+    one frame rate cannot silently acquire the wrong window.
+
+    A per-movie entry overrides the experiment-level values, because the parts
+    of one experiment can differ -- ex241220's dark parts ran 7.5 ms and 12 ms
+    off the same declaration.
+    """
+    path = resolve_perturbation_path(movie_path)
+    if path is None:
+        return None
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"could not read {path}: {e}; treating the experiment as "
+              f"un-perturbed", flush=True)
+        return None
+
+    base = doc.get("perturbation") or {}
+    movie_key = os.path.basename(os.path.dirname(os.path.abspath(movie_path)))
+    over = (doc.get("movies") or {}).get(movie_key) or {}
+
+    def pick(*keys, default=None):
+        for src in (over, base):
+            for k in keys:
+                if src.get(k) is not None:
+                    return src[k]
+        return default
+
+    onset = int(pick("onset_trigger_frame", "onset_frame", default=0))
+    duration_ms = pick("duration_ms")
+    end_frame = None
+    if duration_ms is not None and frame_rate:
+        end_frame = onset + int(round(float(duration_ms) * float(frame_rate) / 1000.0))
+    return {
+        "type": str(pick("type", default="unspecified")),
+        "onset_frame": onset,
+        "duration_ms": float(duration_ms) if duration_ms is not None else None,
+        "end_frame": end_frame,
+        "end_known": end_frame is not None,
+        "source": path,
+    }
+
+
+def perturbation_frame_labels(frame_numbers, pert):
+    """(state, start_index, end_index) for a sequence of trigger-relative frames.
+
+    `state` is one int8 per frame (PERT_BEFORE / PERT_DURING / PERT_AFTER, or
+    PERT_UNKNOWN from the onset onward when no duration was recorded). Frames
+    BEFORE the onset stay exactly labelled either way -- the onset is known
+    even when the duration is not, so the pre-perturbation window is never in
+    doubt.
+
+    `start_index` / `end_index` are positions within `frame_numbers`, or -1
+    when that boundary lies outside the built range. That is a normal outcome,
+    not an error: the prescan picks its range from fly visibility, so a movie
+    can legitimately begin after the perturbation started.
+    """
+    f = np.asarray(frame_numbers)
+    onset = pert["onset_frame"]
+    state = np.full(f.shape, PERT_UNKNOWN, dtype=np.int8)
+    state[f < onset] = PERT_BEFORE
+    if pert["end_known"]:
+        end = pert["end_frame"]
+        state[(f >= onset) & (f < end)] = PERT_DURING
+        state[f >= end] = PERT_AFTER
+
+    def index_of(target):
+        hit = np.nonzero(f == target)[0]
+        return int(hit[0]) if len(hit) else -1
+
+    return (state, index_of(onset),
+            index_of(pert["end_frame"]) if pert["end_known"] else -1)
+
+
+CAM_VALIDITY_SIDECAR = "prescan_cam_validity.npz"
+
+
+def load_cam_validity(box_h5_path, num_frames=None, num_cams=None):
+    """Which cameras saw the WHOLE fly at each frame of a movie's box.
+
+    Returns a (num_frames, num_cams) bool array, or None when there is no
+    sidecar -- which is the case for every movie built before cam-validity
+    existed, and the reason callers must treat None as "trust every camera".
+
+    The prescan admits a frame when at least --prescan-min-cams-in-frame
+    cameras see the fly whole, so the remaining cameras may be showing a
+    TRUNCATED fly. Their 2D detections there are meaningless, and every
+    triangulated camera pair that includes such a camera inherits that. This
+    array is what lets the prediction stage drop those pairs per frame.
+
+    Shape is validated against the box rather than trusted: a mask that is off
+    by even one frame silently blames the wrong cameras, which is worse than
+    no mask at all.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(box_h5_path)),
+                        CAM_VALIDITY_SIDECAR)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            mask = np.asarray(z["in_frame"], dtype=bool)
+    except Exception as e:
+        print(f"could not read {path}: {e}; treating every camera as valid",
+              flush=True)
+        return None
+    if mask.ndim != 2:
+        print(f"{path}: expected a 2D (frames, cams) mask, got {mask.shape}; "
+              f"treating every camera as valid", flush=True)
+        return None
+    if num_frames is not None and mask.shape[0] != num_frames:
+        print(f"{path}: covers {mask.shape[0]} frames but the box has "
+              f"{num_frames}; treating every camera as valid", flush=True)
+        return None
+    if num_cams is not None and mask.shape[1] != num_cams:
+        print(f"{path}: covers {mask.shape[1]} cams but the box has "
+              f"{num_cams}; treating every camera as valid", flush=True)
+        return None
+    return mask
 
 
 def get_trigger_frame_info(box_h5_path):

@@ -24,14 +24,23 @@ allCams=HullReconstruction.Classes.all_cameras_class(easyWandData.easyWandData);
 %%
 rotation_matrix = allCams.Rotation_Matrix;
 camera_centers = allCams.all_centers_cam';
-inv_camera_matrices = zeros(4,4,3);
-camera_matrices = zeros(4,3,4);
 
-rotation_matrices = zeros(4, 3, 3);
-K_matrices = zeros(4, 3, 3);
-translations = zeros(4, 3);
+% Camera count comes from the easyWand data, not a literal: the old lab rig
+% had 3 cameras and a fourth was added later, so a 3-camera easyWand must
+% produce a 3-camera calibration.h5 rather than index a camera that is not
+% there. Everything downstream sizes itself from these datasets
+% (Triangulator reads num_cameras off camera_centers).
+num_cams = numel(allCams.cams_array);
+fprintf('easyWand describes %d camera(s)\n', num_cams);
 
-for cam = 1:4
+inv_camera_matrices = zeros(num_cams,4,3);
+camera_matrices = zeros(num_cams,3,4);
+
+rotation_matrices = zeros(num_cams, 3, 3);
+K_matrices = zeros(num_cams, 3, 3);
+translations = zeros(num_cams, 3);
+
+for cam = 1:num_cams
     inv_camera_matrices(cam, :, :) = allCams.cams_array(cam).invDLT;
     camera_matrices(cam, :, :) = allCams.cams_array(cam).reshaped_dlt;
 

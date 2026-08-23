@@ -8,7 +8,8 @@ import numpy as np
 abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
-from utils import get_start_frame, show_interest_points_with_index, PredictConfig, get_trigger_frame_info
+from utils import (get_start_frame, show_interest_points_with_index, PredictConfig,
+                   get_trigger_frame_info, load_perturbation)
 from pipeline_timing import record as record_timing, earliest_start
 from plot_wing_angles import plot_one as plot_wing_angles_one
 import h5py
@@ -112,14 +113,45 @@ class PredictingManager:
             # Capture post-intersection frame count so timing rows include
             # the normalizer for elapsed-per-frame analysis.
             n_movie_frames = None
+            n_movie_cams = None
             try:
                 with h5py.File(movie_path, "r") as _f:
                     n_movie_frames = int(_f["cropzone"].shape[0])
-            except Exception:
-                pass
+                    # The cropzone's camera axis is the movie's own camera
+                    # count -- the old rig recorded 3, the current one 4 --
+                    # and it decides which ensemble members can run at all.
+                    n_movie_cams = int(_f["cropzone"].shape[1])
+            except Exception as e:
+                # Not fatal by itself (the config may state the count), but
+                # never silent: this is now the primary source for a number
+                # every downstream shape depends on.
+                print(f"could not read box geometry from {movie_path}: {e}",
+                      flush=True)
+            # Resolve 'number of cameras' and 'calibration path' against this
+            # movie before anything is constructed from them.
+            resolved_cams, calib = self.config.apply_movie_geometry(
+                movie_path, n_movie_cams)
+            print(f"cameras: {resolved_cams}   calibration: {calib}", flush=True)
+            # Select on the RESOLVED count, not the box read: when the box
+            # could not be opened the config's count is the only one there is,
+            # and skipping the filter there would hand a 4-camera model a
+            # 3-camera movie.
+            model_config_list, skipped = \
+                self.config.describe_model_selection(resolved_cams)
+            print(f"{resolved_cams} cameras -> "
+                  f"{len(model_config_list)} ensemble member(s): "
+                  + ", ".join(m.get("name", m["model type"])
+                              for m in model_config_list), flush=True)
+            for name, why in skipped:
+                print(f"  skipping {name}: {why}", flush=True)
+            if not model_config_list:
+                raise SystemExit(
+                    f"no enabled prediction model can run on a "
+                    f"{resolved_cams}-camera movie ({movie_path}); register "
+                    f"one with 'num cameras': {resolved_cams} or 'any'")
             t_movie_start = time.time()
             predictor = None
-            for model_config in self.model_config_list:
+            for model_config in model_config_list:
                 # Name the per-member output dir by the model's registry name
                 # (e.g. all_cams_dil3) when available, else fall back to the
                 # model type. Keeps outputs and the selection report readable.
@@ -165,15 +197,28 @@ class PredictingManager:
                 # *_sparse.mat. Written into the analysis h5 (frame_index) and
                 # reused for the CSV so both share one convention.
                 trig_off, frame_rate = get_trigger_frame_info(box_path)
+                # An experiment declares its perturbation window by having a
+                # perturbation.json next to its calibration.h5; absent that,
+                # `pert` is None and nothing perturbation-related is written.
+                pert = load_perturbation(box_path, frame_rate)
+                if pert is not None:
+                    print(f"perturbation: {pert['type']} from trigger frame "
+                          f"{pert['onset_frame']}, "
+                          + (f"ends at {pert['end_frame']} "
+                             f"({pert['duration_ms']:g} ms)"
+                             if pert["end_known"] else "duration NOT recorded")
+                          + f"  [{pert['source']}]", flush=True)
                 movie_hdf5_path, FA = create_movie_analysis_h5(
                     movie, movie_run_directory_path, points_3D_path, smooth=True,
-                    trigger_offset=trig_off, frame_rate=frame_rate, source=source)
+                    trigger_offset=trig_off, frame_rate=frame_rate, source=source,
+                    perturbation=pert)
                 # MATLAB-ready per-frame CSV (body angles, body location, wing
                 # angles) indexed by the trigger-relative frame number. Failure
                 # here must not abort the movie's prediction.
                 try:
                     csv_path = movie_hdf5_path.replace('.h5', '.csv')
-                    export_analysis_csv(FA, csv_path, trig_off or 0, frame_rate)
+                    export_analysis_csv(FA, csv_path, trig_off or 0, frame_rate,
+                                        perturbation=pert)
                 except Exception as e:
                     print(f"analysis CSV export failed: {e}", flush=True)
                 Visualizer.plot_all_body_data(movie_hdf5_path)

@@ -29,9 +29,16 @@ configure_movie_list scans the data directory *and its immediate
 subdirectories* for `mov*.h5`, so an archive inside `mov<N>/` would be picked
 up and predicted as a second movie.
 
+It also writes each rebuilt movie a `prescan_cam_validity.npz` recording which
+cams saw the WHOLE fly at each built frame -- the range just changed, so any
+sidecar already on disk describes the wrong frames. `--mask-only` writes that
+file WITHOUT rebuilding, which is how movies built before cam-validity existed
+get a mask so they can be re-predicted with cut cameras excluded.
+
 usage:
     .env/bin/python code/rebuild_edge_cut_movies.py <manifest> [--dry-run]
-      [--min-edge-margin N] [--min-intersection N]
+      [--min-edge-margin N] [--min-intersection N] [--min-cams-in-frame N]
+      [--mask-only]
 
 The manifest is one movie directory per line (repo-relative or absolute).
 """
@@ -46,20 +53,20 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from process_experiment import (  # noqa: E402
+    CAM_VALIDITY_SIDECAR,
     DEFAULT_MIN_INTERSECTION,
     MATLAB_TIME_JUMP_MARGIN,
     build_one_movie,
     find_movie_h5,
+    parse_h5_range,
+    write_cam_validity_sidecar,
 )
-from scan_sparse_movies import DEFAULT_MIN_EDGE_MARGIN, scan_movie  # noqa: E402
+from scan_sparse_movies import (DEFAULT_MIN_CAMS_IN_FRAME,  # noqa: E402
+                                DEFAULT_MIN_EDGE_MARGIN,
+                                MIN_USABLE_CAMS_IN_FRAME,
+                                scan_movie)
 
 ARCHIVE_DIRNAME = "_superseded_builds"
-
-
-def parse_range(h5_path):
-    """(start_ind, end_ind) encoded in a built h5's filename, or None."""
-    m = re.match(r"mov_(\d+)_(\d+)_(\d+)_ds_", os.path.basename(h5_path))
-    return (int(m.group(2)), int(m.group(3))) if m else None
 
 
 def movie_num(movie_dir):
@@ -104,6 +111,18 @@ def main():
     ap.add_argument("--min-intersection", type=int,
                     default=DEFAULT_MIN_INTERSECTION)
     ap.add_argument("--pixel-threshold", type=int, default=50)
+    ap.add_argument("--min-cams-in-frame", type=int,
+                    default=DEFAULT_MIN_CAMS_IN_FRAME,
+                    help="how many cams must see the WHOLE fly for a frame to "
+                         f"count (default: {DEFAULT_MIN_CAMS_IN_FRAME}; "
+                         f"0 = every cam; below {MIN_USABLE_CAMS_IN_FRAME} is "
+                         "clamped)")
+    ap.add_argument("--mask-only", action="store_true",
+                    help="do not rebuild anything: re-run the prescan and "
+                         f"write each movie's {CAM_VALIDITY_SIDECAR} against "
+                         "the h5 already on disk. This is how movies built "
+                         "before cam-validity existed get a mask, so they can "
+                         "be re-predicted with cut cameras excluded.")
     ap.add_argument("--dry-run", action="store_true",
                     help="prescan and report the new ranges, build nothing")
     args = ap.parse_args()
@@ -112,11 +131,14 @@ def main():
         movie_dirs = [line.strip().rstrip("/") for line in f
                       if line.strip() and not line.startswith("#")]
 
+    req = ("all cams" if args.min_cams_in_frame <= 0
+           else str(args.min_cams_in_frame))
     print(f"{len(movie_dirs)} movie(s); edge margin {args.min_edge_margin:.0f} px, "
-          f"floor {args.min_intersection} frames"
+          f"floor {args.min_intersection} frames, whole-fly cams >= {req}"
+          + ("   [MASK ONLY]" if args.mask_only else "")
           + ("   [DRY RUN]" if args.dry_run else ""))
 
-    rebuilt, unchanged, dropped, failed = [], [], [], []
+    rebuilt, unchanged, dropped, failed, masked = [], [], [], [], []
     for movie_dir in movie_dirs:
         mn = movie_num(movie_dir)
         print(f"\n== {movie_dir}")
@@ -125,13 +147,40 @@ def main():
             failed.append(movie_dir)
             continue
         old_h5 = find_movie_h5(movie_dir)
-        old = parse_range(old_h5) if old_h5 else None
+        old = parse_h5_range(old_h5) if old_h5 else None
         info = scan_movie(movie_dir, args.pixel_threshold,
-                          min_edge_margin=args.min_edge_margin)
+                          min_edge_margin=args.min_edge_margin,
+                          min_cams_in_frame=args.min_cams_in_frame)
         if "error" in info:
             print(f"   prescan failed: {info['error']}")
             failed.append(movie_dir)
             continue
+
+        if args.mask_only:
+            # Back-fill validity for an h5 that already exists: the prescan
+            # masks are sliced to whatever range that h5 was built at, so the
+            # build itself is left completely alone.
+            if old_h5 is None:
+                print("   no built h5; nothing to write a mask against")
+                failed.append(movie_dir)
+                continue
+            print(f"   existing range {old}, out-of-frame per cam: "
+                  f"{info['per_cam_out_of_frame_counts']}")
+            out = write_cam_validity_sidecar(
+                movie_dir, info, args.dry_run,
+                params={"min_edge_margin": args.min_edge_margin,
+                        "pixel_threshold": args.pixel_threshold,
+                        "source": "rebuild_edge_cut_movies --mask-only"})
+            if args.dry_run:
+                print(f"   would write {CAM_VALIDITY_SIDECAR}")
+                masked.append(movie_dir)
+            elif out:
+                print(f"   wrote {out}")
+                masked.append(movie_dir)
+            else:
+                failed.append(movie_dir)
+            continue
+
         start_ind, end_ind = new_range(info)
         n_new = end_ind - start_ind + 1
         print(f"   old range {old}  ->  new [{start_ind}, {end_ind}]  "
@@ -159,12 +208,25 @@ def main():
             start_ind=start_ind, end_ind=end_ind)
         if rc == 0:
             print(f"   built {n_built} frames")
+            # The range just changed, so any sidecar on disk describes the
+            # OLD frames. Re-slice against the h5 that was actually committed.
+            out = write_cam_validity_sidecar(
+                movie_dir, info, args.dry_run,
+                params={"min_edge_margin": args.min_edge_margin,
+                        "pixel_threshold": args.pixel_threshold,
+                        "source": "rebuild_edge_cut_movies"})
+            if out:
+                print(f"   wrote {CAM_VALIDITY_SIDECAR}")
             rebuilt.append(movie_dir)
         else:
             print(f"   BUILD FAILED (rc={rc}); see build_mov{mn}.log")
             failed.append(movie_dir)
 
     print(f"\n{'=' * 70}")
+    if args.mask_only:
+        print(f"masked    {len(masked)}")
+        print(f"failed    {len(failed)}" + (f"  {failed}" if failed else ""))
+        return 1 if failed else 0
     print(f"rebuilt   {len(rebuilt)}")
     print(f"unchanged {len(unchanged)}" + (f"  {unchanged}" if unchanged else ""))
     print(f"dropped   {len(dropped)}" + (f"  {dropped}" if dropped else ""))

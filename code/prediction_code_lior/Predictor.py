@@ -12,8 +12,10 @@ from scipy.interpolate import make_smoothing_spline
 from skimage import util, measure
 from scipy.spatial.distance import cdist
 import torch
-from itertools import combinations
+from functools import lru_cache
+from itertools import combinations, product
 import math
+import warnings
 from scipy.io import loadmat
 
 # imports of the wings1 detection
@@ -26,7 +28,8 @@ from datetime import date
 import shutil
 from skimage.morphology import convex_hull_image
 from torchvision import transforms
-from utils import tf_format_find_peaks, torch_find_peaks, PredictConfig
+from utils import (tf_format_find_peaks, torch_find_peaks, PredictConfig,
+                   load_cam_validity)
 from constants import *
 import sys
 from From_2D_to_3D import From2Dto3D
@@ -37,9 +40,6 @@ from Triangulator import Triangulator
 
 DETECT_WINGS_CPU = False
 
-WHICH_TO_FLIP = np.array([[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1],
-                          [1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1]]).astype(bool)
-ALL_COUPLES = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]
 LEFT = 0
 RIGHT = 1
 
@@ -90,6 +90,33 @@ class Predictor2D:
         self.cropzone = self.get_cropzone(self.movie_path)
         self.im_size = self.sparse_box.shape[2]
         self.num_frames = self.sparse_box.shape[0]
+        # The box is the authority on how many cameras this movie has: the
+        # config's "number of cameras" is a per-rig default and is simply
+        # wrong for a 3-camera movie predicted with a shared config.
+        num_cams_from_box = int(self.cropzone.shape[1])
+        if num_cams_from_box != self.num_cams:
+            print(f"config says {self.num_cams} cameras but the box has "
+                  f"{num_cams_from_box}; using {num_cams_from_box}", flush=True)
+            self.num_cams = num_cams_from_box
+        if self.num_cams != self.triangulator.num_cameras:
+            raise ValueError(
+                f"movie has {self.num_cams} cameras but the calibration has "
+                f"{self.triangulator.num_cameras}; they must match")
+        # Which cams saw the WHOLE fly per frame (None => trust them all).
+        # The prescan admits frames where a minority of cams see a TRUNCATED
+        # fly; this is what keeps those cams out of the triangulation.
+        self.cam_valid = load_cam_validity(self.movie_path,
+                                           num_frames=self.num_frames,
+                                           num_cams=self.num_cams)
+        if self.cam_valid is None:
+            print("no cam-validity sidecar; every camera treated as valid",
+                  flush=True)
+        else:
+            n_cut = int((~self.cam_valid).sum())
+            print(f"cam validity: {n_cut} (frame, cam) slots hold a cut fly "
+                  f"and will be dropped from triangulation "
+                  f"({100.0 * n_cut / self.cam_valid.size:.1f}% of slots)",
+                  flush=True)
         self.num_pass = 0
         if self.software == 'pytorch':
             self.wings_pose_estimation_model = \
@@ -176,6 +203,10 @@ class Predictor2D:
 
         print("predicting 3D points", flush=True)
         self.points_3D_all, self.reprojection_errors, self.triangulation_errors = self.get_all_3D_pnts_pairs(self.preds_2D, self.cropzone)
+        self.points_3D_all, self.reprojection_errors, self.triangulation_errors = \
+            self.mask_invalid_camera_pairs(self.points_3D_all,
+                                           self.reprojection_errors,
+                                           self.triangulation_errors)
 
         print("saving", flush=True)
         if save:
@@ -437,15 +468,41 @@ class Predictor2D:
                     # self.box[frame, cam, :, :, channel] = image
                     self.sparse_box.set_frame_camera_channel_dense(frame, cam, channel, image)
 
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def flip_options(n):
+        """(2**n, n) bool table of every subset of n cameras to flip.
+
+        For n = 3 this reproduces the old hard-coded WHICH_TO_FLIP row for
+        row, so a frame where all 4 cameras are trustworthy behaves exactly
+        as before."""
+        return np.array(list(product((False, True), repeat=n)), dtype=bool)
+
+    def valid_cameras(self, frame):
+        """Cameras whose 2D predictions are worth believing at this frame."""
+        if self.cam_valid is None:
+            return np.arange(self.num_cams)
+        return np.flatnonzero(self.cam_valid[frame])
+
     def enforce_3D_consistency(self):
         wings_size_togather = self.wings_size[..., LEFT] * self.wings_size[..., RIGHT]
         for frame in range(self.num_frames):
             wings_score = wings_size_togather[frame]
-            chosen_camera = np.argmax(wings_score)
-            cameras_to_check = np.arange(0, 4)
-            cameras_to_check = cameras_to_check[np.where(cameras_to_check != chosen_camera)]
+            # A camera showing a truncated fly can have a large apparent wing
+            # area and win this argmax, which would anchor the whole frame's
+            # left/right assignment to garbage. Choose only among cameras that
+            # saw the whole fly.
+            valid = self.valid_cameras(frame)
+            if len(valid) == 0:
+                continue
+            chosen_camera = int(valid[np.argmax(wings_score[valid])])
+            cameras_to_check = valid[valid != chosen_camera]
             # step 1
-            if frame > 0:
+            # Comparing against the previous frame is only meaningful if the
+            # chosen camera was trustworthy THEN too; otherwise the "previous"
+            # points are a truncated fly's and the comparison is noise.
+            if frame > 0 and (self.cam_valid is None
+                              or self.cam_valid[frame - 1, chosen_camera]):
                 switch_flag = self.deside_if_switch(chosen_camera, frame)
                 if switch_flag:
                     self.flip_camera(chosen_camera, frame)
@@ -462,6 +519,10 @@ class Predictor2D:
     def enforce_3D_left_right_consistency(self):
         self.points_3D_all, self.reprojection_errors, self.triangulation_errors = (
             self.get_all_3D_pnts_pairs(self.preds_2D, self.cropzone))
+        self.points_3D_all, self.reprojection_errors, self.triangulation_errors = \
+            self.mask_invalid_camera_pairs(self.points_3D_all,
+                                           self.reprojection_errors,
+                                           self.triangulation_errors)
         _, points_3D, _, _ = Predictor2D.find_3D_points_optimize_neighbors([self.points_3D_all])
         right_points = np.zeros((self.num_frames, len(self.right_inds), 3))
         left_points = np.zeros((self.num_frames, len(self.left_inds), 3))
@@ -537,15 +598,55 @@ class Predictor2D:
             self.triangulator.triangulate_2D_to_3D_reprojection_optimization(points_2D, cropzone)
         return points_3D_all, reprojection_errors, triangulation_errors
 
+    def pair_validity(self, frames=None):
+        """(num_frames, num_pairs) bool: is this camera PAIR trustworthy at
+        this frame? A pair is only as good as its worse camera, so it fails
+        as soon as either camera was showing a truncated fly. Returns None
+        when there is no validity mask at all."""
+        if self.cam_valid is None:
+            return None
+        cv = self.cam_valid if frames is None else self.cam_valid[frames]
+        return np.stack([cv[:, a] & cv[:, b]
+                         for a, b in self.triangulator.all_couples], axis=1)
+
+    def mask_invalid_camera_pairs(self, points_3D_all, *errors, frames=None):
+        """NaN out every camera pair that includes a camera which saw only
+        part of the fly at that frame.
+
+        This is the single point where cam validity enters the 3D pipeline.
+        Everything downstream inherits it: the per-model selection reads this
+        array directly, and the cross-model ensemble reloads it from the
+        points_3D_all.npy written by save_predictions_to_h5.
+
+        NaN (rather than dropping the column) is deliberate -- the pair axis
+        is a fixed-width candidate axis shared across frames, and which pairs
+        are valid changes from frame to frame. get_3D_points_median ignores
+        NaN candidates, and any (model, camera-pair) subset left with nothing
+        valid scores NaN, which never beats a real score, so it loses."""
+        pv = self.pair_validity(frames)
+        if pv is None or pv.all():
+            return (points_3D_all, *errors)
+        points_3D_all = np.where(pv[:, None, :, None], points_3D_all, np.nan)
+        errors = tuple(np.where(pv[:, None, :], e, np.nan) for e in errors)
+        return (points_3D_all, *errors)
+
     def get_all_3D_pnts_all_cameras_combinations(self, points_2D, cropzone):
         points_3D_all, reprojection_errors = self.triangulator.triangulate_points_all_possible_views(points_2D, cropzone)
         return points_3D_all, reprojection_errors
 
     def find_which_cameras_to_flip(self, cameras_to_check, frame):
-        num_of_options = len(WHICH_TO_FLIP)
-        switch_scores = np.zeros(num_of_options, )
+        options = self.flip_options(len(cameras_to_check))
+        switch_scores = np.zeros(len(options), )
         cropzone = self.cropzone[frame][np.newaxis, ...]
-        for i, option in enumerate(WHICH_TO_FLIP):
+        frames = [frame]
+        # If no camera pair is trustworthy here there is nothing to score
+        # against, so leave the frame's assignment alone rather than pick a
+        # winner out of noise. (Cannot happen while at least 2 cameras are
+        # valid, which --prescan-min-cams-in-frame guarantees.)
+        pv = self.pair_validity(frames)
+        if pv is not None and not pv.any():
+            return cameras_to_check[np.zeros(len(cameras_to_check), dtype=bool)]
+        for i, option in enumerate(options):
             points_2D = np.copy(self.preds_2D[frame])
             cameras_to_flip = cameras_to_check[option]
             for cam in cameras_to_flip:
@@ -556,9 +657,14 @@ class Predictor2D:
             points_2D = points_2D[np.newaxis, ...]
             points_3D_all, reprojection_errors, _ = self.get_all_3D_pnts_pairs(points_2D, cropzone)
             # _, reprojection_errors_chosen = self.choose_best_reprojection_error_points(points_3D_all, reprojection_errors)
-            score = np.mean(reprojection_errors)
+            _, reprojection_errors = self.mask_invalid_camera_pairs(
+                points_3D_all, reprojection_errors, frames=frames)
+            # nanmean: pairs involving a cut camera were just masked out, and
+            # scoring a flip on their reprojection error is exactly the
+            # mistake this whole mechanism exists to prevent.
+            score = np.nanmean(reprojection_errors)
             switch_scores[i] = score
-        cameras_to_flip = cameras_to_check[WHICH_TO_FLIP[np.argmin(switch_scores)]]
+        cameras_to_flip = cameras_to_check[options[np.argmin(switch_scores)]]
         return cameras_to_flip
 
     def flip_camera(self, camera_to_flip, frame):
@@ -698,6 +804,14 @@ class Predictor2D:
             ds_conf.attrs["description"] = "cropzone of every image for 2D to 3D projection"
             ds_conf.attrs["dims"] = f"{self.cropzone.shape}"
 
+            if self.cam_valid is not None:
+                ds_cv = f.create_dataset("cam_valid", data=self.cam_valid,
+                                         compression="gzip", compression_opts=1)
+                ds_cv.attrs["description"] = (
+                    "True where the camera saw the WHOLE fly; camera pairs "
+                    "involving a False are NaN in points_3D_all")
+                ds_cv.attrs["dims"] = f"{self.cam_valid.shape}"
+
             ds_conf = f.create_dataset("points_3D_all", data=self.points_3D_all, compression="gzip", compression_opts=1)
             ds_conf.attrs["description"] = "all the points triangulations"
             ds_conf.attrs["dims"] = f"{self.points_3D_all.shape}"
@@ -770,10 +884,11 @@ class Predictor2D:
                 else:
                     output = self.wings_pose_estimation_model(input_wing)
                     peaks = tf_format_find_peaks(output.numpy())
-                peaks_list = [peaks[..., 0:10],
-                              peaks[..., 10:20],
-                              peaks[..., 20:30],
-                              peaks[..., 30:40]]
+                # The model emits this wing's points for every camera,
+                # concatenated: n_pts_per_cam per camera, in camera order.
+                n_pts_per_cam = peaks.shape[-1] // self.num_cams
+                peaks_list = [peaks[..., c * n_pts_per_cam:(c + 1) * n_pts_per_cam]
+                              for c in range(self.num_cams)]
                 for cam in range(self.num_cams):
                     peaks_list[cam] = np.expand_dims(peaks_list[cam], axis=1)
                 peaks_wing = np.concatenate(peaks_list, axis=1)
@@ -1038,7 +1153,15 @@ class Predictor2D:
         for frame in range(self.num_frames):
             for cam in range(self.num_cams):
                 body_mask = self.body_masks_sparse.get_frame_camera_channel_dense(frame, cam, 0)
-                fly = self.sparse_box.get_frame_camera_channel_dense(frame_idx=cam, camera_idx=cam, channel_idx=1)
+                # frame_idx=frame, not cam. This read `frame_idx=cam`, so the
+                # silhouette used to trim the wing masks was always taken from
+                # frame 0/1/2/3 (whichever the camera index happened to be)
+                # instead of the frame being processed -- the fly has moved on
+                # by then, so the intersection below was near-arbitrary and
+                # wings_size, which picks the anchor camera for the left/right
+                # assignment in enforce_3D_consistency, was junk.
+                fly = self.sparse_box.get_frame_camera_channel_dense(
+                    frame_idx=frame, camera_idx=cam, channel_idx=1)
                 for wing_num in range(2):
                     other_wing_mask = self.sparse_box.get_frame_camera_channel_dense(frame, cam,
                                                                                      self.num_time_channels + (
@@ -1130,13 +1253,26 @@ class Predictor2D:
 
     @staticmethod
     def get_3D_points_median(result):
-        mad = scipy.stats.median_abs_deviation(result, axis=2)
-        median = np.median(result, axis=2)
-        threshold = 2 * mad
-        outliers_mask = np.abs(result - median[..., np.newaxis, :]) > threshold[..., np.newaxis, :]
-        array_with_nan = result.copy()
-        array_with_nan[outliers_mask] = np.nan
-        points_3D = np.nanmedian(array_with_nan, axis=2)
+        """Robust median over the candidate axis, ignoring NaN candidates.
+
+        Candidates arrive pre-masked: mask_invalid_camera_pairs NaNs out the
+        camera pairs that include a camera which saw a truncated fly at that
+        frame. Plain np.median / median_abs_deviation would propagate a single
+        such NaN over the whole frame, so every aggregation here is nan-aware.
+        A frame whose candidates are ALL masked correctly yields NaN -- that
+        combination then scores NaN and loses to any real one."""
+        with warnings.catch_warnings():
+            # "All-NaN slice" / "Mean of empty slice" are the expected signal
+            # for a fully-masked combination, not a problem to report.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            mad = scipy.stats.median_abs_deviation(result, axis=2,
+                                                   nan_policy="omit")
+            median = np.nanmedian(result, axis=2)
+            threshold = 2 * mad
+            outliers_mask = np.abs(result - median[..., np.newaxis, :]) > threshold[..., np.newaxis, :]
+            array_with_nan = result.copy()
+            array_with_nan[outliers_mask] = np.nan
+            points_3D = np.nanmedian(array_with_nan, axis=2)
         return points_3D
 
     @staticmethod
@@ -1182,6 +1318,18 @@ class Predictor2D:
                 'score': best_score_for_comb,
                 'points_3D': best_points_for_comb[half_window]
             })
+
+        if best_points_3D is None:
+            # Every combination scored NaN, i.e. some frame in this window had
+            # all of its candidates masked out. --prescan-min-cams-in-frame
+            # keeps >= 3 cameras (>= 3 pairs) per built frame, so this should
+            # be unreachable; fall back to the pre-masking behavior -- the
+            # median over every candidate -- rather than kill the movie.
+            print("all candidate combinations scored NaN in a window; "
+                  "falling back to the median over all candidates", flush=True)
+            best_points_3D = Predictor2D.get_3D_points_median(
+                np.concatenate(all_points_list, axis=2))
+            best_combination = (models_candidates, list(points_candidates))
 
         return best_combination, best_points_3D, best_score, scores_dataset
 
@@ -1239,9 +1387,14 @@ class Predictor2D:
     @staticmethod
     def get_best_points_per_point_multiprocessing(all_points_list, points_inds, window_size=31,
                                                   score_function=find_std_of_2_points_dists,
-                                                  candidtates_inds=(0, 1, 2, 3, 4, 5),
+                                                  candidtates_inds=None,
                                                   max_models=None):
         num_frames, _, num_candidates, ax = all_points_list[0].shape
+        # Default to every candidate the array actually has. This used to be
+        # the literal (0..5) -- the six pairs of a 4-camera rig -- which
+        # index-errors on a 3-camera movie, whose candidate axis is 3 wide.
+        if candidtates_inds is None:
+            candidtates_inds = tuple(range(num_candidates))
         num_points = len(points_inds)
         half_window = window_size // 2
         all_chosen_points = [points[:, points_inds, ...] for points in all_points_list]

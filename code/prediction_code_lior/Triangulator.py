@@ -22,9 +22,14 @@ class Triangulator:
         self.Ks = self.load_Ks()
         self.Rs = self.load_Rs()
         self.translations = self.load_translations()
+        # Camera count comes from the calibration, so a 3-camera rig needs no
+        # configuration here: a 3-row calibration.h5 yields 3 pairs instead of
+        # 6, and every array sized by len(self.all_couples) follows.
         self.num_cameras = len(self.camera_centers)
-        self.all_couples = Triangulator.get_all_combinations(n=3)
-        self.all_cameras_combinations = Triangulator.get_all_combinations(n=5)
+        self.all_couples = Triangulator.get_all_combinations(self.num_cameras,
+                                                             max_size=2)
+        self.all_cameras_combinations = Triangulator.get_all_combinations(
+            self.num_cameras)
 
     def load_Ks(self):
         Ks = h5py.File(self.calibration_data_path, "r")["K_matrices"][:].T
@@ -53,9 +58,10 @@ class Triangulator:
 
     def triangulate_2D_to_3D_svd(self, points_2D, cropzone):
         num_frames, _, num_joints, _ = points_2D.shape
-        points_3D_all = np.zeros((num_frames, num_joints, 6, 3))
-        reprojection_errors = np.zeros((num_frames, num_joints, 6))
-        traingulation_errors = np.zeros((num_frames, num_joints, 6))
+        n_pairs = len(self.all_couples)
+        points_3D_all = np.zeros((num_frames, num_joints, n_pairs, 3))
+        reprojection_errors = np.zeros((num_frames, num_joints, n_pairs))
+        traingulation_errors = np.zeros((num_frames, num_joints, n_pairs))
         for i, cameras_couple in enumerate(self.all_couples):
             for joint in range(num_joints):
                 points_2D_sub_views = points_2D[:, cameras_couple, joint, :]
@@ -155,9 +161,10 @@ class Triangulator:
     def triangulate_2D_to_3D_rays_optimization(self, points_2D, cropzone):
         num_frames, _, num_points, _ = points_2D.shape
         points_2D_uncropped = self.get_uncropped_xy1(points_2D, cropzone)
-        all_points_3D = np.zeros((num_frames, num_points, 6, 3))
-        triangulation_errors = np.zeros((num_frames, num_points, 6))
-        reprojection_errors = np.zeros((num_frames, num_points, 6))
+        n_pairs = len(self.all_couples)
+        all_points_3D = np.zeros((num_frames, num_points, n_pairs, 3))
+        triangulation_errors = np.zeros((num_frames, num_points, n_pairs))
+        reprojection_errors = np.zeros((num_frames, num_points, n_pairs))
         for point in range(num_points):
             for i, couple in enumerate(self.all_couples):
                 for frame in range(num_frames):
@@ -201,9 +208,10 @@ class Triangulator:
         https://www.youtube.com/watch?v=UZlRhEUWSas&t=51s
         """
         num_frames, _, num_points, _ = points_2D.shape
-        all_points_3D = np.zeros((num_frames, num_points, 6, 3))
-        triangulation_errors = np.zeros((num_frames, num_points, 6))
-        reprojection_errors = np.zeros((num_frames, num_points, 6))
+        n_pairs = len(self.all_couples)
+        all_points_3D = np.zeros((num_frames, num_points, n_pairs, 3))
+        triangulation_errors = np.zeros((num_frames, num_points, n_pairs))
+        reprojection_errors = np.zeros((num_frames, num_points, n_pairs))
         points_2d_h = self.get_uncropped_xy1(points_2D, cropzone)
         for frame in range(num_frames):
             for i, couple in enumerate(self.all_couples):
@@ -406,9 +414,10 @@ class Triangulator:
     ###
     def triangulate_2D_to_3D_reprojection_optimization(self, points_2D, cropzone):
         num_frames, _, num_joints, _ = points_2D.shape
-        points_3D_all = np.zeros((num_frames, num_joints, 6, 3))
-        reprojection_errors = np.zeros((num_frames, num_joints, 6))
-        triangulation_errors = np.zeros((num_frames, num_joints, 6))
+        n_pairs = len(self.all_couples)
+        points_3D_all = np.zeros((num_frames, num_joints, n_pairs, 3))
+        reprojection_errors = np.zeros((num_frames, num_joints, n_pairs))
+        triangulation_errors = np.zeros((num_frames, num_joints, n_pairs))
         for i, sub in enumerate(self.all_couples):
             for joint in range(num_joints):
                 points_2D_sub_views = points_2D[:, sub, joint, :]
@@ -573,17 +582,18 @@ class Triangulator:
         return X
 
     @staticmethod
-    def get_all_combinations(n=3):
-        s = {0, 1, 2, 3}
-        all_subs = []
-        for i in range(2, n):
-            subs = Triangulator.findsubsets(s, i)
-            all_subs += subs
-        return all_subs
+    def get_all_combinations(num_cameras, min_size=2, max_size=None):
+        """Every camera subset of size min_size..max_size, in ascending order.
 
-    @staticmethod
-    def findsubsets(s, n):
-        return list(itertools.combinations(s, n))
+        max_size=2 gives the camera PAIRS used for two-view triangulation;
+        the default (max_size=num_cameras) gives every multi-view subset.
+        For 4 cameras that is the same 6 pairs / 11 subsets, in the same
+        order, that the old hard-coded {0,1,2,3} version produced."""
+        if max_size is None:
+            max_size = num_cameras
+        return [c
+                for size in range(min_size, max_size + 1)
+                for c in itertools.combinations(range(num_cameras), size)]
 
 
 if __name__ == '__main__':

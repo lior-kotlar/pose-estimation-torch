@@ -2,9 +2,10 @@
 scan_sparse_movies.py
 =====================
 
-Pre-flight tool: look at a movie's 4 *_sparse.mat files and decide whether
-the fly is trackable by all 4 cameras (with no second fly) for enough frames
-to be worth processing.
+Pre-flight tool: look at a movie's *_sparse.mat files (one per camera; 3 on
+the old rig, 4 on the current one) and decide whether the fly is trackable
+by enough of them (with no second fly) for enough frames to be worth
+processing.
 
 Three per-frame, per-cam conditions are checked:
 
@@ -27,11 +28,18 @@ Three per-frame, per-cam conditions are checked:
      is why bad predictions cluster at the END of a movie: the fly leaves
      the frame and never comes back.
 
-A frame is "good" if all three conditions hold for ALL 4 cams. The longest
-contiguous run of good frames is what BUILD will actually extract into the
-h5. If that run is shorter than --min-intersection (default 500), the movie
-is flagged BAD and skipped, sparing the heavy MATLAB build (~5 min/movie)
-and 3-hour GPU prediction.
+Conditions 1-2 must hold for EVERY cam. Condition 3 only has to hold for
+--min-cams-in-frame of them (default 3): a cam that sees the fly CUT is
+tolerated as long as enough others see it whole, and the identity of that
+majority may change from frame to frame. This keeps movies that the
+all-cams rule would cut short, and is only safe because the prescan also
+records WHICH cams were whole per frame -- see the sidecar below, which
+prediction uses to drop the camera pairs a cut cam participates in.
+
+The longest contiguous run of good frames is what BUILD will actually
+extract into the h5. If that run is shorter than --min-intersection
+(default 500), the movie is flagged BAD and skipped, sparing the heavy
+MATLAB build (~5 min/movie) and 3-hour GPU prediction.
 
 USAGE
 -----
@@ -47,6 +55,9 @@ USAGE
 
     # Keep the fly a comfortable distance from the border (or disable with 0):
     .env/bin/python code/scan_sparse_movies.py path/to/exp/ --min-edge-margin 15
+
+    # Require every cam to see the whole fly (the pre-relaxation rule):
+    .env/bin/python code/scan_sparse_movies.py path/to/exp/ --min-cams-in-frame 0
 
 Per-movie cost ~5 s. Returns nonzero exit code if any BAD movies found
 (useful for shell pipelines).
@@ -68,6 +79,46 @@ import scipy.ndimage as ndi
 # deliberate: the last few pixels before the border are already a fly whose
 # silhouette is being clipped, and the network was trained on whole flies.
 DEFAULT_MIN_EDGE_MARGIN = 5
+
+# Camera counts this pipeline knows how to process. 3 is the old lab rig,
+# before a fourth camera was added; 4 is current. A movie directory holding
+# any other number of *_sparse.mat is a broken export, not a rig variant.
+SUPPORTED_CAM_COUNTS = (3, 4)
+
+# How many cameras must see the WHOLE fly for a frame to count. 0 (or None)
+# means "every camera", which is what this scan required before the rule was
+# relaxed. 3 tolerates one camera clipping the fly, which is common near the
+# edges of a flight and used to truncate otherwise-good movies.
+DEFAULT_MIN_CAMS_IN_FRAME = 3
+
+# Below this many whole-fly cameras the relaxation stops being safe: with only
+# 2 there is exactly ONE camera pair per frame, so the ensemble's per-frame
+# camera-pair search (Predictor2D.get_best_ensemble_combination) has nothing to
+# choose between and the 3D point is whatever that single pair says, with no
+# cross-check. 3 cameras leave C(3,2) = 3 pairs.
+MIN_USABLE_CAMS_IN_FRAME = 3
+
+
+def resolve_min_cams_in_frame(min_cams_in_frame, n_cams: int) -> int:
+    """Effective K for `n_cams` cameras: falsy/negative => every camera, else
+    the value clamped to [MIN_USABLE_CAMS_IN_FRAME, n_cams]. Pure -- callers
+    that are entry points report the effective value themselves."""
+    if not min_cams_in_frame or min_cams_in_frame <= 0:
+        return n_cams
+    return min(max(int(min_cams_in_frame), MIN_USABLE_CAMS_IN_FRAME), n_cams)
+
+
+def _longest_run(mask: np.ndarray) -> tuple:
+    """(start, end) of the longest contiguous True run in `mask`, end exclusive.
+    (0, 0) when `mask` is all False."""
+    pad = np.r_[0, mask.astype(np.int8), 0]
+    diff = np.diff(pad)
+    run_starts = np.where(diff == 1)[0]
+    run_ends = np.where(diff == -1)[0]   # exclusive
+    if not len(run_starts):
+        return 0, 0
+    best = int(np.argmax(run_ends - run_starts))
+    return int(run_starts[best]), int(run_ends[best])
 
 
 def _blob_stats(indIm: np.ndarray, ratio_threshold: float,
@@ -108,6 +159,50 @@ def _blob_stats(indIm: np.ndarray, ratio_threshold: float,
     dist = float(np.hypot(rs1.mean() - rs2.mean(),
                           cs1.mean() - cs2.mean()))
     return dist < distance_threshold, bbox
+
+
+def cam_frame_alignment(mats: list) -> "str | None":
+    """Do these cameras index the same raw frame numbers?
+
+    Every stage downstream reads frame `i` out of EVERY camera's mat and
+    treats those as simultaneous: the prescan ANDs the per-cam masks position
+    by position, and the MATLAB builder slices the identical
+    `(start_ind - time_jump):(end_ind + time_jump)` range from each `matfile`.
+    Raw frame `i` is trigger frame `startFrame + i - 1`, so that holds exactly
+    while the cameras agree on `metaData.startFrame` -- and nothing else.
+
+    A differing FRAME COUNT is fine and common: cameras that start together
+    but stop apart are still aligned at every index they share, which is why
+    `scan_movie` truncates them to the shortest. A differing `startFrame` is
+    not recoverable -- a per-camera offset is a concept the builder does not
+    have -- and it fails in the worst way, because that same truncation then
+    aligns the cameras at the END. The movie still builds, still looks full,
+    and holds one camera showing a different instant in every frame. Its 3D
+    pose is wrong everywhere with nothing in the output to say so, hence a
+    hard drop here rather than a warning.
+
+    Returns None when the cameras are aligned, else a one-line description of
+    the disagreement for the caller to report as an ERR verdict.
+    """
+    spans = []
+    for p in mats:
+        try:
+            with h5py.File(p, "r") as f:
+                n = len(f["frames/indIm"][0])
+                start = int(round(float(np.array(f["metaData/startFrame"][()]).squeeze())))
+        except Exception as e:
+            return f"could not read frame span from {os.path.basename(p)}: {e}"
+        spans.append((os.path.basename(p), n, start))
+    if len({s for _, _, s in spans}) == 1:
+        return None
+    detail = ", ".join(f"{name.split('_')[-2]}: {n} frames from {s}"
+                       for name, n, s in spans)
+    # Cameras that stop together but start apart are the common case (one cam
+    # armed late); naming the shared end makes the offset obvious.
+    ends = {s + n for _, n, s in spans}
+    tail = (f"; they end on the same trigger frame ({ends.pop() - 1}), so the "
+            f"offset is at the START") if len(ends) == 1 else ""
+    return f"cameras disagree on startFrame -- {detail}{tail}"
 
 
 def analyze_cam_frames(mat_path: str, pixel_threshold: int,
@@ -154,14 +249,28 @@ def analyze_cam_frames(mat_path: str, pixel_threshold: int,
 def scan_movie(movie_dir: str, pixel_threshold: int,
                blob_ratio: float = 0.30,
                blob_distance: float = 100.0,
-               min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN) -> dict:
-    """Scan all 4 cam sparse mats. Returns a dict with per-cam visibility,
+               min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN,
+               min_cams_in_frame=DEFAULT_MIN_CAMS_IN_FRAME) -> dict:
+    """Scan a movie's cam sparse mats. Returns a dict with per-cam visibility,
     multi-blob and out-of-frame counts, plus the longest contiguous run of
-    frames that satisfy ALL THREE conditions (visible AND single-fly AND
-    fully in frame) across all 4 cams. On failure returns {'error': str}."""
+    frames where every cam sees a single fly and at least
+    `min_cams_in_frame` of them see it WHOLE. On failure returns
+    {'error': str}.
+
+    Also returns the raw per-frame, per-cam masks (`in_frame_mask` and
+    friends, shaped (n_frames, n_cams)). They are what process_experiment
+    slices into each movie's `prescan_cam_validity.npz`, so prediction can
+    drop the camera pairs that include a cut cam."""
     mats = sorted(glob.glob(os.path.join(movie_dir, "*_sparse.mat")))
-    if len(mats) != 4:
-        return {"error": f"expected 4 *_sparse.mat, found {len(mats)}"}
+    if len(mats) not in SUPPORTED_CAM_COUNTS:
+        return {"error": f"expected "
+                         f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))} "
+                         f"*_sparse.mat, found {len(mats)}"}
+    # Checked before any frame is read: every mask below is indexed by raw
+    # frame number and silently assumes the cameras share that numbering.
+    misaligned = cam_frame_alignment(mats)
+    if misaligned:
+        return {"error": misaligned}
     visible_masks, single_masks, in_frame_masks, lengths = [], [], [], []
     for p in mats:
         try:
@@ -179,25 +288,24 @@ def scan_movie(movie_dir: str, pixel_threshold: int,
     visible_masks = [v[:n_min] for v in visible_masks]
     single_masks = [s[:n_min] for s in single_masks]
     in_frame_masks = [i[:n_min] for i in in_frame_masks]
+    n_cams = len(mats)
+    k = resolve_min_cams_in_frame(min_cams_in_frame, n_cams)
     visible_all = np.logical_and.reduce(visible_masks)
     single_all = np.logical_and.reduce(single_masks)
-    in_frame_all = np.logical_and.reduce(in_frame_masks)
-    intersection = visible_all & single_all & in_frame_all
-    # Longest contiguous run of "visible AND single-fly AND fully in frame,
-    # in all cams"
-    pad = np.r_[0, intersection.astype(np.int8), 0]
-    diff = np.diff(pad)
-    run_starts = np.where(diff == 1)[0]
-    run_ends = np.where(diff == -1)[0]   # exclusive
-    if len(run_starts):
-        lengths_run = run_ends - run_starts
-        best = int(np.argmax(lengths_run))
-        good_start = int(run_starts[best])
-        good_end = int(run_ends[best])
-    else:
-        good_start = good_end = 0
+    # Per frame: how many cams see the WHOLE fly. Counting (rather than
+    # AND-ing) is the whole relaxation -- a frame passes on the COUNT, so the
+    # majority that satisfies it may be a different set of cams each frame.
+    n_in_frame = np.sum(in_frame_masks, axis=0)
+    intersection = visible_all & single_all & (n_in_frame >= k)
+    good_start, good_end = _longest_run(intersection)
+    # What the all-cams rule would have given, from the same masks, so the
+    # report can state the cost/benefit of the relaxation without a 2nd scan.
+    strict_start, strict_end = _longest_run(
+        visible_all & single_all & (n_in_frame >= n_cams))
     return {
         "n_frames": n_min,
+        "n_cams": n_cams,
+        "min_cams_in_frame": k,
         "per_cam_visible_counts": [int(v.sum()) for v in visible_masks],
         # A frame is "multi-blob" when it's visible but NOT single-fly.
         "per_cam_multi_blob_counts": [int((v & ~s).sum())
@@ -208,10 +316,18 @@ def scan_movie(movie_dir: str, pixel_threshold: int,
         "per_cam_out_of_frame_counts": [int((v & ~i).sum())
                                         for v, i in zip(visible_masks,
                                                         in_frame_masks)],
+        # hist[j] = frames where exactly j cams saw the whole fly.
+        "in_frame_cam_histogram": np.bincount(n_in_frame,
+                                              minlength=n_cams + 1).tolist(),
         "intersection_count": int(intersection.sum()),
         "good_start": good_start,
         "good_end": good_end,
         "good_run_length": good_end - good_start,
+        "strict_good_run_length": strict_end - strict_start,
+        # (n_frames, n_cams) bool, raw-frame indexed — sidecar source.
+        "in_frame_mask": np.stack(in_frame_masks, axis=1),
+        "visible_mask": np.stack(visible_masks, axis=1),
+        "single_mask": np.stack(single_masks, axis=1),
         "mats": mats,
     }
 
@@ -224,7 +340,7 @@ def parse_movie_num(d: str):
 
 def detect_mode(input_dir: str) -> tuple:
     n_direct = len(glob.glob(os.path.join(input_dir, "*_sparse.mat")))
-    if n_direct == 4:
+    if n_direct in SUPPORTED_CAM_COUNTS:
         mn = parse_movie_num(input_dir)
         if mn is None:
             sys.exit(f"Single-movie mode requires 'mov<N>' basename; got "
@@ -232,7 +348,8 @@ def detect_mode(input_dir: str) -> tuple:
         return "single", [(input_dir, mn)]
     if n_direct != 0:
         sys.exit(f"Ambiguous: {input_dir} contains {n_direct} *_sparse.mat "
-                 f"(expected 0 or 4)")
+                 f"(expected 0, "
+                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))})")
     # os.listdir (not a case-sensitive glob) so 'Mov001' Windows exports are
     # discovered alongside canonical 'mov1'.
     movies = []
@@ -243,11 +360,13 @@ def detect_mode(input_dir: str) -> tuple:
         mn = parse_movie_num(sub)
         if mn is None:
             continue
-        if len(glob.glob(os.path.join(sub, "*_sparse.mat"))) == 4:
+        if len(glob.glob(os.path.join(sub, "*_sparse.mat"))) in SUPPORTED_CAM_COUNTS:
             movies.append((sub, mn))
     movies.sort(key=lambda t: t[1])
     if not movies:
-        sys.exit(f"No 'mov<N>/' subdirs with 4 *_sparse.mat in {input_dir}")
+        sys.exit(f"No 'mov<N>/' subdirs with "
+                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))} "
+                 f"*_sparse.mat in {input_dir}")
     return "multi", movies
 
 
@@ -256,17 +375,23 @@ def scan_experiment(input_dir: str, min_intersection: int = 500,
                     blob_ratio: float = 0.30,
                     blob_distance: float = 100.0,
                     print_results: bool = True,
-                    min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN) -> list:
+                    min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN,
+                    min_cams_in_frame=DEFAULT_MIN_CAMS_IN_FRAME) -> list:
     """Scans all movies under input_dir. Returns list of result dicts:
         {'movie_dir': str, 'movie_num': int,
          'verdict': 'OK'|'BAD'|'ERR',
-         'intersection': int,                  # total frames passing all 3 tests
+         'intersection': int,                  # total frames passing the tests
          'good_start': int, 'good_end': int,   # longest contiguous run
          'good_run_length': int,
-         'n_frames': int,
-         'per_cam_visible': [int]*4,
-         'per_cam_multi_blob': [int]*4,        # # of frames flagged 2+ flies
-         'per_cam_out_of_frame': [int]*4,      # # of frames with a cut fly
+         'strict_good_run_length': int,        # same under the all-cams rule
+         'n_frames': int, 'n_cams': int,
+         'min_cams_in_frame': int,             # effective K
+         'per_cam_visible': [int]*n_cams,
+         'per_cam_multi_blob': [int]*n_cams,   # # of frames flagged 2+ flies
+         'per_cam_out_of_frame': [int]*n_cams, # # of frames with a cut fly
+         'in_frame_cam_histogram': [int]*(n_cams+1),
+         'in_frame_mask'/'visible_mask'/'single_mask': (n_frames, n_cams) bool,
+         'mats': [str],                        # in camera-index order
          'error': str | None}
     """
     mode, movies = detect_mode(input_dir)
@@ -277,10 +402,15 @@ def scan_experiment(input_dir: str, min_intersection: int = 500,
               f"blob_ratio >= {blob_ratio:.2f}, "
               f"blob_distance >= {blob_distance:.0f} px, "
               f"edge_margin >= {min_edge_margin:.0f} px")
+        req = ("all cams" if not min_cams_in_frame or min_cams_in_frame <= 0
+               else str(int(min_cams_in_frame)))
+        print(f"  cams that must see the WHOLE fly per frame: {req}"
+              + (f" (clamped; min usable is {MIN_USABLE_CAMS_IN_FRAME})"
+                 if req.isdigit() and int(req) < MIN_USABLE_CAMS_IN_FRAME else ""))
     results = []
     for movie_dir, mn in movies:
         info = scan_movie(movie_dir, pixel_threshold, blob_ratio,
-                          blob_distance, min_edge_margin)
+                          blob_distance, min_edge_margin, min_cams_in_frame)
         if "error" in info:
             results.append({"movie_dir": movie_dir, "movie_num": mn,
                             "verdict": "ERR", "error": info["error"]})
@@ -299,10 +429,18 @@ def scan_experiment(input_dir: str, min_intersection: int = 500,
             "good_start": info["good_start"],
             "good_end": info["good_end"],
             "good_run_length": info["good_run_length"],
+            "strict_good_run_length": info["strict_good_run_length"],
             "n_frames": info["n_frames"],
+            "n_cams": info["n_cams"],
+            "min_cams_in_frame": info["min_cams_in_frame"],
             "per_cam_visible": info["per_cam_visible_counts"],
             "per_cam_multi_blob": info["per_cam_multi_blob_counts"],
             "per_cam_out_of_frame": info["per_cam_out_of_frame_counts"],
+            "in_frame_cam_histogram": info["in_frame_cam_histogram"],
+            "in_frame_mask": info["in_frame_mask"],
+            "visible_mask": info["visible_mask"],
+            "single_mask": info["single_mask"],
+            "mats": info["mats"],
             "error": None,
         })
         if print_results:
@@ -312,12 +450,21 @@ def scan_experiment(input_dir: str, min_intersection: int = 500,
             vis_str = ", ".join(f"cam{i+1}={c}" for i, c in enumerate(vis))
             mb_str = ", ".join(f"cam{i+1}={c}" for i, c in enumerate(mb))
             oof_str = ", ".join(f"cam{i+1}={c}" for i, c in enumerate(oof))
+            hist = info["in_frame_cam_histogram"]
+            hist_str = ", ".join(f"{j}={hist[j]}"
+                                 for j in range(len(hist) - 1, -1, -1))
+            k = info["min_cams_in_frame"]
+            # Only worth printing the counterfactual when it IS one.
+            relaxed = (f"  [K={k}; all-cams rule would give "
+                       f"{info['strict_good_run_length']}]"
+                       if k < info["n_cams"] else "")
             print(f"  [mov{mn:3}] {'OK ' if ok else 'BAD'}  "
                   f"run=[{info['good_start']:4}, {info['good_end']:5}) "
-                  f"({info['good_run_length']:5}/{info['n_frames']})")
+                  f"({info['good_run_length']:5}/{info['n_frames']}){relaxed}")
             print(f"          visible:      {vis_str}")
             print(f"          multi-blob:   {mb_str}")
             print(f"          out-of-frame: {oof_str}")
+            print(f"          whole-fly cams per frame: {hist_str}")
     if print_results:
         ok_n = sum(1 for r in results if r["verdict"] == "OK")
         bad_n = sum(1 for r in results if r["verdict"] == "BAD")
@@ -359,6 +506,14 @@ def main():
                          "clear of every image border; frames where it "
                          "doesn't show a truncated fly and are excluded "
                          f"(default: {DEFAULT_MIN_EDGE_MARGIN}, 0 disables)")
+    ap.add_argument("--min-cams-in-frame", type=int,
+                    default=DEFAULT_MIN_CAMS_IN_FRAME,
+                    help="how many cams must see the WHOLE fly for a frame to "
+                         "count; the rest may see it cut. Evaluated per frame, "
+                         "so the majority need not be the same cams throughout "
+                         f"(default: {DEFAULT_MIN_CAMS_IN_FRAME}; 0 = every "
+                         f"cam; values below {MIN_USABLE_CAMS_IN_FRAME} are "
+                         "clamped)")
     args = ap.parse_args()
     if not os.path.isdir(args.input_dir):
         sys.exit(f"input_dir is not a directory: {args.input_dir}")
@@ -366,7 +521,8 @@ def main():
                               args.pixel_threshold,
                               args.blob_ratio, args.blob_distance,
                               print_results=True,
-                              min_edge_margin=args.min_edge_margin)
+                              min_edge_margin=args.min_edge_margin,
+                              min_cams_in_frame=args.min_cams_in_frame)
     bad_n = sum(1 for r in results if r["verdict"] != "OK")
     sys.exit(1 if bad_n else 0)
 

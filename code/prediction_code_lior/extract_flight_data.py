@@ -15,7 +15,8 @@ from scipy.signal import medfilt
 from Visualizer import Visualizer
 from scipy.signal import savgol_filter, find_peaks
 from numpy.polynomial.polynomial import Polynomial
-from utils import get_start_frame, find_flip_in_files
+from utils import (get_start_frame, find_flip_in_files, perturbation_frame_labels,
+                   PERT_STATE_NAMES)
 from scipy.spatial.transform import Rotation as R
 import re
 import pandas as pd
@@ -34,6 +35,37 @@ WINGS_JOINTS_INDS = [7, 15]
 WING_TIP_IND = 2
 UPPER_PLANE_POINTS = [0, 1, 2, 6]
 LOWER_PLANE_POINTS = [2, 3, 4, 5, 6]
+
+# phi and psi are both built from a construction whose natural output window drops a 360 deg
+# branch cut right where the signal lives: psi peaks at 186 against arctan2's cut at 180, and
+# phi troughs at 12 against consistent_angle's cut at 0. A frame that crosses such a cut jumps
+# the full 360, which reads as the angle teleporting between its two extremes. Reporting both
+# in one window that starts well clear of the data keeps the cut out of the way. theta needs
+# none of this: it comes from arccos and is bounded to [-90, 90] by construction
+ANGLE_WINDOW_START = -90.0
+# the four known-good movies hold phi and psi inside [-4, 190], so anything past this band is a
+# frame whose pose is wrong rather than a real wing position, and is reported as nan instead of
+# as a number. both edges sit inside the window, so a frame that does cross the window seam is
+# masked whichever side it lands on and the seam can never show up as a jump
+WING_ANGLE_VALID_RANGE = (-60.0, 250.0)
+# a chord sign flip lasts a few frames at stroke reversal, so 3 taps is not enough to span it
+PSI_MEDFILT_KERNEL = 5
+# what is left of the chord reference after its span component is removed, as a fraction of a
+# unit vector. the leading-to-trailing-edge reference is perpendicular to the span already, so
+# this normally sits near 1.0; if it ever collapses towards 0 the direction is noise and
+# normalising it would amplify that noise into a 180 deg chord flip, so carry the sign over from
+# the previous frame instead
+MIN_CHORD_REFERENCE_NORM = 0.15
+# cross(span, upper_plane_normal) is only the chord while the upper plane is well fit. the four
+# points it is fit through go near-collinear when the wing is edge-on at stroke reversal, and the
+# normal then tips into the wing plane, which sends the "chord" up to 80 deg away from where the
+# leading edge says it is. past this much disagreement the plane is the thing that is wrong, so
+# fall back on the leading-edge reference itself, which is already perpendicular to the span
+MAX_CHORD_REFERENCE_DISAGREEMENT = np.cos(np.deg2rad(45))
+# window, in frames, over which the wing tips are pooled to measure the plane the wings actually
+# sweep in. needs to span a couple of wingbeats (a wingbeat is ~55 frames at 16 kHz) without
+# being so long that body rotation smears the cloud
+TIP_PLANE_WINDOW = 120
 
 
 class HalfWingbit:
@@ -312,8 +344,14 @@ class FlightAnalysis:
         self.wings_theta_left_dot = self.get_dot(self.wings_theta_left, sampling_rate=SAMPLING_RATE)
         self.wings_theta_right_dot = self.get_dot(self.wings_theta_right, sampling_rate=SAMPLING_RATE)
 
-        self.wings_psi_left_dot = self.get_dot(self.wings_psi_left, sampling_rate=SAMPLING_RATE)
-        self.wings_psi_right_dot = self.get_dot(self.wings_psi_right, sampling_rate=SAMPLING_RATE)
+        # psi is reported inside a fixed 360 deg window, so differentiate an unwrapped copy:
+        # a frame that steps over the window edge is a 360 deg jump in the reported value but
+        # no motion at all, and would otherwise show up as a huge spike in psi_dot. unwrapping
+        # is safe here because a constant 360 deg offset does not change a derivative
+        self.wings_psi_left_dot = self.get_dot(np.unwrap(self.wings_psi_left, period=360),
+                                               sampling_rate=SAMPLING_RATE)
+        self.wings_psi_right_dot = self.get_dot(np.unwrap(self.wings_psi_right, period=360),
+                                                sampling_rate=SAMPLING_RATE)
 
         # plt.plot(self.wings_phi_right, label="wings_phi_right")
         # plt.plot(self.wings_phi_left, label="wings_phi_left")
@@ -1048,6 +1086,14 @@ class FlightAnalysis:
         self.wings_psi_right = FlightAnalysis.fill_with_nans(self.wings_psi_right, indices)
         self.wings_psi_left = FlightAnalysis.fill_with_nans(self.wings_psi_left, indices)
 
+        # a wing angle outside the physiological band means the pose is wrong on that frame, so
+        # report nothing rather than a number. done here, once the derivatives and the wingbit
+        # detection have already run on the unmasked arrays, so the nans cannot spread into them
+        for angle_attribute in ("wings_phi_left", "wings_phi_right",
+                                "wings_psi_left", "wings_psi_right"):
+            setattr(self, angle_attribute,
+                    FlightAnalysis.mask_out_of_band(getattr(self, angle_attribute)))
+
         self.wings_phi_left_dot = FlightAnalysis.fill_with_nans(self.wings_phi_left_dot, indices)
         self.wings_phi_right_dot = FlightAnalysis.fill_with_nans(self.wings_phi_right_dot, indices)
         self.wings_theta_left_dot = FlightAnalysis.fill_with_nans(self.wings_theta_left_dot, indices)
@@ -1156,13 +1202,24 @@ class FlightAnalysis:
         return points_smoothed
 
     def get_estimated_chords(self):
+        """Rough trailing-edge-to-leading-edge direction, used only to pick the chord's sign.
+
+        Measured from the leading edge to the trailing edge. The old reference ran from the
+        midpoint of (root, tip) to the leading edge, but that midpoint sits ON the span axis,
+        so the vector to it was only about 38 deg off the span to begin with and near stroke
+        reversal it swung round to parallel -- leaving nothing perpendicular to vote with, and
+        letting the chord flip by 180 deg for a few frames. Going leading edge to trailing edge
+        is perpendicular to the span by construction and stays well away from degenerate.
+        """
         cord_estimates = []
         for wing in range(2):
-            leading_edge_point = (self.points_3D[:, 0 + wing * self.num_points_per_wing, :] +
-                                  self.points_3D[:, 1 + wing * self.num_points_per_wing, :]) / 2
-            center_of_wing_point = (self.points_3D[:, 6 + wing * self.num_points_per_wing, :] +
-                                    self.points_3D[:, 2 + wing * self.num_points_per_wing, :]) / 2
-            chord_estimate = leading_edge_point - center_of_wing_point
+            offset = wing * self.num_points_per_wing
+            leading_edge_point = (self.points_3D[:, 0 + offset, :] +
+                                  self.points_3D[:, 1 + offset, :]) / 2
+            trailing_edge_point = (self.points_3D[:, 3 + offset, :] +
+                                   self.points_3D[:, 4 + offset, :] +
+                                   self.points_3D[:, 5 + offset, :]) / 3
+            chord_estimate = leading_edge_point - trailing_edge_point
             chord_estimate /= np.linalg.norm(chord_estimate, axis=1)[:, np.newaxis]
             cord_estimates.append(chord_estimate)
         chord_estimate_left, chord_estimate_right = cord_estimates
@@ -1171,7 +1228,6 @@ class FlightAnalysis:
     def get_wings_cords(self):
         wings_spans = np.concatenate((self.left_wing_span[:, np.newaxis, :],
                                       self.right_wing_span[:, np.newaxis, :]), axis=1)
-        wing_reference_points = [[4, 1], [12, 9]]
         estimated_chords_left, estimated_chords_right = self.get_estimated_chords()
         estimated_chords = [estimated_chords_left, estimated_chords_right]
         wings_chords = np.zeros_like(wings_spans)
@@ -1179,13 +1235,33 @@ class FlightAnalysis:
             for wing in range(2):
                 span = wings_spans[frame, wing, :]
                 wing_plane_normal = self.all_upper_planes[frame, wing, :-1]
+                # cross(span, plane_normal) pins down the line the chord lies on, but the plane
+                # normal's own sign is arbitrary, so which way along that line points away from
+                # the leading edge still has to be voted on every frame
                 chord = np.cross(span, wing_plane_normal)
                 chord /= np.linalg.norm(chord)
-                # check direction
+
+                # vote against the leading edge estimate, but first strip whatever component
+                # it has along the span, since chord is exactly perpendicular to the span by
+                # construction. the vote is only worth as much as the reference is, and a
+                # normalised reference hides how much was left to normalise -- |dot| reads ~1.0
+                # either way, because it compares two unit vectors -- so measure the residual
+                # before normalising and only vote on it when there is something there
                 estimated_chord = estimated_chords[wing][frame]
-                if np.dot(chord, estimated_chord) < 0:
-                    chord = -chord
-                # make sure chord is
+                estimated_chord = estimated_chord - np.dot(estimated_chord, span) * span
+                reference_norm = np.linalg.norm(estimated_chord)
+                previous_chord = wings_chords[frame - 1, wing, :] if frame > 0 else None
+                if reference_norm >= MIN_CHORD_REFERENCE_NORM:
+                    estimated_chord = estimated_chord / reference_norm
+                    if np.dot(chord, estimated_chord) < 0:
+                        chord = -chord
+                    # a chord that disagrees this hard with a well-conditioned reference is
+                    # reporting the upper plane's bad frame, not the wing's chord
+                    if np.dot(chord, estimated_chord) < MAX_CHORD_REFERENCE_DISAGREEMENT:
+                        chord = estimated_chord
+                elif previous_chord is not None and np.any(previous_chord):
+                    if np.dot(chord, previous_chord) < 0:
+                        chord = -chord
                 wings_chords[frame, wing, :] = chord
         return wings_chords[:, LEFT], wings_chords[:, RIGHT]
 
@@ -1214,24 +1290,52 @@ class FlightAnalysis:
                 angtmp = np.arctan2(ypsi, xpsi)
                 all_psi_rad[wing, frame] = angtmp  # Store radians
 
-        # Unwrap radians to prevent jumps
-        all_psi_rad = np.unwrap(all_psi_rad, axis=1)
-
-        # Convert radians to degrees
         all_psi_deg = np.rad2deg(all_psi_rad)
 
-        # Split into left and right wing psi
+        # the left wing carries a 180 deg offset by convention. apply it before the branch is
+        # chosen, so both wings end up in the same window. applying it afterwards, as this used
+        # to, left the left wing's cut sitting at psi = 0, right under its trough
+        all_psi_deg[LEFT] += 180
+
+        # drop isolated spikes while psi is still an angle. a chord sign flip shows up here as a
+        # spike, which a median filter removes. once a branch has been picked it is a step
+        # instead, and no median filter can remove a step
+        for wing in range(2):
+            analysed = all_psi_deg[wing, self.first_y_body_frame:]
+            all_psi_deg[wing, self.first_y_body_frame:] = FlightAnalysis.circular_medfilt(
+                analysed, PSI_MEDFILT_KERNEL)
+
+        # psi is a bounded oscillation, not a rotation that accumulates, so put it in one fixed
+        # window rather than unwrapping it. np.unwrap enforced continuity instead, and its
+        # corrections are cumulative, so a few bad frames shifted every later frame by 360 deg
+        all_psi_deg = FlightAnalysis.to_angle_window(all_psi_deg)
+
         left_wing_psi, right_wing_psi = all_psi_deg
-
-        left_wing_psi = 180 + left_wing_psi
-
-        left_wing_psi = medfilt(left_wing_psi)
-        right_wing_psi = medfilt(right_wing_psi)
-
-        # plt.plot(left_wing_psi)
-        # plt.plot(right_wing_psi)
-        # plt.show()
         return left_wing_psi, right_wing_psi
+
+    @staticmethod
+    def to_angle_window(angles_deg):
+        """Report an angle inside one fixed 360 deg window whose branch cut sits clear of the
+        data. Unlike unwrapping this cannot accumulate: every frame stands on its own."""
+        return np.mod(angles_deg - ANGLE_WINDOW_START, 360.0) + ANGLE_WINDOW_START
+
+    @staticmethod
+    def mask_out_of_band(angles_deg):
+        """Nan the frames that fall outside the physiological band. The pose is wrong on those
+        frames, so a number would be misleading whichever branch it happened to land on."""
+        low, high = WING_ANGLE_VALID_RANGE
+        masked = np.array(angles_deg, dtype=float, copy=True)
+        masked[(masked < low) | (masked > high)] = np.nan
+        return masked
+
+    @staticmethod
+    def circular_medfilt(angles_deg, kernel_size):
+        """Median filter an angle, going through sin and cos so the filter does not see the
+        360 deg seam. Filtering the degrees directly turns a seam crossing into an outlier."""
+        radians = np.radians(angles_deg)
+        cos_filtered = medfilt(np.cos(radians), kernel_size)
+        sin_filtered = medfilt(np.sin(radians), kernel_size)
+        return np.degrees(np.arctan2(sin_filtered, cos_filtered))
 
     def get_head_tail_points(self, smooth=True):
         head_tail_points = self.points_3D[:, self.head_tail_inds, :]
@@ -1369,23 +1473,73 @@ class FlightAnalysis:
         return gravity_body
 
     def set_right_left(self):
-        wing_CM_left = np.mean(self.points_3D[:, self.left_inds[:-1], :], axis=1)
-        wing_CM_right = np.mean(self.points_3D[:, self.right_inds[:-1], :], axis=1)
-        wings_vec = wing_CM_right - wing_CM_left
-        wings_vec = wings_vec / np.linalg.norm(wings_vec, axis=-1)[:, np.newaxis]
-        cross = np.cross(wings_vec, self.x_body, axis=-1)
-        z = 2
-        z_component = cross[:, z]
-        mean_z_component = np.mean(z_component)
-        need_flip = False
-        if mean_z_component < 0:
-            need_flip = True
+        need_flip = self.left_right_needs_flip()
         if need_flip:
             self.flip_right_left_points()
 
         to_flip = self.find_if_flip()
         if to_flip:
             self.flip_right_left_points()
+
+    def dorsal_direction(self):
+        """Per frame, the fly's dorsal direction, read off the plane the wings sweep in.
+
+        Everything downstream hangs on knowing which wing is the left one, because
+        get_roni_y_body orients y_body by the left wing's span and get_stroke_planes then
+        tilts x_body 45 deg about y_body. Get the side wrong and that tilt is applied in the
+        opposite direction, which lands the stroke plane about 90 deg from the real one.
+
+        The wing tips, pooled over a couple of wingbeats, lie in the stroke plane, so the
+        normal of that cloud is the stroke plane normal up to sign. By construction the
+        stroke normal is x_body tilted 45 deg towards dorsal, so it keeps a positive
+        component along x_body -- that fixes the sign, and what is left after removing the
+        x_body component is the dorsal direction. No lab axis enters, which is the point:
+        the fly's own wingbeat says which way is up.
+        """
+        tips = np.stack((self.points_3D[:, WING_TIP_IND, :],
+                         self.points_3D[:, WING_TIP_IND + self.num_points_per_wing, :]), axis=1)
+        hinge = np.mean(self.points_3D[:, WINGS_JOINTS_INDS, :], axis=1)
+        tips = tips - hinge[:, np.newaxis, :]
+        half = TIP_PLANE_WINDOW // 2
+        dorsal = np.full_like(self.x_body, np.nan)
+        for frame in range(self.num_frames):
+            start, stop = max(0, frame - half), min(self.num_frames, frame + half)
+            cloud = tips[start:stop].reshape(-1, 3)
+            cloud = cloud[np.isfinite(cloud).all(axis=1)]
+            if len(cloud) < 20:
+                continue
+            normal = np.linalg.svd(cloud - cloud.mean(axis=0), full_matrices=False)[2][2]
+            x_body = self.x_body[frame]
+            along_x = np.dot(normal, x_body)
+            if along_x < 0:
+                normal, along_x = -normal, -along_x
+            perpendicular = normal - along_x * x_body
+            norm = np.linalg.norm(perpendicular)
+            if norm > 1e-8:
+                dorsal[frame] = perpendicular / norm
+        return dorsal
+
+    def left_right_needs_flip(self):
+        """Whether the two wing point groups are labelled the wrong way round.
+
+        The old test asked whether cross(right - left, x_body) pointed up in the LAB, which
+        is the same as assuming the fly is flying dorsal-side-up. A fly rolled past 90 deg
+        answers it backwards, and a fly flying on its side answers it by coin toss -- so
+        exactly the manoeuvring movies this is meant to handle are the ones it got wrong.
+        Vote per frame against the fly's own dorsal direction instead.
+        """
+        dorsal = self.dorsal_direction()
+        # z_body x x_body = y_body, i.e. the direction the fly's left lies in
+        left_direction = np.cross(dorsal, self.x_body, axis=-1)
+        wing_CM_left = np.mean(self.points_3D[:, self.left_inds[:-1], :], axis=1)
+        wing_CM_right = np.mean(self.points_3D[:, self.right_inds[:-1], :], axis=1)
+        wings_vec = wing_CM_right - wing_CM_left
+        vote = FlightAnalysis.row_wize_dot(wings_vec, left_direction)
+        vote = vote[np.isfinite(vote)]
+        if len(vote) == 0:
+            return False
+        # the group called "right" should sit away from the fly's left
+        return bool(np.mean(vote > 0) > 0.5)
 
     def flip_right_left_points(self):
         left = self.points_3D[:, self.left_inds, :]
@@ -1512,7 +1666,10 @@ class FlightAnalysis:
             if wing_num == 1:
                 stroke_plane_normal = -stroke_plane_normal
             phi = FlightAnalysis.consistent_angle(proj, proj_xbody, stroke_plane_normal)
-            phi = 360 - phi
+            # consistent_angle returns [0, 360), so 360 - phi leaves the branch cut at 0/360 --
+            # directly under phi's trough at 12 deg, close enough that a slightly deeper stroke
+            # wraps and the trough reads as ~350. move it into the shared window instead
+            phi = FlightAnalysis.to_angle_window(360 - phi)
             # phi[:self.first_y_body_frame] = 0
             # phi[self.end_frame:] = 0
             phis.append(phi)
@@ -2121,8 +2278,50 @@ def save_movies_data_to_hdf5(base_path, output_hdf5_path, smooth=True, one_h5_fo
         f"All data saved to {output_hdf5_path}" if one_h5_for_all else "All data saved to individual movie HDF5 files")
 
 
+def write_perturbation_datasets(hdf, frame_index, pert):
+    """Stamp a movie's perturbation window into an open analysis h5.
+
+    Datasets are deleted before being rewritten, so this is safe to apply to an
+    h5 that already carries a window -- a re-analysis of the same movie
+    refreshes it rather than failing on an existing name.
+
+    Datasets written (all trigger-relative unless the name says `_index`):
+      perturbation             1, i.e. this movie is from a perturbation experiment
+      perturbation_type        e.g. "roll"
+      perturbation_start_frame the onset -- always known when declared
+      perturbation_start_index row holding the onset, or -1 if outside this movie
+      perturbation_end_known   0 when the log never recorded a duration
+      perturbation_state       per frame; see utils.PERT_* (-1 == unknown)
+      perturbation_end_frame   \\ only when the duration is known
+      perturbation_end_index    | (an absent end is how "we do not know"
+      perturbation_duration_ms /   is expressed -- see PERT_UNKNOWN)
+    """
+    state, start_idx, end_idx = perturbation_frame_labels(frame_index, pert)
+    scalars = {
+        "perturbation": np.int64(1),
+        "perturbation_start_frame": np.int64(pert["onset_frame"]),
+        "perturbation_start_index": np.int64(start_idx),
+        "perturbation_end_known": np.int64(1 if pert["end_known"] else 0),
+    }
+    if pert["end_known"]:
+        scalars["perturbation_end_frame"] = np.int64(pert["end_frame"])
+        scalars["perturbation_end_index"] = np.int64(end_idx)
+        scalars["perturbation_duration_ms"] = float(pert["duration_ms"])
+    for name, value in scalars.items():
+        if name in hdf:
+            del hdf[name]
+        hdf.create_dataset(name, data=value)
+    for name in ("perturbation_type", "perturbation_state"):
+        if name in hdf:
+            del hdf[name]
+    hdf.create_dataset("perturbation_type", data=np.bytes_(str(pert["type"])))
+    hdf.create_dataset("perturbation_state", data=state)
+    return state, start_idx, end_idx
+
+
 def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_object=None,
-                             trigger_offset=None, frame_rate=None, source=None):
+                             trigger_offset=None, frame_rate=None, source=None,
+                             perturbation=None):
     if analysis_object is None:
         FA = FlightAnalysis(points_3D_path, create_html=True)  # Assuming FlightAnalysis is properly defined
     else:
@@ -2181,6 +2380,14 @@ def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_
                 hdf.create_dataset("frame_rate", data=float(frame_rate))
                 hdf.create_dataset("time_ms", data=frame_index * 1000.0 / frame_rate)
 
+            # Perturbation window, when the experiment declares one. Written
+            # here because `frame_index` is the only place the two truncations
+            # (the prescan's build range and FlightAnalysis's own trim) have
+            # already been reconciled -- so the window can be expressed against
+            # the rows that actually exist in this file.
+            if perturbation is not None:
+                write_perturbation_datasets(hdf, frame_index, perturbation)
+
         # Which recording this came from. The file is named only after the
         # movie number and frame range, and those repeat across experiments, so
         # without this an analysis h5 on its own cannot say which experiment it
@@ -2194,7 +2401,8 @@ def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_
     return movie_hdf5_path, FA
 
 
-def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None):
+def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None,
+                        perturbation=None):
     """Write a MATLAB-ready CSV of the per-frame fly state from a FlightAnalysis.
 
     One row per frame, indexed by the trigger-relative frame number (frame 0 ==
@@ -2227,6 +2435,12 @@ def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None):
     data = {"frame": frame_num.astype(int)}
     if frame_rate:
         data["time_ms"] = frame_num * 1000.0 / frame_rate
+    # Perturbation state as a word rather than the h5's int8, so the CSV stays
+    # readable in MATLAB without a code table. "unknown" means the onset is
+    # known but the duration was never recorded -- it is not a missing value.
+    if perturbation is not None:
+        state, _, _ = perturbation_frame_labels(frame_num, perturbation)
+        data["perturbation_state"] = [PERT_STATE_NAMES[int(s)] for s in state]
     data["CM_x_mm"] = com_mm[:, 0]
     data["CM_y_mm"] = com_mm[:, 1]
     data["CM_z_mm"] = com_mm[:, 2]

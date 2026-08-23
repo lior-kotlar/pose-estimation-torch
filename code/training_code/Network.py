@@ -5,10 +5,15 @@ from constants import ALL_CAMS_PER_WING, ALL_CAMS_ALL_WINGS, MODEL_PER_CAM_PER_W
 
 
 class Network:
-    def __init__(self, general_configuration: TrainConfig, image_size, number_of_output_channels):
+    def __init__(self, general_configuration: TrainConfig, image_size,
+                 number_of_output_channels, num_cams=4):
         self.model_type = general_configuration.get_model_type()
         self.image_size = image_size
         self.number_of_output_channels = number_of_output_channels
+        # How many camera streams a multi-view sample carries. Passed in
+        # rather than assumed, because the Preprocessor may have narrowed a
+        # 4-camera labelled set down to 3-camera samples.
+        self.num_cams = num_cams
         self.model = self.config_model(general_configuration=general_configuration)
 
     class encoder_atrous(nn.Module):
@@ -200,12 +205,22 @@ class Network:
         def get_model_type(self):
             return MODEL_PER_CAM_PER_WING
 
-    class FourCamsNetwork(nn.Module):
-        NUM_OF_CAMS = 4
-        def __init__(self, general_configuration: TrainConfig, image_size, number_of_output_channels):
-            super(Network.FourCamsNetwork, self).__init__()
+    class MultiCamNetwork(nn.Module):
+        """Shared-weight encoder/decoder run over every camera stream, with a
+        cross-camera context vector merged into each decoder input.
+
+        The camera count is a constructor argument (it used to be a hard-coded
+        NUM_OF_CAMS = 4) so the same class covers the current 4-camera rig and
+        the old 3-camera one. Nothing about the weights is per-camera: the
+        encoder and decoder are shared, so the only shape that moves with the
+        count is the decoder's input width under "concat" fusion -- see below.
+        """
+        def __init__(self, general_configuration: TrainConfig, image_size,
+                     number_of_output_channels, num_cams=4):
+            super(Network.MultiCamNetwork, self).__init__()
             image_size = image_size
             number_of_output_channels = number_of_output_channels
+            self.num_cams = num_cams
 
             num_base_filters,\
             num_blocks,\
@@ -215,10 +230,10 @@ class Network:
             dropout = general_configuration.get_network_configuration()
 
             total_input_channels = image_size[0]
-            self.channels_per_cam = total_input_channels // self.NUM_OF_CAMS
+            self.channels_per_cam = total_input_channels // self.num_cams
 
             self.shared_encoder = Network.encoder_atrous(
-                img_size=(image_size[0]//self.NUM_OF_CAMS, image_size[1], image_size[2]),
+                img_size=(image_size[0]//self.num_cams, image_size[1], image_size[2]),
                 num_base_filters=num_base_filters,
                 num_blocks=num_blocks,
                 kernel_size=kernel_size,
@@ -229,12 +244,20 @@ class Network:
 
             encoder_out_channels = self.shared_encoder.get_out_channels()
             # --- cross-camera fusion (opt-in; "concat" == original behavior) ---
-            # concat -> global context is all NUM_OF_CAMS codes stacked on the
+            # concat -> global context is all num_cams codes stacked on the
             # channel axis; max/mean -> a single permutation-invariant pooled
             # code. Decoder input = local code + global context.
+            #
+            # This is also the ONE place the camera count changes a weight
+            # shape: under "concat" the decoder's input width is
+            # (1 + num_cams) * encoder_out, so a 3-camera concat model cannot
+            # be warm-started from 4-camera weights. Under max/mean the width
+            # is camera-count independent (and the merge is
+            # permutation-invariant, so no camera-slot ordering is baked in),
+            # which makes those the ones to use across rigs.
             self.camera_fusion = general_configuration.get_camera_fusion()
             if self.camera_fusion == "concat":
-                global_channels = self.NUM_OF_CAMS * encoder_out_channels
+                global_channels = self.num_cams * encoder_out_channels
             else:  # "max" / "mean" pool down to one code width
                 global_channels = encoder_out_channels
             decoder_input_channels = encoder_out_channels + global_channels
@@ -242,7 +265,7 @@ class Network:
 
             self.shared_decoder = Network.decoder(
                 input_channels=decoder_input_channels,
-                output_channels=number_of_output_channels//self.NUM_OF_CAMS,
+                output_channels=number_of_output_channels//self.num_cams,
                 weight_init_method_str=weight_init_str,
                 num_base_filters=num_base_filters,
                 num_blocks=num_blocks,
@@ -250,41 +273,28 @@ class Network:
             )
 
         def forward(self, x):
-            splits = torch.split(x, self.channels_per_cam, dim=1)
-            x_in_split_1 = splits[0]
-            x_in_split_2 = splits[1]
-            x_in_split_3 = splits[2]
-            x_in_split_4 = splits[3]
+            splits = torch.split(x, self.channels_per_cam, dim=1)[:self.num_cams]
 
-            # 4. Shared Encoding
-            # Call the *same* module on each split
-            code_out_1 = self.shared_encoder(x_in_split_1)
-            code_out_2 = self.shared_encoder(x_in_split_2)
-            code_out_3 = self.shared_encoder(x_in_split_3)
-            code_out_4 = self.shared_encoder(x_in_split_4)
+            # 4. Shared Encoding — the *same* module on each camera's split.
+            codes = [self.shared_encoder(split) for split in splits]
 
             # 5. Global Feature Merging (concat by default; opt-in max/mean pool)
-            x_code_merge = self._merge_cameras([code_out_1, code_out_2, code_out_3, code_out_4])
+            x_code_merge = self._merge_cameras(codes)
 
-            # 6. Shared Decoding (Local + Global)
-            # We also concatenate along the channel dimension (dim=1)
-            map_out_1 = self.shared_decoder(torch.cat([code_out_1, x_code_merge], dim=1))
-            map_out_2 = self.shared_decoder(torch.cat([code_out_2, x_code_merge], dim=1))
-            map_out_3 = self.shared_decoder(torch.cat([code_out_3, x_code_merge], dim=1))
-            map_out_4 = self.shared_decoder(torch.cat([code_out_4, x_code_merge], dim=1))
+            # 6. Shared Decoding (Local + Global), concatenating along channels
+            maps = [self.shared_decoder(torch.cat([code, x_code_merge], dim=1))
+                    for code in codes]
 
             # 7. Final Output Merging
-            # Concatenate along the channel dimension (dim=1)
-            x_maps_merge = torch.cat([map_out_1, map_out_2, map_out_3, map_out_4], dim=1)
-            return x_maps_merge
+            return torch.cat(maps, dim=1)
 
         def _merge_cameras(self, codes):
             # Global cross-camera context. "concat" is the original behavior;
             # "max"/"mean" are permutation-invariant pooled alternatives. To
             # remove the feature, keep only the concat return.
             if self.camera_fusion == "concat":
-                return torch.cat(codes, dim=1)          # (B, NUM_OF_CAMS * C, h, w)
-            stacked = torch.stack(codes, dim=0)         # (NUM_OF_CAMS, B, C, h, w)
+                return torch.cat(codes, dim=1)          # (B, num_cams * C, h, w)
+            stacked = torch.stack(codes, dim=0)         # (num_cams, B, C, h, w)
             if self.camera_fusion == "mean":
                 return stacked.mean(dim=0)              # (B, C, h, w)
             return stacked.amax(dim=0)                  # "max" (default pooled)
@@ -414,10 +424,11 @@ class Network:
         # else:
         #     model = self.simple_network()
         if self.model_type == ALL_CAMS_PER_WING or self.model_type == ALL_CAMS_ALL_WINGS:
-            model = self.FourCamsNetwork(
+            model = self.MultiCamNetwork(
                 general_configuration=general_configuration,
                 image_size=self.image_size,
-                number_of_output_channels=self.number_of_output_channels)
+                number_of_output_channels=self.number_of_output_channels,
+                num_cams=self.num_cams)
         
         elif self.model_type == MODEL_PER_CAM_PER_WING:
             model = self.simple_network(

@@ -7,20 +7,30 @@ End-to-end wrapper around the pose-estimation data-prep pipeline. Drives:
     1. CLEAN — delete extraneous files left over from Roni's hull-reconstruction
        project: *.csv, desktop.ini, hull_op/ and Segmentation/ folders.
     2. PRESCAN — scan source *_sparse.mat files; flag movies where the fly is
-       tracked by all 4 cams for fewer than --prescan-min-intersection frames
-       (default 500). Flagged movies are dropped from FLIP/BUILD/VERIFY. A
-       frame counts as tracked only if every cam sees a single fly that is
-       WHOLLY inside its field of view (--prescan-min-edge-margin), so the
-       build range stops before the fly flies off the edge of any camera.
-    3. FLIP  — vertically flip the mirror camera's sparse .mat (e.g. cam1 in
+       tracked for fewer than --prescan-min-intersection frames (default 500).
+       Flagged movies are dropped from FLIP/BUILD/VERIFY. A frame counts as
+       tracked only if EVERY cam sees a single fly and at least
+       --prescan-min-cams-in-frame of them see it WHOLLY inside their field of
+       view (--prescan-min-edge-margin), so the build range stops before the
+       fly flies off the edge of too many cameras at once. The prescan also
+       writes each movie a `prescan_cam_validity.npz` naming which cams saw the
+       whole fly per built frame; prediction uses it to drop the camera pairs
+       that include a cut cam.
+    3. MIRROR CHECK — test every flip hypothesis against the calibration on
+       the raw mats and verify it against what --cam asked for. This is also
+       the idempotency check the flip has never had: flipping is self-inverse
+       with no marker in the data, so only the calibration can tell "already
+       flipped" from "needs flipping". Disagreements abort. --cam auto hands
+       the decision to it outright; --no-mirror-check opts out.
+    4. FLIP  — vertically flip the mirror camera's sparse .mat (e.g. cam1 in
        2023, cam5 in 2022) using `code/flip_sparse_cam_mat.py`'s logic.
-    4. BUILD — invoke MATLAB to produce one h5 per movie plus one shared
+    5. BUILD — invoke MATLAB to produce one h5 per movie plus one shared
        calibration.h5 (same logic as `code/build_experiment.sh`). MATLAB
        writes into a per-movie `.build_tmp/` staging dir and the h5 is moved
        into place only once MATLAB exits 0, so a build that dies partway
        leaves no dataset rather than a silently truncated one. MATLAB's own
        output is captured to `<movie_dir>/build_mov<N>.log`.
-    5. VERIFY (optional) — per-movie reprojection-error sanity check using
+    6. VERIFY (optional) — per-movie reprojection-error sanity check using
        `code/verify_calibration.py`'s machinery. Also rejects movies whose
        build never finished (INCOMPLETE) or whose all-cams intersection is
        under --verify-min-intersection frames (BAD_DATA).
@@ -45,8 +55,9 @@ Common options:
                             for multi-day Roni experiments use the END-of-
                             experiment .mat)
     --cam <name>            cam-name substring of the mirror cam to flip
-                            (e.g. 'cam1' for 2023 setups, 'cam5' for 2022).
-                            REQUIRED for the flip step.
+                            (e.g. 'cam1' for 2023 setups, 'cam5' for 2022), or
+                            'auto' to let the MIRROR CHECK decide. Whatever is
+                            passed is verified against the calibration first.
     --max-frames N          cap each movie's h5 to the first N frames
                             (default: process every frame)
     --no-verify             skip the verification step (it runs by default)
@@ -68,6 +79,14 @@ Common options:
                             --prescan-pixel-threshold pixels on its way out,
                             so without this the build range runs on into
                             frames holding half a fly.
+    --prescan-min-cams-in-frame N
+                            how many cams must see the WHOLE fly for a frame
+                            to count (default: 3, 0 = every cam). A cam that
+                            sees the fly CUT is tolerated as long as N others
+                            see it whole, and the majority may be different
+                            cams each frame. Which cams were whole is saved to
+                            each movie's prescan_cam_validity.npz so predict
+                            can drop the camera pairs a cut cam is in.
     --skip-flip             skip the flip step (e.g. if already flipped)
     --skip-build            skip the h5 build step
     --verify-threshold P    LOO median (px) above which a movie is marked FAIL
@@ -102,8 +121,10 @@ Examples
 
 Notes
 -----
-- The flip step is NOT idempotent. Running this script with --cam twice on the
-  same data un-does the flip. Use --skip-flip on follow-up runs.
+- The flip step is NOT idempotent: it is self-inverse, so --cam twice on the
+  same data un-does it. The MIRROR CHECK is what now catches that -- a second
+  run sees the data already agreeing with the calibration and refuses. Passing
+  --no-mirror-check removes that protection.
 - The build step requires MATLAB on PATH (override with MATLAB_BIN env var).
 - The verify step uses blob-silhouette centroids as the 2D measurement source.
   Typical "working" LOO medians are 2-8 px; "broken" calibrations give 100+.
@@ -114,6 +135,7 @@ import contextlib
 import datetime
 import glob
 import io
+import json
 import os
 import re
 import shutil
@@ -128,12 +150,19 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flip_sparse_cam_mat import flip_sparse_cam_mat
 from pipeline_timing import record as record_timing
-from scan_sparse_movies import DEFAULT_MIN_EDGE_MARGIN, scan_experiment
+from scan_sparse_movies import (DEFAULT_MIN_CAMS_IN_FRAME,
+                                DEFAULT_MIN_EDGE_MARGIN,
+                                MIN_USABLE_CAMS_IN_FRAME,
+                                SUPPORTED_CAM_COUNTS,
+                                resolve_min_cams_in_frame,
+                                scan_experiment)
 from verify_calibration import (
     load_calibration,
     collect_measurements,
     per_cam_errors,
 )
+from utils import (PERTURBATION_FILE, get_trigger_frame_info, load_perturbation)
+from find_mirror_cam import detect_mirror_cam, print_hypothesis_table
 
 
 def _timings_path(input_dir):
@@ -161,6 +190,10 @@ BUILD_SECONDS_PER_FRAME = 0.1
 BUILD_TIMEOUT_SLACK = 4.0
 BUILD_TIMEOUT_FLOOR = 1200          # 20 min
 BUILD_TIMEOUT_UNKNOWN = 4 * 3600    # when the frame count is not known upfront
+
+# --cam value that hands the choice to the mirror check rather than naming a
+# camera. Spelled like the predict config's "auto" fields for consistency.
+AUTO_CAM = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +259,7 @@ def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
     the whole downstream pipeline (MATLAB build included) expects that convention.
     """
     n_direct = count_sparse_mats(input_dir)
-    if n_direct == 4:
+    if n_direct in SUPPORTED_CAM_COUNTS:
         mn = parse_movie_num(input_dir)
         if mn is None:
             sys.exit(f"Single-movie mode requires a 'mov<N>' basename; got "
@@ -235,7 +268,8 @@ def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
         return "single", [(input_dir, mn)]
     if n_direct != 0:
         sys.exit(f"Ambiguous: {input_dir} contains {n_direct} *_sparse.mat "
-                 f"(expected 0 or 4)")
+                 f"(expected 0, "
+                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))})")
     # Multi-movie mode. Use os.listdir (not a case-sensitive glob) so 'Mov001'
     # from a Windows export is discovered alongside canonical 'mov1'.
     movies = []
@@ -248,20 +282,48 @@ def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
         if mn is None:
             continue
         n = count_sparse_mats(sub)
-        if n == 4:
+        if n in SUPPORTED_CAM_COUNTS:
             sub = canonical_movie_dir(sub, mn, dry_run)
             movies.append((sub, mn))
         else:
-            print(f"  (skipping {sub}: {n} *_sparse.mat, expected 4)")
+            print(f"  (skipping {sub}: {n} *_sparse.mat, expected "
+                  f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))})")
             incomplete.append((os.path.basename(sub), n))
     movies.sort(key=lambda t: t[1])
     if incomplete:
         print(f"Skipped {len(incomplete)} incomplete movie(s) "
               f"(missing/extra *_sparse.mat — dropped from the whole pipeline): "
-              + ", ".join(f"{name}({n}/4)" for name, n in incomplete))
+              + ", ".join(f"{name}({n})" for name, n in incomplete))
     if not movies:
-        sys.exit(f"No 'mov<N>/' subdirs with 4 *_sparse.mat in {input_dir}")
+        sys.exit(f"No 'mov<N>/' subdirs with "
+                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))} "
+                 f"*_sparse.mat in {input_dir}")
     return "multi", movies
+
+
+def detect_num_cams(movies: list, override: "int | None" = None) -> int:
+    """How many cameras this experiment was recorded with.
+
+    Taken from the number of *_sparse.mat per movie dir, and required to be
+    the SAME for every movie: a mismatch means some movie is missing a
+    camera's export, which would silently produce a box with a blank camera
+    and a calibration that no longer lines up. That is a data error worth
+    aborting on, not something to paper over per movie."""
+    counts = {}
+    for movie_dir, mn in movies:
+        counts.setdefault(count_sparse_mats(movie_dir), []).append(f"mov{mn}")
+    if len(counts) > 1:
+        detail = "; ".join(f"{n} cams: {', '.join(ms[:8])}"
+                           + (" ..." if len(ms) > 8 else "")
+                           for n, ms in sorted(counts.items()))
+        sys.exit(f"Movies disagree on camera count ({detail}). Every movie in "
+                 f"an experiment must have the same cameras.")
+    detected = next(iter(counts))
+    if override is not None and override != detected:
+        print(f"  WARNING: --num-cams {override} overrides the {detected} "
+              f"*_sparse.mat found per movie dir")
+        return override
+    return detected
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +372,74 @@ def run_clean(input_dir: str, mode: str, movies: list, dry_run: bool) -> None:
 # ---------------------------------------------------------------------------
 # Flip step
 # ---------------------------------------------------------------------------
+MIRROR_CHECK_MOVIES = 3     # enough to average out one odd movie; ~5-8 s each
+
+
+def run_mirror_check(movies: list, easywand: "str | None", requested_cam,
+                     dry_run: bool) -> "str | None":
+    """Decide, or verify, which camera needs the vertical flip.
+
+    Runs BEFORE the flip, on the raw mats, so its answer is valid whatever the
+    caller asked for. It is also the idempotency check the flip step has never
+    had: flipping is a self-inverse operation with no marker in the data, so
+    the only way to tell "already flipped" from "needs flipping" is to ask the
+    calibration -- which is exactly what this does. `--cam` twice on the same
+    experiment used to silently un-flip it; now it stops.
+
+    Returns the cam name to flip, or None for "flip nothing". Exits when the
+    detection unambiguously contradicts `requested_cam`, since every such case
+    corrupts data: flipping an already-correct camera, flipping the wrong one,
+    or skipping a flip the data needs.
+    """
+    print("\n===== MIRROR CHECK =====")
+    if not easywand:
+        print("  skipped: no --easywand to check the cameras against")
+        return requested_cam if requested_cam != AUTO_CAM else None
+    sample = movies[::max(1, len(movies) // MIRROR_CHECK_MOVIES)][:MIRROR_CHECK_MOVIES]
+    verdict = detect_mirror_cam([d for d, _ in sample], easywand=easywand)
+    if verdict is None:
+        print("  skipped: no usable measurements (could not read the mats?)")
+        return requested_cam if requested_cam != AUTO_CAM else None
+    print_hypothesis_table(verdict)
+
+    asked = None if requested_cam in (None, AUTO_CAM) else requested_cam
+    is_auto = requested_cam == AUTO_CAM
+
+    if not verdict["conclusive"]:
+        # Inconclusive means the evidence cannot settle it -- usually a
+        # calibration problem, which no flip repairs. Aborting would help
+        # nobody, so say so loudly and do as asked.
+        print(f"  INCONCLUSIVE -- {verdict['reason']}")
+        if is_auto:
+            sys.exit("--cam auto cannot decide; pass an explicit --cam or "
+                     "--skip-flip after resolving the above")
+        print(f"  proceeding as asked ({'flip ' + asked if asked else 'no flip'})")
+        return asked
+
+    detected = verdict["flip"][0] if verdict["flip"] else None
+    print(f"  detected: {'flip ' + detected if detected else 'NO flip needed'} "
+          f"({verdict['worst']:.2f} px vs {verdict['runner_up']:.2f} px for the "
+          f"next hypothesis)")
+    if is_auto:
+        print(f"  --cam auto -> {'flipping ' + detected if detected else 'skipping the flip'}")
+        return detected
+    if asked == detected:
+        print("  agrees with what you asked for.")
+        return asked
+    if asked and detected is None:
+        sys.exit(f"\nREFUSING TO FLIP {asked}: its data already agrees with the "
+                 f"calibration.\nFlipping it now would BREAK it. This is what a "
+                 f"second --cam run on already-flipped data looks like.\n"
+                 f"Use --skip-flip, or --no-mirror-check to override.")
+    if asked and detected:
+        sys.exit(f"\nREFUSING TO FLIP {asked}: the evidence says {detected} is "
+                 f"the mirror camera.\nUse --cam {detected}, --cam auto, or "
+                 f"--no-mirror-check to override.")
+    sys.exit(f"\nREFUSING TO SKIP THE FLIP: {detected} disagrees with the "
+             f"calibration and needs flipping.\nUse --cam {detected}, --cam "
+             f"auto, or --no-mirror-check to override.")
+
+
 def find_flip_target(movie_dir: str, cam: str) -> "str | None":
     matches = sorted(glob.glob(os.path.join(movie_dir, f"*{cam}_sparse.mat")))
     if len(matches) == 0:
@@ -357,7 +487,8 @@ def run_flip(movies: list, cam: str, dry_run: bool,
 def build_dataset_matlab_cmd(sparse_folder_path: str, save_path: str,
                              movie_num: int, max_frames: "int | None",
                              start_ind: "int | None" = None,
-                             end_ind: "int | None" = None) -> str:
+                             end_ind: "int | None" = None,
+                             num_cams: "int | None" = None) -> str:
     # Absolute paths are mandatory, not cosmetic: the command ends in
     # `run('<abs>/CreateDatasetHDF5_from_list_fixed.m')`, and MATLAB's `run`
     # changes the working directory to the script's own folder for the
@@ -369,6 +500,10 @@ def build_dataset_matlab_cmd(sparse_folder_path: str, save_path: str,
     cmd = (f"sparse_folder_path='{sparse_folder_path}'; "
            f"save_path='{save_path}'; "
            f"movie_num={movie_num};")
+    # The builder defaults num_cams to 4; a 3-camera rig must say so, or it
+    # indexes a 4th camera that has no *_sparse.mat.
+    if num_cams is not None:
+        cmd += f" num_cams={num_cams};"
     if start_ind is not None:
         cmd += f" start_ind={start_ind};"
     if end_ind is not None:
@@ -458,7 +593,8 @@ def build_one_movie(sparse_folder_path: str, movie_dir: str, movie_num: int,
                     max_frames: "int | None" = None,
                     start_ind: "int | None" = None,
                     end_ind: "int | None" = None,
-                    dry_run: bool = False) -> "tuple[int, int | None]":
+                    dry_run: bool = False,
+                    num_cams: "int | None" = None) -> "tuple[int, int | None]":
     """Build one movie's dataset h5, staged so a partial build never lands.
 
     MATLAB writes into a private `.build_tmp/` inside the movie dir; the h5 is
@@ -481,7 +617,7 @@ def build_one_movie(sparse_folder_path: str, movie_dir: str, movie_num: int,
         shutil.rmtree(build_dir, ignore_errors=True)
         os.makedirs(build_dir, exist_ok=True)
     cmd = build_dataset_matlab_cmd(sparse_folder_path, build_dir, movie_num,
-                                   max_frames, start_ind, end_ind)
+                                   max_frames, start_ind, end_ind, num_cams)
     if start_ind is not None and end_ind is not None:
         n_planned = end_ind - start_ind + 1
     else:
@@ -546,7 +682,8 @@ def build_one_movie(sparse_folder_path: str, movie_dir: str, movie_num: int,
 def run_build(input_dir: str, mode: str, movies: list,
               easywand: str, max_frames: "int | None", dry_run: bool,
               movie_ranges: "dict | None" = None,
-              timings_path: "str | None" = None) -> list:
+              timings_path: "str | None" = None,
+              num_cams: "int | None" = None) -> list:
     """Runs the MATLAB builder per movie. Returns the list of (movie_dir,
     movie_num) whose build exited non-zero, so the caller can keep them out of
     VERIFY and the manifest -- a failed build still leaves whatever frames it
@@ -564,12 +701,22 @@ def run_build(input_dir: str, mode: str, movies: list,
         print(f"\n-- mov{mn}")
         print(f"   sparse_folder_path={sparse_folder_path}")
         print(f"   save_path={movie_dir}")
+        # The builder indexes cameras by the ALPHABETICAL order of these
+        # files, so this order is what camera index 0..N-1 means downstream
+        # and must match the easyWand's camera order. Print it: a rig whose
+        # mat names sort differently is otherwise invisible until the
+        # reprojection errors come out nonsensical.
+        print(f"   cameras (index order): "
+              + ", ".join(os.path.basename(m) for m in
+                          sorted(glob.glob(os.path.join(movie_dir,
+                                                        "*_sparse.mat")))))
         if start_ind is not None:
             print(f"   build range: start_ind={start_ind}, end_ind={end_ind} "
                   f"({end_ind - start_ind + 1} frames)")
         t0 = time.time()
         rc, n_built = build_one_movie(sparse_folder_path, movie_dir, mn,
-                                      max_frames, start_ind, end_ind, dry_run)
+                                      max_frames, start_ind, end_ind, dry_run,
+                                      num_cams=num_cams)
         t1 = time.time()
         record_timing(timings_path, f"mov{mn}", "build", t0, t1,
                       n_frames=n_built)
@@ -621,24 +768,29 @@ def run_prescan(input_dir: str, movies: list,
                 min_intersection: int, pixel_threshold: int,
                 blob_ratio: float, blob_distance: float,
                 dry_run: bool,
-                min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN) -> tuple:
-    """Returns (filtered_movies, movie_ranges):
+                min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN,
+                min_cams_in_frame=DEFAULT_MIN_CAMS_IN_FRAME) -> tuple:
+    """Returns (filtered_movies, movie_ranges, scan_results):
       - filtered_movies: list of (movie_dir, movie_num) — only OK movies
       - movie_ranges:    dict {movie_dir: (start_ind, end_ind)} in MATLAB's
                          1-based inclusive convention, clamped to leave
                          `MATLAB_TIME_JUMP_MARGIN` frames of padding so the
                          builder's time-channel windows stay in range.
+      - scan_results:    dict {movie_dir: scan result}, carrying the per-frame
+                         per-cam masks that write_cam_validity_sidecar slices
+                         into the movie's npz once BUILD has committed an h5.
     BAD movies are reported to stdout and dropped from subsequent steps.
 
     The range is also what trims a movie before the fly flies out of the
-    field of view: frames where any cam sees a blob running into an image
-    border fail the scan's in-frame test, so the longest contiguous run ends
-    there and BUILD never reaches the truncated-fly tail."""
+    field of view: frames where fewer than `min_cams_in_frame` cams see the
+    whole fly fail the scan's in-frame test, so the longest contiguous run
+    ends there and BUILD never reaches the truncated-fly tail."""
     print(f"\n===== PRESCAN =====")
     results = scan_experiment(input_dir, min_intersection,
                               pixel_threshold, blob_ratio, blob_distance,
                               print_results=True,
-                              min_edge_margin=min_edge_margin)
+                              min_edge_margin=min_edge_margin,
+                              min_cams_in_frame=min_cams_in_frame)
     ok_dirs = {r["movie_dir"] for r in results if r["verdict"] == "OK"}
     n_before = len(movies)
     filtered = [(d, n) for d, n in movies if d in ok_dirs]
@@ -648,9 +800,11 @@ def run_prescan(input_dir: str, movies: list,
         print(f"\nPrescan: {action} {n_dropped} BAD movie(s) "
               f"from FLIP / BUILD / VERIFY steps")
     movie_ranges = {}
+    scan_results = {}
     for r in results:
         if r["verdict"] != "OK":
             continue
+        scan_results[r["movie_dir"]] = r
         # 0-based [good_start, good_end) -> 1-based inclusive [start, end].
         # Clamp to leave time-jump padding both ends (MATLAB indexes
         # `(start_ind - time_jump):(end_ind + time_jump)` from the raw mat).
@@ -658,7 +812,237 @@ def run_prescan(input_dir: str, movies: list,
         end_ind = min(r["good_end"], r["n_frames"] - MATLAB_TIME_JUMP_MARGIN)
         if start_ind <= end_ind:
             movie_ranges[r["movie_dir"]] = (start_ind, end_ind)
-    return filtered, movie_ranges
+    return filtered, movie_ranges, scan_results
+
+
+# Per-movie record of which cams saw the WHOLE fly at each BUILT frame.
+# Prediction reads it to drop the camera pairs that include a cut cam; without
+# it the relaxed --prescan-min-cams-in-frame rule would simply admit garbage.
+CAM_VALIDITY_SIDECAR = "prescan_cam_validity.npz"
+
+
+def parse_h5_range(h5_path: str) -> "tuple | None":
+    """(start_ind, end_ind) as encoded in a built h5's filename
+    (`mov_<n>_<start>_<end>_ds_..`), or None if it doesn't match."""
+    m = re.match(r"mov_(\d+)_(\d+)_(\d+)_ds_", os.path.basename(h5_path))
+    return (int(m.group(2)), int(m.group(3))) if m else None
+
+
+def write_cam_validity_sidecar(movie_dir: str, scan_result: dict,
+                               dry_run: bool = False,
+                               params: "dict | None" = None) -> "str | None":
+    """Slice the prescan's per-frame per-cam masks to the frames the build
+    actually committed, and save them next to the movie.
+
+    Frame alignment: the prescan masks are indexed by raw 0-based frame, while
+    the box holds the raw 1-based inclusive window [start_ind, end_ind]. The
+    MATLAB builder loads `frames((start_ind-time_jump):(end_ind+time_jump))`
+    and starts its loop at `1+time_jump`, so box frame k (0-based) is raw
+    1-based frame `start_ind + k` -- the same convention
+    utils.get_trigger_frame_info documents. Hence the slice starts at
+    `start_ind - 1`.
+
+    The committed range is read back from the h5 rather than taken from the
+    planned range, because --max-frames and build_one_movie's hang-recovery
+    path can both change what actually landed. Returns the path written, or
+    None when there is nothing to write."""
+    if dry_run:
+        return None
+    h5 = find_movie_h5(movie_dir)
+    if h5 is None:
+        return None
+    rng = parse_h5_range(h5)
+    if rng is None:
+        print(f"   (no cam-validity sidecar: cannot parse range from "
+              f"{os.path.basename(h5)})")
+        return None
+    start_ind, _ = rng
+    try:
+        with h5py.File(h5, "r") as f:
+            n_box = int(f["cropzone"].shape[0])
+    except Exception as e:
+        print(f"   (no cam-validity sidecar: cannot read {h5}: {e})")
+        return None
+    lo = start_ind - 1
+    hi = lo + n_box
+    masks = {}
+    for key, name in (("in_frame_mask", "in_frame"),
+                      ("visible_mask", "visible"),
+                      ("single_mask", "single")):
+        m = scan_result.get(key)
+        if m is None:
+            print("   (no cam-validity sidecar: prescan returned no masks)")
+            return None
+        masks[name] = m[lo:hi]
+    n_got = masks["in_frame"].shape[0]
+    if n_got != n_box:
+        # Would silently mis-attribute validity to the wrong frames; a wrong
+        # mask is worse than no mask, so refuse rather than pad.
+        print(f"   (no cam-validity sidecar: prescan covers {n_got} of the "
+              f"{n_box} built frames from start_ind={start_ind})")
+        return None
+    out = os.path.join(movie_dir, CAM_VALIDITY_SIDECAR)
+    meta = dict(params or {})
+    meta.update({"start_ind": start_ind, "n_box_frames": n_box,
+                 "min_cams_in_frame": scan_result.get("min_cams_in_frame"),
+                 "n_cams": scan_result.get("n_cams")})
+    np.savez_compressed(
+        out,
+        mat_names=np.array([os.path.basename(m)
+                            for m in scan_result.get("mats", [])]),
+        params=json.dumps(meta),
+        **masks)
+    return out
+
+
+def run_cam_validity_sidecars(movies: list, scan_results: dict,
+                              dry_run: bool, params: "dict | None" = None) -> None:
+    """Write a cam-validity sidecar for every movie that has both a prescan
+    result and a committed h5."""
+    print("\n===== CAM VALIDITY =====")
+    if dry_run:
+        print("  (dry-run: would write per-movie "
+              f"{CAM_VALIDITY_SIDECAR})")
+        return
+    if not scan_results:
+        print("  skipped (no prescan results — run without --skip-prescan "
+              "to record which cams saw the whole fly)")
+        return
+    n_ok = n_skip = 0
+    for movie_dir, mn in movies:
+        r = scan_results.get(movie_dir)
+        if r is None:
+            n_skip += 1
+            continue
+        print(f"-- mov{mn}")
+        if write_cam_validity_sidecar(movie_dir, r, dry_run, params):
+            n_ok += 1
+            hist = r.get("in_frame_cam_histogram") or []
+            print(f"   {CAM_VALIDITY_SIDECAR}  "
+                  f"(whole-fly cams per frame over the whole movie: "
+                  + ", ".join(f"{j}={hist[j]}"
+                              for j in range(len(hist) - 1, -1, -1)) + ")")
+        else:
+            n_skip += 1
+    print(f"Cam validity: {n_ok} written, {n_skip} skipped.")
+
+
+# ---------------------------------------------------------------------------
+# Perturbation declaration
+# ---------------------------------------------------------------------------
+def run_perturbation_declaration(input_dir: str, args, dry_run: bool) -> "dict | None":
+    """Write (or validate) the experiment's perturbation.json.
+
+    Placed beside calibration.h5 so the declaration travels with the data, and
+    so its mere presence is what marks the experiment -- predict needs no flag
+    of its own. An existing file is KEPT unless --perturbation-force: the CLI
+    can only express one window for the whole experiment, while a hand-authored
+    file can carry per-movie windows and provenance, and silently replacing
+    that with the poorer version would be a data loss.
+    """
+    print("\n===== PERTURBATION =====")
+    path = os.path.join(input_dir, PERTURBATION_FILE)
+    if os.path.isfile(path) and not args.perturbation_force:
+        try:
+            with open(path) as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"  {PERTURBATION_FILE} exists but could not be read: {e}")
+            print(f"  fix it or pass --perturbation-force to replace it")
+            return None
+        pert = (doc.get("perturbation") or {})
+        dur = pert.get("duration_ms")
+        print(f"  keeping the existing declaration: {path}")
+        print(f"    type    : {pert.get('type', 'unspecified')}")
+        print(f"    onset   : trigger frame "
+              f"{pert.get('onset_trigger_frame', pert.get('onset_frame', 0))}")
+        print(f"    duration: {f'{dur:g} ms' if dur is not None else 'NOT RECORDED'}"
+              + ("" if dur is not None else " -> frames from the onset on will "
+                                            "be labelled 'unknown'"))
+        print(f"  (pass --perturbation-force to replace it with the CLI values)")
+        return doc
+
+    doc = {
+        "experiment": os.path.basename(input_dir.rstrip(os.sep)),
+        "source": "declared by process_experiment.py --perturbation",
+        "perturbation": {
+            "type": args.perturbation_type,
+            "onset_trigger_frame": args.perturbation_onset_frame,
+            "onset_status": ("Trigger-relative: frame 0 is the hardware trigger. "
+                             "Exact for every movie -- the build range is "
+                             "reconciled against it downstream via frame_index."),
+            "duration_ms": args.perturbation_duration_ms,
+            "duration_status": ("recorded" if args.perturbation_duration_ms is not None
+                                else "NOT RECORDED -- frames from the onset onward "
+                                     "are labelled 'unknown' rather than guessed"),
+        },
+    }
+    if dry_run:
+        print(f"  would write {path}")
+        print(f"    {json.dumps(doc['perturbation'])}")
+        return doc
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    print(f"  wrote {path}")
+    dur = args.perturbation_duration_ms
+    print(f"    type={args.perturbation_type}  "
+          f"onset=trigger frame {args.perturbation_onset_frame}  "
+          f"duration={f'{dur:g} ms' if dur is not None else 'NOT RECORDED'}")
+    return doc
+
+
+def report_perturbation_coverage(movies: list, dry_run: bool) -> None:
+    """Say, per movie, whether the built range actually contains the onset.
+
+    The prescan picks its range from fly visibility and knows nothing about the
+    perturbation, so a movie can legitimately start after the onset -- and then
+    no frame in it is labelled 'before'. Surfacing the count here means it is
+    visible before the GPU array runs, instead of being discovered as a hole in
+    the analysis much later."""
+    if dry_run:
+        print("\n(dry-run: would report perturbation coverage)")
+        return
+    print("\n===== PERTURBATION COVERAGE =====")
+    n_have = n_unknown = 0
+    late, early = [], []
+    for movie_dir, mn in movies:
+        h5 = find_movie_h5(movie_dir)
+        if h5 is None:
+            continue
+        trig_off, frame_rate = get_trigger_frame_info(h5)
+        pert = load_perturbation(h5, frame_rate)
+        if pert is None or trig_off is None:
+            n_unknown += 1
+            continue
+        try:
+            with h5py.File(h5, "r") as f:
+                n_frames = int(f["cropzone"].shape[0])
+        except OSError:
+            n_unknown += 1
+            continue
+        last = trig_off + n_frames - 1
+        onset = pert["onset_frame"]
+        if trig_off <= onset <= last:
+            n_have += 1
+        elif trig_off > onset:
+            late.append(f"mov{mn}({trig_off}..{last})")
+        else:
+            early.append(f"mov{mn}({trig_off}..{last})")
+    print(f"  onset (trigger frame {pert['onset_frame']}) inside the built "
+          f"range: {n_have} movie(s)")
+    # The two ways of missing the onset are opposite problems and only one of
+    # them costs you a baseline, so they are worth separating.
+    if late:
+        print(f"  starts AFTER the onset: {len(late)} movie(s) — no "
+              f"pre-perturbation frames, so no within-movie baseline:")
+        print("    " + ", ".join(late))
+    if early:
+        print(f"  ends BEFORE the onset: {len(early)} movie(s) — entirely "
+              f"pre-perturbation:")
+        print("    " + ", ".join(early))
+    if n_unknown:
+        print(f"  could not determine: {n_unknown} movie(s)")
 
 
 def write_good_movies_manifest(input_dir: str, movies: list,
@@ -749,7 +1133,7 @@ def check_build_complete(f) -> "dict | None":
 
 
 def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
-                     image_height: int = 800, num_cams: int = 4,
+                     image_height: int = 800, num_cams: "int | None" = None,
                      subsample_frames: int = 500,
                      min_intersection: int = DEFAULT_MIN_INTERSECTION) -> tuple:
     """Verify a movie's calibration by reprojection-error.
@@ -779,15 +1163,20 @@ def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
             if partial is not None:
                 return "INCOMPLETE", None, partial
             cropzone_full = f["cropzone"][:]
+            # The box knows its own camera count; trusting a default of 4 here
+            # silently mis-reads a 3-camera movie.
+            if num_cams is None:
+                num_cams = int(cropzone_full.shape[1])
             n_total = int(cropzone_full.shape[0])
             # All-cams intersection: frames where every cam has a real blob
             # (the MATLAB builder writes cropzone=[1,1] when blob detection failed).
             bad_per_cam = ((cropzone_full[:, :, 0] == 1) &
-                           (cropzone_full[:, :, 1] == 1))
+                           (cropzone_full[:, :, 1] == 1))[:, :num_cams]
             all_valid = ~bad_per_cam.any(axis=1)
             valid_idx = np.where(all_valid)[0]
             n_intersection = int(len(valid_idx))
-            info = {"n_intersection": n_intersection, "n_total": n_total}
+            info = {"n_intersection": n_intersection, "n_total": n_total,
+                    "num_cams": num_cams}
             if n_intersection < min_intersection:
                 return "BAD_DATA", None, info
             # Sample subsample_frames evenly across the intersection so we get
@@ -803,6 +1192,9 @@ def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
     except Exception as e:
         return "ERR", [f"h5 load err: {e}"], None
 
+    if M.shape[0] < num_cams:
+        return "ERR", [f"calibration has {M.shape[0]} cams, movie has "
+                       f"{num_cams}"], None
     meas, valid = collect_measurements(box, cropzone, image_height, num_cams)
     errs = per_cam_errors(meas, valid, M, mode="loo")
     medians = [float(np.nanmedian(errs[:, c])) for c in range(num_cams)]
@@ -814,7 +1206,8 @@ def run_verify(input_dir: str, mode: str, movies: list,
                threshold: float, dry_run: bool,
                timings_path: "str | None" = None,
                min_intersection: int = DEFAULT_MIN_INTERSECTION,
-               build_failed: "list | None" = None) -> "list | None":
+               build_failed: "list | None" = None,
+               num_cams: "int | None" = None) -> "list | None":
     """Returns the list of (movie_dir, movie_num) that PASSED, or None when
     no filtering happened (calibration missing, or dry-run) so the caller
     falls back to the input list.
@@ -853,6 +1246,7 @@ def run_verify(input_dir: str, mode: str, movies: list,
             continue
         t0 = time.time()
         status, medians, info = verify_one_movie(h5, calib_path, threshold,
+                                                 num_cams=num_cams,
                                                  min_intersection=min_intersection)
         t1 = time.time()
         n_inter = info["n_intersection"] if (info and "n_intersection" in info) else None
@@ -883,9 +1277,10 @@ def run_verify(input_dir: str, mode: str, movies: list,
             n_bad += 1
             inter = info["n_intersection"]
             total = info["n_total"]
+            n_c = info.get("num_cams", "all")
             print(f"  [mov{mn}] BAD_DATA — only {inter}/{total} frames have "
-                  f"all 4 cams tracking simultaneously (need {min_intersection}); "
-                  f"skipping")
+                  f"all {n_c} cams tracking simultaneously "
+                  f"(need {min_intersection}); skipping")
             bad_lines.append(f"mov{mn}  intersection={inter}/{total}")
             continue
         # PASS or FAIL
@@ -917,7 +1312,7 @@ def run_verify(input_dir: str, mode: str, movies: list,
         for line in incomplete_lines:
             print(f"  {line}")
     if bad_lines:
-        print("BAD_DATA details (recording problem — fly not tracked by all 4 cams):")
+        print("BAD_DATA details (recording problem — fly not tracked by every cam):")
         for line in bad_lines:
             print(f"  {line}")
     dropped = len(movies) - len(passed_movies)
@@ -940,10 +1335,17 @@ def main() -> None:
     p.add_argument("--easywand", default=None,
                    help="path to easyWand .mat (required for build step)")
     p.add_argument("--cam", default=None,
-                   help="cam-name substring of the mirror cam to flip "
-                        "(required for flip step, e.g. 'cam1' or 'cam5')")
+                   help=f"cam-name substring of the mirror cam to flip "
+                        f"(e.g. 'cam1' or 'cam5'), or '{AUTO_CAM}' to let the "
+                        f"mirror check work it out from the calibration. "
+                        f"Whatever you pass is verified against the "
+                        f"calibration before anything is flipped.")
     p.add_argument("--max-frames", type=int, default=None,
                    help="cap each movie's h5 at the first N frames (default: all)")
+    p.add_argument("--num-cams", type=int, default=None,
+                   help="override the camera count (normally detected from "
+                        "the number of *_sparse.mat per movie dir; the old "
+                        "lab rig had 3, the current one has 4)")
     p.add_argument("--skip-clean", action="store_true")
     p.add_argument("--skip-prescan", action="store_true",
                    help="skip the pre-build sparse-mat scan that filters out "
@@ -972,7 +1374,22 @@ def main() -> None:
                         "one where the fly is partly outside the field of "
                         "view, so the build range is cut before it (default: "
                         f"{DEFAULT_MIN_EDGE_MARGIN}, 0 disables)")
+    p.add_argument("--prescan-min-cams-in-frame", type=int,
+                   default=DEFAULT_MIN_CAMS_IN_FRAME,
+                   help="prescan: how many cams must see the WHOLE fly for a "
+                        "frame to count; the rest may see it cut. Evaluated "
+                        "per frame, so the majority need not be the same cams "
+                        "throughout. Which cams were whole is recorded in each "
+                        f"movie's {CAM_VALIDITY_SIDECAR} and used by predict "
+                        "to drop the affected camera pairs (default: "
+                        f"{DEFAULT_MIN_CAMS_IN_FRAME}; 0 = every cam; values "
+                        f"below {MIN_USABLE_CAMS_IN_FRAME} are clamped)")
     p.add_argument("--skip-flip", action="store_true")
+    p.add_argument("--no-mirror-check", action="store_true",
+                   help="skip the pre-flip check that verifies --cam against "
+                        "the calibration. The check is what stops a wrong or "
+                        "repeated --cam from silently corrupting the mats, so "
+                        "only use this when you know better than it does.")
     p.add_argument("--skip-build", action="store_true")
     p.add_argument("--no-verify", action="store_true",
                    help="skip the verification step (it runs by default)")
@@ -987,6 +1404,26 @@ def main() -> None:
     p.add_argument("--verify-threshold", type=float, default=15.0,
                    help="per-cam LOO median above which a movie is marked FAIL "
                         "(default: 15.0)")
+    p.add_argument("--perturbation", action="store_true",
+                   help="declare this a perturbation experiment: write "
+                        f"{PERTURBATION_FILE} beside calibration.h5. Predict "
+                        "reads it and stamps every analysis h5 / CSV / mp4 "
+                        "with the perturbation window.")
+    p.add_argument("--perturbation-type", default="unspecified",
+                   help="what the perturbation was, e.g. 'roll' or 'yaw'")
+    p.add_argument("--perturbation-onset-frame", type=int, default=0,
+                   help="trigger-relative frame at which the perturbation "
+                        "starts (default: 0, i.e. it fires on the trigger)")
+    p.add_argument("--perturbation-duration-ms", type=float, default=None,
+                   help="how long the perturbation lasted, in ms. OMIT when "
+                        "the log never recorded it: frames from the onset on "
+                        "are then labelled 'unknown' rather than guessed.")
+    p.add_argument("--perturbation-force", action="store_true",
+                   help=f"overwrite an existing {PERTURBATION_FILE}. Without "
+                        "this an existing file is validated and kept, so a "
+                        "hand-authored declaration (per-movie windows, "
+                        "provenance) is never clobbered by the CLI's simpler "
+                        "one.")
     p.add_argument("--dry-run", action="store_true",
                    help="print what each step would do, do nothing")
     args = p.parse_args()
@@ -1015,6 +1452,8 @@ def main() -> None:
             input_dir = movies[0][0]
         print(f"Mode: {mode}; movies queued: "
               f"{', '.join(f'mov{n}' for _, n in movies)}")
+        num_cams = detect_num_cams(movies, args.num_cams)
+        print(f"cameras: {num_cams}")
 
         timings_path = _timings_path(input_dir)
         print(f"timings ledger: {timings_path}")
@@ -1022,7 +1461,8 @@ def main() -> None:
         if args.verify_only:
             run_verify(input_dir, mode, movies, args.verify_threshold,
                        args.dry_run, timings_path=timings_path,
-                       min_intersection=args.verify_min_intersection)
+                       min_intersection=args.verify_min_intersection,
+                       num_cams=num_cams)
         else:
             if not args.skip_clean:
                 run_clean(input_dir, mode, movies, args.dry_run)
@@ -1031,12 +1471,13 @@ def main() -> None:
             # of movies we won't process. It also computes the per-movie build
             # range so BUILD emits only the contiguous all-cams-visible window.
             movie_ranges = {}
+            scan_results = {}
             # Movies whose MATLAB build exited non-zero. Stays empty under
             # --skip-build (re-verifying an already-built experiment), where
             # the completeness check in verify is the only guard available.
             build_failed = []
             if not args.skip_prescan:
-                movies, movie_ranges = run_prescan(
+                movies, movie_ranges, scan_results = run_prescan(
                     input_dir, movies,
                     args.prescan_min_intersection,
                     args.prescan_pixel_threshold,
@@ -1044,6 +1485,7 @@ def main() -> None:
                     args.prescan_blob_distance,
                     args.dry_run,
                     min_edge_margin=args.prescan_min_edge_margin,
+                    min_cams_in_frame=args.prescan_min_cams_in_frame,
                 )
                 if not movies:
                     print("\nAll movies flagged BAD by prescan; nothing to do.")
@@ -1054,12 +1496,28 @@ def main() -> None:
                 _write_report(input_dir, report_buf, args.dry_run)
                 return
 
-            if not args.skip_flip:
-                if not args.cam:
-                    print("\n===== FLIP =====\n  skipped (no --cam given)")
-                else:
-                    run_flip(movies, args.cam, args.dry_run,
-                             timings_path=timings_path)
+            # Verify the flip decision against the calibration before acting on
+            # it. Runs for --skip-flip too: "this experiment needs no flip" and
+            # "someone forgot --cam" look identical from the command line, and
+            # only the data can tell them apart.
+            cam_to_flip = args.cam
+            if not args.no_mirror_check:
+                cam_to_flip = run_mirror_check(
+                    movies, args.easywand,
+                    AUTO_CAM if args.cam == AUTO_CAM else
+                    (None if args.skip_flip else args.cam),
+                    args.dry_run)
+            elif args.cam == AUTO_CAM:
+                sys.exit("--cam auto needs the mirror check; drop "
+                         "--no-mirror-check or name a camera explicitly")
+
+            if args.skip_flip:
+                print("\n===== FLIP =====\n  skipped (--skip-flip)")
+            elif not cam_to_flip:
+                print("\n===== FLIP =====\n  skipped (no camera needs flipping)")
+            else:
+                run_flip(movies, cam_to_flip, args.dry_run,
+                         timings_path=timings_path)
 
             if not args.skip_build:
                 if not args.easywand:
@@ -1075,7 +1533,22 @@ def main() -> None:
                                          os.path.abspath(args.easywand),
                                          args.max_frames, args.dry_run,
                                          movie_ranges=movie_ranges,
-                                         timings_path=timings_path)
+                                         timings_path=timings_path,
+                                         num_cams=num_cams)
+
+            # Record which cams saw the whole fly per BUILT frame. Runs after
+            # BUILD because the slice depends on the range the build actually
+            # committed, and before VERIFY so a movie dropped by verify still
+            # has its sidecar (it may be re-verified later with a different
+            # threshold).
+            run_cam_validity_sidecars(
+                movies, scan_results, args.dry_run,
+                params={
+                    "min_edge_margin": args.prescan_min_edge_margin,
+                    "pixel_threshold": args.prescan_pixel_threshold,
+                    "blob_ratio": args.prescan_blob_ratio,
+                    "blob_distance": args.prescan_blob_distance,
+                })
 
             # Verification is on by default; --no-verify skips it. When
             # verify ran and produced a PASS list, restrict the manifest to it
@@ -1085,9 +1558,17 @@ def main() -> None:
                                       args.verify_threshold, args.dry_run,
                                       timings_path=timings_path,
                                       min_intersection=args.verify_min_intersection,
-                                      build_failed=build_failed)
+                                      build_failed=build_failed,
+                                      num_cams=num_cams)
                 if verified is not None:
                     movies = verified
+
+            # Declare the perturbation window (after BUILD, so the coverage
+            # report below can measure it against the range the build actually
+            # committed). Predict picks the file up on its own from here.
+            if args.perturbation:
+                if run_perturbation_declaration(input_dir, args, args.dry_run):
+                    report_perturbation_coverage(movies, args.dry_run)
 
             # Write a manifest of good (post-prescan, post-build, post-verify)
             # movies for `predict_array.sh`. This runs even with --skip-build

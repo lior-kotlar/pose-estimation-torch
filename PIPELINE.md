@@ -23,20 +23,51 @@ There are two layers:
 ## 0. What you need before you start
 
 - An **input directory** of raw movies. Two layouts are auto-detected:
-  - **multi-movie**: `<input_dir>/mov1/`, `mov2/`, … each holding 4
+  - **multi-movie**: `<input_dir>/mov1/`, `mov2/`, … each holding the
     `*_cam<N>_sparse.mat` files. (This is the normal case for an experiment.)
-  - **single-movie**: `<input_dir>` itself holds the 4 `*_sparse.mat` files and
+  - **single-movie**: `<input_dir>` itself holds the `*_sparse.mat` files and
     its basename is `mov<N>`.
+
+  **Camera count** is detected from the number of `*_sparse.mat` per movie
+  dir: **4** for the current rig, **3** for the older one that predates the
+  fourth camera. Every movie in an experiment must agree, or prep aborts
+  (a movie missing one camera's export would otherwise build a box with a
+  blank camera). `--num-cams` overrides. The count flows on its own from
+  there — the MATLAB builder, the calibration, verify, triangulation and the
+  mp4 all size themselves from the data. Two things to know for a 3-camera
+  experiment:
+  - the easyWand `.mat` must itself describe 3 cameras;
+  - watch `--verify-threshold`. Verify's leave-one-out check triangulates from
+    the *remaining* cameras, so on 3 cameras it works from 2 views instead of
+    3 and roughly doubles the reported error. Measured on a healthy 3-camera
+    experiment that is still only ~6–8 px, well inside the 15 px default — so
+    leave it alone unless a run says otherwise.
 - The **easyWand calibration `.mat`** for that experiment. For multi-day Roni
   experiments use the END-of-experiment easyWand mat for every movie
   (see the project calibration convention).
 - The **mirror camera name** for this rig: `cam1` for 2023 data, `cam5` for
   2022 data (cam5 is mirrored — both the dataset h5 and the calibration must be
-  vertically flipped).
-- A **predict config** JSON (e.g. `predict_configurations/config1.json`). Paths
-  in it are repo-relative. You normally only edit `number of cameras` and the
-  model/calibration fields; `data directory`, `general run name`, and
-  `pipeline timings path` are overwritten per-task by the launcher.
+  vertically flipped). Older rigs are not on that list, and the mats carry no
+  `isFlipped` marker — so **you no longer have to know**: prep runs a MIRROR
+  CHECK before the flip that tests every hypothesis against the calibration and
+  refuses to proceed if `--cam` disagrees with it. Pass `--cam auto` to let it
+  decide outright. It doubles as the idempotency guard the flip has never had:
+  the flip is self-inverse, and the check is what stops a second `--cam` run
+  from silently un-flipping an experiment.
+- A **predict config** JSON — `predict_configurations/config1.json` covers
+  every experiment; there is no per-rig variant to choose between. Paths in it
+  are repo-relative. `data directory`, `general run name`, `calibration path`
+  and `pipeline timings path` are overwritten per-task by the launcher.
+
+  `number of cameras` and `calibration path` should normally be left at
+  `"auto"`: the count is read from the movie's own box (`cropzone`) and the
+  calibration is taken from the experiment directory holding the movie, so
+  one config covers both the 3-camera and 4-camera rigs and cannot silently
+  triangulate against a stale calibration. The ensemble members follow from
+  that count — each `prediction_models/*/model.json` declares `num cameras`
+  (or nothing, meaning any), and members that cannot run on the movie are
+  reported and skipped. An explicit value still wins, but one that
+  contradicts the box is a hard error rather than a wrong answer.
 
 ---
 
@@ -58,8 +89,8 @@ sbatch -J 2023_mov101to110 sbatch_files/pipeline.sh \
 
 What happens:
 
-1. The CPU prep job runs `process_experiment.py` (clean → prescan → flip →
-   build → verify → manifest), appending per-step timings to
+1. The CPU prep job runs `process_experiment.py` (clean → prescan → mirror
+   check → flip → build → verify → manifest), appending per-step timings to
    `<input_dir>/pipeline_timings.csv`.
 2. If `manifests/good_movies_<experiment_name>.txt` ends up non-empty, the job
    submits `predict_array.sh` as a **separate** GPU array job, sized to the
@@ -99,16 +130,26 @@ Useful flags (see `--help` for the full list):
 | flag | effect |
 |------|--------|
 | `--max-frames N` | cap each movie to N frames (quick test runs) |
+| `--num-cams N` | override the detected camera count (3 or 4) |
 | `--prescan-min-intersection N` | min all-4-cam single-fly run to keep a movie (default 500) |
 | `--prescan-min-edge-margin N` | px of clearance the fly must keep from every image border (default 5; 0 disables) |
+| `--prescan-min-cams-in-frame N` | how many cams must see the WHOLE fly for a frame to count (default 3; 0 = every cam) |
 | `--prescan-only` | only run the prescan, then stop |
 | `--verify-only` / `--no-verify` | run only / skip the reprojection sanity check |
 | `--verify-threshold PX` | flag movies whose reprojection error exceeds PX (default 15) |
+| `--cam auto` | let the mirror check pick the camera to flip |
+| `--no-mirror-check` | skip the pre-flip verification (removes the guard) |
 | `--skip-clean / --skip-flip / --skip-build` | skip individual stages |
+| `--perturbation` | declare this a perturbation experiment (see below) |
+| `--perturbation-type` | e.g. `roll`, `yaw` |
+| `--perturbation-onset-frame N` | trigger-relative onset (default 0) |
+| `--perturbation-duration-ms X` | omit when the log never recorded it |
 | `--dry-run` | print what would happen, change nothing |
 
 Outputs of prep:
 - one `mov_<n>_<start>_<end>_ds_*tc_*tj.h5` per movie (the dataset h5),
+- one `<movie_dir>/prescan_cam_validity.npz` per movie (which cams saw the
+  whole fly at each built frame),
 - one shared `<input_dir>/calibration.h5`,
 - `manifests/good_movies_<experiment>.txt` (the good-movie list),
 - `<input_dir>/process_report.txt` (prescan + verify transcript),
@@ -118,12 +159,75 @@ Inspect `process_report.txt` and the prescan/verify output before predicting.
 
 The prescan's `out-of-frame` line is worth reading: it counts, per camera, the
 frames where the fly's blob ran into an image border. Those frames hold a
-truncated fly, the network's 2D detections on them are meaningless, and via
-triangulation they poison the 3D pose for *all four* cameras at once. Because
-a fly usually leaves the field of view and does not come back, this is what
-puts a burst of nonsense at the very end of a movie. The build range is cut
-before the first such frame, so a high count simply means the movie got
-trimmed — not that anything is wrong.
+truncated fly and the network's 2D detections on them are meaningless.
+
+A frame does **not** need every camera to see the fly whole — only
+`--prescan-min-cams-in-frame` of them (default 3). The count is what matters,
+so the majority may be a different set of cameras each frame. The
+`whole-fly cams per frame` line reports the distribution, and when the rule is
+relaxed the per-movie line also states what the strict all-cams rule would
+have given, so the trade is visible without a second scan.
+
+That relaxation is only safe because the prescan also records *which* cameras
+were whole, in `<movie_dir>/prescan_cam_validity.npz`. Prediction reads it and
+drops every camera *pair* containing a cut camera for that frame, so a
+truncated fly can no longer poison the 3D pose. Movies built before this
+existed can be back-filled without rebuilding:
+
+```bash
+.env/bin/python code/rebuild_edge_cut_movies.py <manifest> --mask-only
+```
+
+A frame where too few cameras see the fly whole still ends the build range, so
+a high out-of-frame count means the movie got trimmed — not that anything is
+wrong.
+
+### 2a-bis. Perturbation experiments
+
+Add `--perturbation` to the prep step and it writes a `perturbation.json` next
+to `calibration.h5`. That file's **presence is the label** — predict picks it
+up on its own, so nothing has to be repeated in the predict config:
+
+```bash
+sbatch -J <name> sbatch_files/pipeline.sh <input_dir> <easywand> none \
+    predict_configurations/config1.json 24 \
+    --perturbation --perturbation-type roll --perturbation-duration-ms 7.5
+```
+
+(anything after the 5th argument is forwarded verbatim to
+`process_experiment.py`.) An **existing** `perturbation.json` is validated and
+kept, not overwritten — a hand-authored one can carry per-movie windows the
+CLI cannot express. `--perturbation-force` replaces it.
+
+Every predicted movie then gets, in its `*_analysis_smoothed.h5`:
+
+| dataset | meaning |
+|---|---|
+| `perturbation`, `perturbation_type` | 1, and e.g. `roll` |
+| `perturbation_start_frame` | onset, trigger-relative — always known |
+| `perturbation_start_index` | row holding the onset, or `-1` if outside this movie |
+| `perturbation_end_known` | 0 when the log never recorded a duration |
+| `perturbation_state` | per frame: 0 before, 1 during, 2 after, **-1 unknown** |
+| `perturbation_end_frame` / `_end_index` / `_duration_ms` | only when the duration is known |
+
+plus a `perturbation_state` column (`before`/`during`/`after`/`unknown`) in the
+CSV and a third counter line in the mp4 (`PRE -7.50 ms`, `PERT +0.25 ms`,
+`POST +0.75 ms`, or `PERT +0.25 ms  (end unknown)`).
+
+**`-1` / `unknown` is a real answer, not a gap.** When the onset was logged but
+the duration never was, frames before the onset are still labelled exactly;
+frames from the onset on are genuinely indeterminate, and calling them "not
+after" would assert more than the record supports.
+
+The window is read at predict time, so **changing `perturbation.json` after a
+run means re-predicting those movies.** Get the declaration right before
+launching; if the duration is genuinely unrecorded, `unknown` is the correct
+thing to ship rather than a placeholder to fix up later.
+
+Prep also prints a **PERTURBATION COVERAGE** section. The prescan picks its
+build range from fly visibility and knows nothing about the perturbation, so
+some movies get clipped to start after the onset and hold no pre-perturbation
+baseline. That count is worth reading before the GPU array runs.
 
 ### 2b. Predict only (movies already built)
 
@@ -176,6 +280,12 @@ These power the pipeline but are runnable on their own:
 
 # Reprojection-error check of a built h5 against calibration.h5
 .env/bin/python code/verify_calibration.py <movie.h5> <calibration.h5>
+
+# Which cam is the mirror? Tests every flip hypothesis against the DLT.
+# Runs on the RAW mats -- no MATLAB, no build, nothing flipped. Prep runs this
+# automatically now; use it standalone to see the full ranked table, or to
+# check an experiment before committing to a prep run.
+.env/bin/python code/find_mirror_cam.py <experiment_dir> --easywand <easywand.mat>
 
 # Flip the mirror cam's sparse mat in place (single or batch)
 .env/bin/python code/flip_sparse_cam_mat.py <movies_dir> --cam cam1 --dry-run

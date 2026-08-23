@@ -2,9 +2,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.ndimage
 from matplotlib import colors
+from matplotlib import patches
 from matplotlib.widgets import Slider, Button
 from skimage import morphology
-from utils import predict_3D_points_all_pairs
+from utils import predict_3D_points_all_pairs, load_cam_validity
 import h5py
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -17,7 +18,7 @@ from skimage import measure
 from plotly.subplots import make_subplots
 from scipy.integrate import simpson
 from utils import add_nan_frames
-from utils import get_trigger_frame_info
+from utils import get_trigger_frame_info, load_perturbation
 import glob
 from scipy.optimize import curve_fit
 from scipy.linalg import svd
@@ -826,10 +827,31 @@ class Visualizer:
         return data
 
     @staticmethod
+    def _perturbation_label(trigger_frame, pert, frame_rate=None):
+        """The mp4's perturbation line for one trigger-relative frame.
+
+        Reads as PRE / PERT / POST plus the elapsed time from the boundary that
+        applies. When no duration was recorded the line says so on every frame
+        from the onset onward, rather than implying the perturbation is still
+        running or has ended -- neither is known."""
+        onset = pert["onset_frame"]
+        def ms(d):
+            return f"{d * 1000.0 / frame_rate:+.2f} ms" if frame_rate else f"{d:+d} fr"
+        if trigger_frame < onset:
+            return f"PRE  {ms(trigger_frame - onset)}"
+        if not pert["end_known"]:
+            return f"PERT {ms(trigger_frame - onset)}  (end unknown)"
+        end = pert["end_frame"]
+        if trigger_frame < end:
+            return f"PERT {ms(trigger_frame - onset)}"
+        return f"POST {ms(trigger_frame - end)}"
+
+    @staticmethod
     def create_movie_mp4(h5_path_movie_path, mode=DISPLAY, save_frames=None,
                          reprojected_points_path=None, box_path=None,
                          save_path="movie_gif.gif",  rotate=False,
-                         trigger_offset=None, frame_rate=None):
+                         trigger_offset=None, frame_rate=None,
+                         perturbation=None):
         # save_frames = np.arange(30, 130)
         zoom_factor = 1  # Adjust as needed
         # Trigger-relative frame numbering for the on-screen counter/clock.
@@ -838,6 +860,11 @@ class Visualizer:
         # the source movie h5 (its filename + sibling *_sparse.mat) when not given.
         if trigger_offset is None and box_path is not None:
             trigger_offset, frame_rate = get_trigger_frame_info(box_path)
+        # Same for the perturbation window: declared by a perturbation.json
+        # beside the experiment's calibration.h5, so a movie renders its own
+        # third counter line without the caller having to know about it.
+        if perturbation is None and box_path is not None:
+            perturbation = load_perturbation(box_path, frame_rate)
         points_2D = np.load(reprojected_points_path)
         first_analized_frame = Visualizer.get_data_from_h5(h5_path_movie_path, 'first_analysed_frame')[()]
         points_2D = add_nan_frames(points_2D, first_analized_frame)
@@ -853,7 +880,17 @@ class Visualizer:
 
 
         # points_2D = points_2D[frames_from_box_and_reprojected_points]
-        channel_1 = [1, 1+3, 1+6, 1+9]
+        # The box's channel axis is num_time_channels per camera, cameras in
+        # order, so the count follows from its width rather than a literal 4
+        # (the old lab rig recorded 3 cameras).
+        num_time_channels = 3
+        with h5py.File(box_path, 'r') as _bf:
+            n_cams = _bf['/box'].shape[1] // num_time_channels
+        channel_1 = [num_time_channels * c + 1 for c in range(n_cams)]
+        # Which cameras saw the WHOLE fly per frame. A cut camera's panel gets
+        # a red border, which is the quickest way to see whether the relaxed
+        # --prescan-min-cams-in-frame rule is behaving on a real movie.
+        cam_valid = load_cam_validity(box_path, num_cams=n_cams)
         # take the negative
         box = h5py.File(box_path, 'r')['/box']
         frames_from_box = frames_from_box_and_reprojected_points[: -first_analized_frame] if first_analized_frame > 0 else frames_from_box_and_reprojected_points
@@ -901,7 +938,11 @@ class Visualizer:
         gs = fig.add_gridspec(2, 4, width_ratios=[3, 3, 3, 8], height_ratios=[1, 1], wspace=0.01, hspace=0.01)
         # gs = fig.add_gridspec(2, 2, wspace=0.1, hspace=0.1)  # Reduced spacing between subplots
 
-        ax_2d = [fig.add_subplot(gs[i, j]) for i in range(2) for j in range(2)]
+        # One 2D panel per camera, filling the 2x2 block row-major. With 3
+        # cameras the 4th cell is simply left empty; iterating a fixed 4 here
+        # used to index a camera the box does not have.
+        ax_2d = [fig.add_subplot(gs[i, j])
+                 for i in range(2) for j in range(2)][:n_cams]
         for ax in ax_2d:
             ax.set_aspect('equal')
             ax.axis('off')  # Hide axes for a cleaner look
@@ -1068,6 +1109,16 @@ class Visualizer:
                         ax.scatter(point[0],  point[1], color=color_array[j], s=9)
                 # ax.scatter(cm[0] + shift_yx[1], cm[1] + shift_yx[0], c='blue')
                 ax.axis('off')
+                # `frame` is the 0-based index into the movie's box, which is
+                # exactly how cam_valid is indexed.
+                if cam_valid is not None and 0 <= frame < len(cam_valid) \
+                        and not cam_valid[frame, i]:
+                    ax.add_patch(patches.Rectangle(
+                        (0, 0), 1, 1, transform=ax.transAxes, fill=False,
+                        edgecolor='red', linewidth=4, clip_on=False))
+                    ax.text(0.5, 0.02, 'CUT', transform=ax.transAxes,
+                            ha='center', va='bottom', color='red',
+                            fontsize=14, fontweight='bold')
 
             # Trigger-relative frame counter + clock. `frame` is the 0-based
             # index into the movie's box, so its number is trigger_offset + frame
@@ -1076,9 +1127,18 @@ class Visualizer:
                 disp_frame = int(round(trigger_offset + frame))
                 if frame_rate:
                     t_ms = (trigger_offset + frame) * 1000.0 / frame_rate
-                    counter_text.set_text(f"frame {disp_frame:+d}\n{t_ms:+.2f} ms")
+                    lines = [f"frame {disp_frame:+d}", f"{t_ms:+.2f} ms"]
                 else:
-                    counter_text.set_text(f"frame {disp_frame:+d}")
+                    lines = [f"frame {disp_frame:+d}"]
+                # Third line for a perturbation experiment: where this frame
+                # sits relative to the perturbation. Time since ONSET is real
+                # even when the duration was never recorded, so an unknown end
+                # still leaves a useful readout -- it just cannot claim the
+                # perturbation has finished.
+                if perturbation is not None:
+                    lines.append(Visualizer._perturbation_label(
+                        disp_frame, perturbation, frame_rate))
+                counter_text.set_text("\n".join(lines))
             else:
                 counter_text.set_text(f"frame {int(frame)}")
 

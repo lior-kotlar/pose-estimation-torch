@@ -44,11 +44,16 @@ class SparseBox:
             print("box already has wings masks")
             return box
         box = np.transpose(box, (0, 3, 2, 1))
-        x1 = np.expand_dims(box[:, :, :, 0:3], axis=1)
-        x2 = np.expand_dims(box[:, :, :, 3:6], axis=1)
-        x3 = np.expand_dims(box[:, :, :, 6:9], axis=1)
-        x4 = np.expand_dims(box[:, :, :, 9:12], axis=1)
-        box = np.concatenate((x1, x2, x3, x4), axis=1)
+        # The builder writes one flat channel axis: num_time_channels per
+        # camera, cameras in order. Split it back out by the count the file
+        # actually has rather than assuming 4 cameras x 3 time channels.
+        num_time_channels = 3
+        n_cams = box.shape[-1] // num_time_channels
+        cams = [np.expand_dims(
+                    box[:, :, :, c * num_time_channels:(c + 1) * num_time_channels],
+                    axis=1)
+                for c in range(n_cams)]
+        box = np.concatenate(cams, axis=1)
         return box
 
     def save_to_scipy_sparse_format(self, save_name='box.npz'):
