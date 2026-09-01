@@ -52,6 +52,8 @@ from Visualizer import Visualizer
 
 from extract_flight_data import FlightAnalysis, create_movie_analysis_h5, export_analysis_csv
 from plot_wing_and_body import plot_one as plot_movie_figures, FIGURE_NAMES
+from plot_flight_viewer import (make_viewer as make_flight_viewer,
+                                OUT_SUFFIX as VIEWER_SUFFIX)
 
 POINTS_NAME = 'points_3D_smoothed_ensemble_best_method.npy'
 PROVENANCE_KEYS = ("experiment", "movie_dir", "source_movie_dir", "box_h5")
@@ -238,6 +240,7 @@ def archive_previous(movie_dir, stamp, names=None):
                   if f.endswith('_analysis_smoothed.h5')
                   or f.endswith('_analysis_smoothed.csv')
                   or f in FIGURE_NAMES
+                  or f.endswith(VIEWER_SUFFIX)
                   or f == 'All body data.html']
     else:
         doomed = [f for f in names if os.path.exists(os.path.join(movie_dir, f))]
@@ -269,6 +272,7 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
     export_analysis_csv(analysis, h5_path.replace('.h5', '.csv'), trigger_offset or 0, frame_rate,
                         perturbation=perturbation)
     plot_movie_figures(h5_path, units="frames")
+    make_flight_viewer(h5_path)
 
     video = None
     if with_video:

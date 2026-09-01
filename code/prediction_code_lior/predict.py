@@ -12,6 +12,7 @@ from utils import (get_start_frame, show_interest_points_with_index, PredictConf
                    get_trigger_frame_info, load_perturbation)
 from pipeline_timing import record as record_timing, earliest_start
 from plot_wing_and_body import plot_one as plot_movie_figures
+from plot_flight_viewer import make_viewer as make_flight_viewer
 import h5py
 import torch
 from Predictor import Predictor2D
@@ -252,6 +253,18 @@ class PredictingManager:
                               t_predict_end, t_step_end)
             except Exception as e:
                 print(f"validation plots failed: {e}", flush=True)
+            # The interactive viewer: the same 3D fly as the mp4, but flying
+            # through the lab frame and scrubbable, next to the analysis
+            # signals. make_viewer already swallows its own failures and
+            # returns None, so this only has to keep its timing row honest.
+            try:
+                t_viewer_start = t_step_end
+                if make_flight_viewer(movie_hdf5_path):
+                    t_step_end = time.time()
+                    record_timing(timings_path, movie_label, "viewer",
+                                  t_viewer_start, t_step_end)
+            except Exception as e:
+                print(f"flight viewer failed: {e}", flush=True)
             # End-to-end "total" row: from the earliest step recorded for
             # this movie (in the prep job's CSV rows) through end of plot.
             # Falls back to t_movie_start if no prep rows exist (predict-only

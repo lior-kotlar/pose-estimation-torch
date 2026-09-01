@@ -261,12 +261,17 @@ predict_output/<run_name>/<mov_name>/
     points_ensemble_smoothed_reprojected.npy      # 2D reprojections
     movie 2D and 3D.mp4                            # rendered 2D+3D animation
     <mov>_analysis_smoothed.h5                     # analysis (wing angles etc.)
-    wing-angle validation PNGs
+    <mov>_analysis_smoothed.csv                    # per-frame body+wing state
+    <mov>_analysis_smoothed_flight_viewer.html     # interactive 3D + graphs
+    All body data.html / movie_html.html           # plotly summaries
+    source.json                                    # provenance
+    wing_angles.png, body_angular_acceleration.png
 ```
 
 `<run_name>` is the `-J` job name (so all movies of one experiment share a
 parent). Per-movie/per-step timings accumulate in the experiment's
-`pipeline_timings.csv` (`predict`, `plot`, `total` rows joined on `mov<N>`).
+`pipeline_timings.csv` (`predict`, `plot`, `viewer`, `total` rows joined on
+`mov<N>`).
 
 ---
 
@@ -295,6 +300,12 @@ These power the pipeline but are runnable on their own:
 
 # 3D check of the gravity ("down") vector: body triad + gravity every k frames
 .env/bin/python code/plot_gravity_body.py <dir> -k 100
+
+# Interactive viewer: the fly flying through the lab frame, scrubbable, beside
+# the analysis signals. One self-contained ~8 MB HTML per movie (--cdn halves
+# it but then needs a network connection to open). Written automatically by
+# predict; run it standalone to rebuild one, or a whole run at once.
+.env/bin/python code/plot_flight_viewer.py <dir>
 
 # Shrink an h5 to its first N frames (fast iteration)
 .env/bin/python code/truncate_h5_movie.py <movie.h5> 1500
