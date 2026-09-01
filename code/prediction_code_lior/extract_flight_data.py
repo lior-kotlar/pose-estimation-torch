@@ -27,7 +27,55 @@ from Validation import Validation
 
 
 SAMPLING_RATE = 16000
-dt = 1 / 16000
+dt = 1 / SAMPLING_RATE
+
+# Savitzky-Golay parameters for get_dot, chosen per signal family rather than
+# shared. code/tune_savgol.py computes, for any (window_length, polyorder), the
+# passband -- the frequency up to which |H(f)| still tracks the ideal
+# differentiator 2*pi*f -- and the white-noise gain sqrt(sum(c^2)). The choice is
+# then: the widest window whose passband still covers the band the signal needs.
+#
+# One shared setting cannot serve both families. Body quantities hold 99% of
+# their power below ~62 Hz; wing angles ride a ~230 Hz wingbeat carrier. That is
+# most of a decade apart, and the old shared (5, 2) resolved it in the wings'
+# favour -- a 763 Hz passband, which for a 62 Hz body signal is a decade of pure
+# noise passed straight through.
+#
+# Body: CM, the Euler angles, omega_body. Passband 233 Hz, comfortably past the
+# ~150 Hz body dynamics need, at 13x less noise amplification than (5, 2).
+BODY_SAVGOL = {"window_length": 51, "polyorder": 4}
+# Wings: theta, psi and wing-tip speed. Measured over 21 movies of this rig, the
+# wingbeat fundamental f0 is ~219 Hz (198-229) and the angles divide their power
+# across its harmonics very unevenly:
+#
+#             1*f0    2*f0    3*f0
+#   phi      98.3%    1.0%    0.1%     a near-pure sinusoid at the wingbeat
+#   theta    15.6%   61.4%   10.7%     peaks at 2*f0 -- the wing crosses the
+#                                      stroke plane twice per beat
+#   psi      91.7%    2.3%    3.2%     3*f0 above 2*f0: the sharp reversal
+#   tip xyz  67.0%   25.7%    3.3%
+#
+# So theta and psi need fidelity out to 3*f0 (~660 Hz) while phi does not, which
+# is what splits PHI_SAVGOL off below.
+#
+# (11, 4) rather than the previous (5, 2): polyorder 2 is too low to track a
+# 219 Hz sinusoid, so (5, 2) was simultaneously the least faithful AND the
+# noisiest option here. Weighting each candidate's gain error by the harmonic
+# shares above -- and by n^2, since harmonic n contributes that much more to a
+# derivative than to the angle -- (11, 4) beats (5, 2) on every axis at once:
+#
+#             theta    psi    tip    white-noise gain
+#   (5, 2)    4.01%   3.66%  2.51%        1.00x
+#   (11, 4)   1.68%   1.66%  0.79%        0.78x
+#
+# It also degrades gracefully off-nominal: at f0 = 300 Hz theta is still 5.05%.
+WING_SAVGOL = {"window_length": 11, "polyorder": 4}
+# phi alone. With 98.3% of its power on a single line at f0, phi does not need
+# the harmonic reach the other two do, so it can afford a much longer window and
+# buy noise rejection with it: 0.86% error at 0.29x the noise of (5, 2), a 3.5x
+# reduction. Applying this to theta or psi would cost ~15% -- their 2*f0/3*f0
+# content is exactly what a 21-frame window starts to attenuate.
+PHI_SAVGOL = {"window_length": 21, "polyorder": 4}
 LEFT = 0
 RIGHT = 1
 NUM_TIPS_EACH_SIZE_Y_BODY = 10
@@ -101,10 +149,9 @@ class FullWingBitBody:
                  points_3D, CM_dot, CM_speed,
                  yaw_angle, pitch_angle, roll_angle,
                  roll_dot, pitch_dot, yaw_dot,
-                 roll_dot_dot, yaw_dot_dot, pitch_dot_dot,
-                 omega_body, angular_speed_body,
+                 omega_body,
                  omega_body_dot, angular_acceleration_body,
-                 p, q, r, left_amplitude, right_amplitude,
+                 left_amplitude, right_amplitude,
                  left_phi_max, left_phi_min, right_phi_max,
                  right_phi_min, phi_max_average, phi_min_average,
                  phi_mid_frame_left, phi_mid_frame_right, phi_mid_frame_average,
@@ -144,18 +191,15 @@ class FullWingBitBody:
         self.roll_dot = roll_dot
         self.pitch_dot = pitch_dot
         self.yaw_dot = yaw_dot
-        self.roll_dot_dot = roll_dot_dot
-        self.pitch_dot_dot = pitch_dot_dot
-        self.yaw_dot_dot = yaw_dot_dot
         self.omega_body_dot = omega_body_dot
         self.angular_acceleration_body = angular_acceleration_body
         self.omega_body = omega_body
-        self.wx, self.wy, self.wz = self.omega_body.T
+        # p, q, r are the body roll/pitch/yaw rates -- i.e. exactly the three
+        # components of omega_body. Kept as names, not as a second computation.
+        self.p, self.q, self.r = self.omega_body.T
+        self.wx, self.wy, self.wz = self.p, self.q, self.r
         self.wx_dot, self.wy_dot, self.wz_dot = self.omega_body_dot.T
-        self.angular_speed_body = angular_speed_body
-        self.p = p
-        self.q = q
-        self.r = r
+        self.angular_speed_body = np.linalg.norm(self.omega_body, axis=-1)
         self.torque = torque
 
         # wings dot attributes
@@ -211,9 +255,6 @@ class FullWingBitBody:
         self.body_roll_dot_take = np.mean(self.roll_dot)
         self.body_pitch_dot_take = np.mean(self.pitch_dot)
         self.body_yaw_dot_take = np.mean(self.yaw_dot)
-        self.body_roll_dot_dot_take = np.mean(self.roll_dot_dot)
-        self.body_pitch_dot_dot_take = np.mean(self.pitch_dot_dot)
-        self.body_yaw_dot_dot_take = np.mean(self.yaw_dot_dot)
         self.body_angular_speed_take = np.mean(self.angular_speed_body)
         self.body_angular_acceleration_take = np.mean(self.angular_acceleration_body)
         self.body_wx_take, self.body_wy_take, self.body_wz_take = self.wx.mean(), self.wy.mean(), self.wz.mean()
@@ -221,9 +262,6 @@ class FullWingBitBody:
 
         # doesnt take
         self.body_CM_dot_mean = np.mean(self.CM_dot, axis=0)
-        self.body_p = np.mean(self.p)
-        self.body_q = np.mean(self.q)
-        self.body_r = np.mean(self.r)
         self.body_omega_body = np.mean(self.omega_body, axis=0)
 
 
@@ -310,15 +348,9 @@ class FlightAnalysis:
 
         self.yaw_angle, self.pitch_angle, self.roll_angle = self.get_yaw_pitch_roll_from_euler()
 
-        self.yaw_dot = self.get_dot(self.yaw_angle, sampling_rate=SAMPLING_RATE)
-        self.pitch_dot = self.get_dot(self.pitch_angle, sampling_rate=SAMPLING_RATE)
+        self.yaw_dot = self.get_dot(self.yaw_angle, sampling_rate=SAMPLING_RATE, **BODY_SAVGOL)
+        self.pitch_dot = self.get_dot(self.pitch_angle, sampling_rate=SAMPLING_RATE, **BODY_SAVGOL)
         self.roll_dot = self.get_roll_dot(self.roll_angle)
-
-        self.yaw_dot_dot = self.get_dot(self.yaw_dot, sampling_rate=SAMPLING_RATE)
-        self.pitch_dot_dot = self.get_dot(self.pitch_dot, sampling_rate=SAMPLING_RATE)
-        self.roll_dot_dot = self.get_roll_dot(self.roll_dot)
-        self.p, self.q, self.r = self.get_pqr()
-
 
         self.average_roll_angle = np.mean(self.roll_angle[self.first_y_body_frame:self.end_frame])
         self.average_roll_speed = np.nanmean(np.abs(self.roll_dot))
@@ -338,20 +370,20 @@ class FlightAnalysis:
         # self.wings_angles_from_euler()
 
         # get wings angles dot
-        self.wings_phi_left_dot = self.get_dot(self.wings_phi_left, sampling_rate=SAMPLING_RATE)
-        self.wings_phi_right_dot = self.get_dot(self.wings_phi_right, sampling_rate=SAMPLING_RATE)
+        self.wings_phi_left_dot = self.get_dot(self.wings_phi_left, sampling_rate=SAMPLING_RATE, **PHI_SAVGOL)
+        self.wings_phi_right_dot = self.get_dot(self.wings_phi_right, sampling_rate=SAMPLING_RATE, **PHI_SAVGOL)
 
-        self.wings_theta_left_dot = self.get_dot(self.wings_theta_left, sampling_rate=SAMPLING_RATE)
-        self.wings_theta_right_dot = self.get_dot(self.wings_theta_right, sampling_rate=SAMPLING_RATE)
+        self.wings_theta_left_dot = self.get_dot(self.wings_theta_left, sampling_rate=SAMPLING_RATE, **WING_SAVGOL)
+        self.wings_theta_right_dot = self.get_dot(self.wings_theta_right, sampling_rate=SAMPLING_RATE, **WING_SAVGOL)
 
         # psi is reported inside a fixed 360 deg window, so differentiate an unwrapped copy:
         # a frame that steps over the window edge is a 360 deg jump in the reported value but
         # no motion at all, and would otherwise show up as a huge spike in psi_dot. unwrapping
         # is safe here because a constant 360 deg offset does not change a derivative
         self.wings_psi_left_dot = self.get_dot(np.unwrap(self.wings_psi_left, period=360),
-                                               sampling_rate=SAMPLING_RATE)
+                                               sampling_rate=SAMPLING_RATE, **WING_SAVGOL)
         self.wings_psi_right_dot = self.get_dot(np.unwrap(self.wings_psi_right, period=360),
-                                                sampling_rate=SAMPLING_RATE)
+                                                sampling_rate=SAMPLING_RATE, **WING_SAVGOL)
 
         # plt.plot(self.wings_phi_right, label="wings_phi_right")
         # plt.plot(self.wings_phi_left, label="wings_phi_left")
@@ -359,7 +391,7 @@ class FlightAnalysis:
         # plt.legend()
         # plt.show()
 
-        self.omega_lab, self.omega_body, self.angular_speed_lab, self.angular_speed_body = self.get_angular_velocities(
+        self.omega_lab, self.omega_body, self.angular_speed_body = self.get_angular_velocities(
             self.x_body, self.y_body,
             self.z_body, self.first_y_body_frame,
             self.end_frame)
@@ -407,7 +439,10 @@ class FlightAnalysis:
                 self.create_mp4_from_movie()
         self.adjust_starting_frame()
         # self.frames_confidence_score = self.get_frames_confidence_score()
-        self.omega_x, self.omega_y, self.omega_z = self.omega_body.T
+        # Body roll/pitch/yaw rates. These ARE the components of omega_body -- the
+        # standard aerospace names for them, not a second computation. Assigned
+        # after adjust_starting_frame so they carry its NaN padding.
+        self.p, self.q, self.r = self.omega_body.T
         # if not validation:
         #     force_body, force_lab, torque_body =  self.get_wings_forces()
         #     self.force_body_left_wing, self.force_body_right_wing = force_body[:, LEFT, :], force_body[:, RIGHT, :]
@@ -829,10 +864,6 @@ class FlightAnalysis:
                 pitch_dot=self.pitch_dot[frames],
                 yaw_dot=self.yaw_dot[frames],
                 omega_body=self.omega_body[frames],
-                angular_speed_body=self.angular_speed_body[frames],
-                p=self.p[frames],
-                q=self.q[frames],
-                r=self.r[frames],
                 torque=torque_body_total[frames],
 
                 avarage_torque_body=avarage_torque_body,
@@ -870,9 +901,6 @@ class FlightAnalysis:
                 left_minus_right_psi_mid_downstroke=left_minus_right_psi_mid_downstroke,
                 left_minus_right_psi_mid_upstroke=left_minus_right_psi_mid_upstroke,
 
-                roll_dot_dot=self.roll_dot_dot[frames],
-                yaw_dot_dot=self.yaw_dot_dot[frames],
-                pitch_dot_dot=self.pitch_dot_dot[frames],
                 omega_body_dot=self.omega_body_dot[frames],
                 angular_acceleration_body=self.angular_acceleration_body[frames],
 
@@ -895,57 +923,13 @@ class FlightAnalysis:
         N, axis = omega_body.shape
         for ax in range(axis):
             ax_dot = self.get_dot(data=omega_body[self.first_y_body_frame:self.end_frame, ax],
-                                  sampling_rate=SAMPLING_RATE)
+                                  sampling_rate=SAMPLING_RATE, **BODY_SAVGOL)
             omega_body_dot[self.first_y_body_frame:self.end_frame, ax] = ax_dot
         angular_acceleration_body = np.linalg.norm(omega_body_dot, axis=-1)
         return omega_body_dot, angular_acceleration_body
 
-    def get_pqr(self):
-        # calculate the body angular acceleratrion and velocity: pqr and pqr_dot
-        roll, roll_dot, roll_dot_dot = np.zeros(self.num_frames), np.zeros(self.num_frames), np.zeros(self.num_frames)
-        pitch = -self.pitch_angle  # there is minus here
-        yaw = self.yaw_angle
-        roll[self.first_y_body_frame:self.end_frame] = self.roll_angle
-        pitch_dot = -self.pitch_dot  # there is minus here
-        yaw_dot = self.yaw_dot
-        roll_dot[self.first_y_body_frame:self.end_frame] = self.roll_dot
-        pitch_dot_dot = self.pitch_dot_dot
-        yaw_dot_dot = self.yaw_dot_dot
-        roll_dot_dot[self.first_y_body_frame:self.end_frame] = self.roll_dot_dot
-
-        p, q, r = self.get_pqr_calculation(pitch, pitch_dot, roll, roll_dot, yaw_dot)
-        p, q, r = np.degrees(p), np.degrees(q), np.degrees(r)
-
-        # p,q,r dot
-
-        # p_dot = roll_dot_dot - yaw_dot_dot * np.sin(np.radians(pitch)) - yaw_dot * pitch_dot * np.cos(
-        #     np.radians(pitch));
-        # q_dot = (pitch_dot_dot * np.cos(np.radians(roll)) - pitch_dot * np.sin(np.radians(roll)) * roll_dot
-        #          + yaw_dot_dot * np.sin(np.radians(roll) * np.cos(pitch) +
-        #                                 +yaw_dot * np.cos(np.radians(roll)) * np.cos(np.radians(pitch)) * roll_dot
-        #                                 - yaw_dot * np.sin(np.radians(roll)) * np.sin(np.radians(pitch)) * pitch_dot))
-        #
-        # r_dot = (-pitch_dot_dot * np.sin(np.radians(roll)) - pitch_dot * np.cos(np.radians(roll)) * roll_dot
-        #          + yaw_dot_dot * np.cos(np.radians(roll)) * np.cos(np.radians(pitch))
-        #          - yaw_dot * np.sin(np.radians(roll)) * np.cos(np.radians(pitch)) * roll_dot
-        #          - yaw_dot * np.cos(np.radians(roll)) * np.sin(np.radians(pitch)) * pitch_dot)
-
-        return p, q, r,  # p_dot, q_dot, r_dot
-
-    @staticmethod
-    def get_pqr_calculation(pitch, pitch_dot, roll, roll_dot, yaw_dot):
-        # get everything in degrees.
-        # return in radians
-        pitch, pitch_dot, roll, roll_dot, yaw_dot = (np.radians(pitch), np.radians(pitch_dot),
-                                                     np.radians(roll), np.radians(roll_dot),
-                                                     np.radians(yaw_dot))
-        p = roll_dot - yaw_dot * np.sin(pitch)
-        q = pitch_dot * np.cos(roll) + yaw_dot * np.sin(roll) * np.cos(pitch)
-        r = -pitch_dot * np.sin(roll) + yaw_dot * np.cos(roll) * np.cos(pitch)
-        return p, q, r
-
     def get_roll_dot(self, roll_angle):
-        roll_dot = self.get_dot(roll_angle, sampling_rate=SAMPLING_RATE)
+        roll_dot = self.get_dot(roll_angle, sampling_rate=SAMPLING_RATE, **BODY_SAVGOL)
         return roll_dot
 
     def get_full_wingbits_objects(self):
@@ -1056,20 +1040,14 @@ class FlightAnalysis:
             (np.arange(0, self.first_y_body_frame), np.arange(self.end_frame, self.num_frames - 1)))
 
         # fix roll angle and roll dot
-        roll_angle, roll_dot, roll_dot_dot = np.zeros((3, self.num_frames))
+        roll_angle, roll_dot = np.zeros((2, self.num_frames))
         roll_angle[self.first_y_body_frame:self.end_frame] = self.roll_angle
         roll_dot[self.first_y_body_frame:self.end_frame] = self.roll_dot
-        roll_dot_dot[self.first_y_body_frame:self.end_frame] = self.roll_dot_dot
         self.roll_angle = roll_angle
         self.roll_dot = roll_dot
-        self.roll_dot_dot = roll_dot_dot
 
-        self.p = FlightAnalysis.fill_with_nans(self.p, indices)
-        self.q = FlightAnalysis.fill_with_nans(self.q, indices)
-        self.r = FlightAnalysis.fill_with_nans(self.r, indices)
         self.roll_angle = FlightAnalysis.fill_with_nans(self.roll_angle, indices)
         self.roll_dot = FlightAnalysis.fill_with_nans(self.roll_dot, indices)
-        self.roll_dot_dot = FlightAnalysis.fill_with_nans(self.roll_dot_dot, indices)
         self.y_body = FlightAnalysis.fill_with_nans(self.y_body, indices)
         self.z_body = FlightAnalysis.fill_with_nans(self.z_body, indices)
         self.gravity_body = FlightAnalysis.fill_with_nans(self.gravity_body, indices)
@@ -1109,12 +1087,12 @@ class FlightAnalysis:
             "left_wing_span", "right_wing_span", "left_wing_chord", "right_wing_chord",
             "all_2_planes", "all_upper_planes", "all_lower_planes", "wings_span_vecs",
             "wings_joints_vec", "wings_joints_vec_smoothed", "yaw_angle", "pitch_angle", "roll_angle",
-            "roll_dot", "pitch_dot", "yaw_dot", "roll_dot_dot", "pitch_dot_dot", "yaw_dot_dot"
+            "roll_dot", "pitch_dot", "yaw_dot"
             , "stroke_planes", "center_of_mass", "body_speed",
             "wing_tips_speed", "wings_phi_left", "wings_phi_right", "wings_theta_left", "wings_theta_right",
             "wings_psi_left", "wings_psi_right",
-            "omega_lab", "omega_body", "omega_body_dot", "angular_speed_lab", "angular_speed_body",
-            "angular_acceleration_body", "p", "q", "r",
+            "omega_lab", "omega_body", "omega_body_dot", "angular_speed_body",
+            "angular_acceleration_body",
             "wings_phi_left_dot", "wings_phi_right_dot", "wings_theta_left_dot",
             "wings_theta_right_dot", "wings_psi_left_dot", "wings_psi_right_dot", "wings_chord",
             "left_wing_lower_chord", "right_wing_lower_chord",
@@ -1382,20 +1360,25 @@ class FlightAnalysis:
         return CM
 
     def get_body_speed(self):
-        return self.get_speed(self.center_of_mass)
+        return self.get_speed(self.center_of_mass, savgol=BODY_SAVGOL)
 
     def get_wing_tips_speed(self):
-        left_tip_speed, _ = self.get_speed(self.wings_tips_left[:, :])
-        right_tip_speed, _ = self.get_speed(self.wings_tips_right[:, :])
+        # The tips trace the wingbeat, so they need the wings' passband, not the body's.
+        left_tip_speed, _ = self.get_speed(self.wings_tips_left[:, :], savgol=WING_SAVGOL)
+        right_tip_speed, _ = self.get_speed(self.wings_tips_right[:, :], savgol=WING_SAVGOL)
         wing_tips_speed = np.concatenate((right_tip_speed[:, np.newaxis], left_tip_speed[:, np.newaxis]), axis=1)
         return wing_tips_speed
 
     @staticmethod
-    def get_speed(points_3d, sampling_rate=SAMPLING_RATE):
+    def get_speed(points_3d, sampling_rate=SAMPLING_RATE, savgol=None):
+        # Defaults to the body parameters: every external caller differentiates a
+        # body trajectory. Wing-tip motion must pass WING_SAVGOL explicitly.
+        savgol = BODY_SAVGOL if savgol is None else savgol
         T = np.arange(len(points_3d))
         derivative_3D = np.zeros((len(points_3d), 3))
         for axis in range(3):
-            derivative_3D[:, axis] = FlightAnalysis.get_dot(points_3d[:, axis], sampling_rate=sampling_rate)
+            derivative_3D[:, axis] = FlightAnalysis.get_dot(points_3d[:, axis],
+                                                            sampling_rate=sampling_rate, **savgol)
         speed = np.linalg.norm(derivative_3D, axis=1)
         return speed, derivative_3D
 
@@ -1612,6 +1595,15 @@ class FlightAnalysis:
 
     @staticmethod
     def get_dot(data, window_length=5, polyorder=2, sampling_rate=1):
+        # The window is now long enough (51 frames for body signals) that a short
+        # segment can be shorter than it. savgol needs an odd window that fits the
+        # data and exceeds the polyorder, so shrink to fit rather than raising.
+        window_length = min(window_length, len(data))
+        if window_length % 2 == 0:
+            window_length -= 1
+        polyorder = min(polyorder, max(1, window_length - 1))
+        if window_length < 3:
+            return np.gradient(np.asarray(data, dtype=float)) * sampling_rate
         data_dot = savgol_filter(data, window_length, polyorder, deriv=1, delta=(1 / sampling_rate))
         # plt.plot(data_dot / 100)
         # plt.plot(data)
@@ -1903,10 +1895,11 @@ class FlightAnalysis:
         omega_lab = np.concatenate((omega_lab, nan_frames), axis=0)
         omega_body = np.concatenate((omega_body, nan_frames), axis=0)
 
+        # A rotation preserves norms, so ||omega_lab|| and ||omega_body|| are the
+        # same number to float precision. One field, not two.
         angular_speed_body = np.linalg.norm(omega_body, axis=-1)
-        angular_speed_lab = np.linalg.norm(omega_lab, axis=-1)
 
-        return omega_lab, omega_body, angular_speed_lab, angular_speed_body
+        return omega_lab, omega_body, angular_speed_body
 
     @staticmethod
     def get_auto_correlation_x_body(x_body):

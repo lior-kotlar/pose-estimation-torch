@@ -290,8 +290,8 @@ These power the pipeline but are runnable on their own:
 # Flip the mirror cam's sparse mat in place (single or batch)
 .env/bin/python code/flip_sparse_cam_mat.py <movies_dir> --cam cam1 --dry-run
 
-# Wing-angle plot from an analysis h5 (or a dir of them)
-.env/bin/python code/plot_wing_angles.py <dir>
+# Wing-angle + body angular acceleration plots from an analysis h5 (or a dir of them)
+.env/bin/python code/plot_wing_and_body.py <dir>
 
 # 3D check of the gravity ("down") vector: body triad + gravity every k frames
 .env/bin/python code/plot_gravity_body.py <dir> -k 100

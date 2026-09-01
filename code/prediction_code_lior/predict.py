@@ -11,7 +11,7 @@ sys.path.append(code_directory)
 from utils import (get_start_frame, show_interest_points_with_index, PredictConfig,
                    get_trigger_frame_info, load_perturbation)
 from pipeline_timing import record as record_timing, earliest_start
-from plot_wing_angles import plot_one as plot_wing_angles_one
+from plot_wing_and_body import plot_one as plot_movie_figures
 import h5py
 import torch
 from Predictor import Predictor2D
@@ -242,16 +242,16 @@ class PredictingManager:
             record_timing(timings_path, movie_label, "predict",
                           t_movie_start, t_predict_end,
                           n_frames=n_movie_frames)
-            # Plot wing angles from the analysis h5 just written. Plot
-            # failure does NOT abort the pipeline.
+            # Wing angles and body angular acceleration, from the analysis h5
+            # just written. Plot failure does NOT abort the pipeline.
             t_step_end = t_predict_end
             try:
-                plot_wing_angles_one(movie_hdf5_path, units="frames")
+                plot_movie_figures(movie_hdf5_path, units="frames")
                 t_step_end = time.time()
                 record_timing(timings_path, movie_label, "plot",
                               t_predict_end, t_step_end)
             except Exception as e:
-                print(f"wing-angles plot failed: {e}", flush=True)
+                print(f"validation plots failed: {e}", flush=True)
             # End-to-end "total" row: from the earliest step recorded for
             # this movie (in the prep job's CSV rows) through end of plot.
             # Falls back to t_movie_start if no prep rows exist (predict-only
