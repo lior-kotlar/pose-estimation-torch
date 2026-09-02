@@ -12,13 +12,20 @@ The page has two sections side by side, and one control bar along the bottom:
           vectors, stroke plane), but flying through the lab frame rather than
           pinned inside a camera that follows the centre of mass, and
           scrubbable rather than rendered
-  left    three graph panels, each with its own menu of everything the analysis
-          h5 holds. A panel shows either a time series against the
-          trigger-relative x-axis the mp4 counter, the analysis CSV and
-          wing_angles.png all share, or a 3D plot of one wing's path through
-          (phi, theta, psi) coloured by time
-  bottom  the fader, play/pause and slow-motion speed, the lab/follow view
-          switch and the frames/ms axis switch
+  left    two graph panels (--rows for more), each with its own menu of
+          everything the analysis h5 holds. A panel shows either a time series
+          against the shared x-axis, or one wing's path through angle space
+          coloured by time -- as a 3D plot of (phi, theta, psi) or as any one
+          of the three 2D projections
+  bottom  the fader, play/pause and playback speed, the lab/follow view switch,
+          the frames/ms unit switch and, on a perturbation movie, the choice of
+          which instant the axis calls zero
+
+The x-axis is the trigger-relative numbering the mp4 counter, the analysis CSV
+and wing_angles.png all share. On a movie that declares a perturbation it is
+zeroed on the ONSET instead, which only shifts the drawing -- the readout keeps
+naming the trigger-relative frame, and the trigger stays marked on every
+panel.
 
 Everything stays tied to one instant: the fader marks it in every panel, and
 zooming one time series zooms the others and narrows the stretch of the
@@ -58,7 +65,8 @@ from plotly.offline import get_plotlyjs
 # the analysis CSV and the validation PNGs; `load` is the tolerant read that
 # lets an older h5 lose a dataset without taking the whole viewer down.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from plot_wing_and_body import load, frame_axis, x_axis  # noqa: E402
+from plot_wing_and_body import (load, frame_axis, x_axis, axis_origin,  # noqa: E402
+                                perturbation_info, ROLE_COLORS)
 
 SUFFIX = "_analysis_smoothed.h5"
 # Also matches collect_analysis_h5.py's <stem>__<parent>.h5 renaming.
@@ -86,7 +94,12 @@ FOLLOW_HALF_WIDTH = 0.003
 # Edge of the square drawn for the stroke plane, as in the mp4.
 STROKE_PLANE_SIZE = 0.005
 
-# (group, label, [(h5 key, column or None, trace name)], y-axis unit, scale)
+# (group, label, [(h5 key, column or None, trace name, colour role)], unit, scale)
+#
+# The colour role, not the position in the panel, is what picks a trace's
+# colour (see ROLE_COLORS in plot_wing_and_body): roll is the same blue whether
+# it is drawn first in "body rates p, q, r" or last in "yaw / pitch / roll", and
+# the x of a position is the x of a velocity.
 #
 # Three things this table has to get right, all of them traps in the h5:
 #   * wing_tips_speed stores RIGHT in column 0 and LEFT in column 1 -- the
@@ -99,70 +112,115 @@ STROKE_PLANE_SIZE = 0.005
 #     silently misalign the shared x-axis.
 SIGNALS = [
     ("Wing angles", "phi (stroke)",
-     [("wings_phi_left", None, "left"), ("wings_phi_right", None, "right")], "deg", 1.0),
+     [("wings_phi_left", None, "left", "left"),
+      ("wings_phi_right", None, "right", "right")], "deg", 1.0),
     ("Wing angles", "theta (deviation)",
-     [("wings_theta_left", None, "left"), ("wings_theta_right", None, "right")], "deg", 1.0),
+     [("wings_theta_left", None, "left", "left"),
+      ("wings_theta_right", None, "right", "right")], "deg", 1.0),
     ("Wing angles", "psi (rotation)",
-     [("wings_psi_left", None, "left"), ("wings_psi_right", None, "right")], "deg", 1.0),
+     [("wings_psi_left", None, "left", "left"),
+      ("wings_psi_right", None, "right", "right")], "deg", 1.0),
     ("Wing angles", "phi rate",
-     [("wings_phi_left_dot", None, "left"), ("wings_phi_right_dot", None, "right")], "deg/s", 1.0),
+     [("wings_phi_left_dot", None, "left", "left"),
+      ("wings_phi_right_dot", None, "right", "right")], "deg/s", 1.0),
     ("Wing angles", "theta rate",
-     [("wings_theta_left_dot", None, "left"), ("wings_theta_right_dot", None, "right")], "deg/s", 1.0),
+     [("wings_theta_left_dot", None, "left", "left"),
+      ("wings_theta_right_dot", None, "right", "right")], "deg/s", 1.0),
     ("Wing angles", "psi rate",
-     [("wings_psi_left_dot", None, "left"), ("wings_psi_right_dot", None, "right")], "deg/s", 1.0),
+     [("wings_psi_left_dot", None, "left", "left"),
+      ("wings_psi_right_dot", None, "right", "right")], "deg/s", 1.0),
     ("Wing angles", "deformation angle",
-     [("left_deformation_angle", None, "left"), ("right_deformation_angle", None, "right")], "deg", 1.0),
+     [("left_deformation_angle", None, "left", "left"),
+      ("right_deformation_angle", None, "right", "right")], "deg", 1.0),
 
     ("Body attitude", "yaw / pitch / roll",
-     [("yaw_angle", None, "yaw"), ("pitch_angle", None, "pitch"),
-      ("roll_angle", None, "roll")], "deg", 1.0),
+     [("yaw_angle", None, "yaw", "z"), ("pitch_angle", None, "pitch", "y"),
+      ("roll_angle", None, "roll", "x")], "deg", 1.0),
     ("Body attitude", "yaw / pitch / roll rate",
-     [("yaw_dot", None, "yaw rate"), ("pitch_dot", None, "pitch rate"),
-      ("roll_dot", None, "roll rate")], "deg/s", 1.0),
+     [("yaw_dot", None, "yaw rate", "z"), ("pitch_dot", None, "pitch rate", "y"),
+      ("roll_dot", None, "roll rate", "x")], "deg/s", 1.0),
     ("Body attitude", "body rates p, q, r",
-     [("p", None, "p (roll)"), ("q", None, "q (pitch)"), ("r", None, "r (yaw)")], "deg/s", 1.0),
+     [("p", None, "p (roll)", "x"), ("q", None, "q (pitch)", "y"),
+      ("r", None, "r (yaw)", "z")], "deg/s", 1.0),
     ("Body attitude", "omega_body",
-     [("omega_body", 0, "about x_body"), ("omega_body", 1, "about y_body"),
-      ("omega_body", 2, "about z_body")], "deg/s", 1.0),
+     [("omega_body", 0, "about x_body", "x"), ("omega_body", 1, "about y_body", "y"),
+      ("omega_body", 2, "about z_body", "z")], "deg/s", 1.0),
     ("Body attitude", "omega_lab",
-     [("omega_lab", 0, "x"), ("omega_lab", 1, "y"), ("omega_lab", 2, "z")], "deg/s", 1.0),
+     [("omega_lab", 0, "x", "x"), ("omega_lab", 1, "y", "y"),
+      ("omega_lab", 2, "z", "z")], "deg/s", 1.0),
     ("Body attitude", "angular speed",
-     [("angular_speed_body", None, "|omega_body|")], "deg/s", 1.0),
+     [("angular_speed_body", None, "|omega_body|", "mag")], "deg/s", 1.0),
     ("Body attitude", "angular acceleration (components)",
-     [("omega_body_dot", 0, "about x_body (roll)"), ("omega_body_dot", 1, "about y_body (pitch)"),
-      ("omega_body_dot", 2, "about z_body (yaw)")], "10^3 deg/s^2", 1e-3),
+     [("omega_body_dot", 0, "about x_body (roll)", "x"),
+      ("omega_body_dot", 1, "about y_body (pitch)", "y"),
+      ("omega_body_dot", 2, "about z_body (yaw)", "z")], "10^3 deg/s^2", 1e-3),
     ("Body attitude", "angular acceleration (magnitude)",
-     [("angular_acceleration_body", None, "|omega_body_dot|")], "10^3 deg/s^2", 1e-3),
+     [("angular_acceleration_body", None, "|omega_body_dot|", "mag")],
+     "10^3 deg/s^2", 1e-3),
 
     ("Translation", "CM position",
-     [("center_of_mass", 0, "x"), ("center_of_mass", 1, "y"),
-      ("center_of_mass", 2, "z")], "mm", 1e3),
+     [("center_of_mass", 0, "x", "x"), ("center_of_mass", 1, "y", "y"),
+      ("center_of_mass", 2, "z", "z")], "mm", 1e3),
     ("Translation", "CM velocity",
-     [("CM_dot", 0, "x"), ("CM_dot", 1, "y"), ("CM_dot", 2, "z")], "m/s", 1.0),
-    ("Translation", "CM speed", [("CM_speed", None, "|v|")], "m/s", 1.0),
+     [("CM_dot", 0, "x", "x"), ("CM_dot", 1, "y", "y"),
+      ("CM_dot", 2, "z", "z")], "m/s", 1.0),
+    ("Translation", "CM speed", [("CM_speed", None, "|v|", "mag")], "m/s", 1.0),
     ("Translation", "wing tip speed",
-     [("wing_tips_speed", 1, "left"), ("wing_tips_speed", 0, "right")], "m/s", 1.0),
+     [("wing_tips_speed", 1, "left", "left"),
+      ("wing_tips_speed", 0, "right", "right")], "m/s", 1.0),
     ("Translation", "gravity in body axes",
-     [("gravity_body", 0, "x_body"), ("gravity_body", 1, "y_body"),
-      ("gravity_body", 2, "z_body")], "unit", 1.0),
+     [("gravity_body", 0, "x_body", "x"), ("gravity_body", 1, "y_body", "y"),
+      ("gravity_body", 2, "z_body", "z")], "unit", 1.0),
 ]
 
 # The angle-space plots are menu entries like any other, so any row can show
-# one. They are 3D scenes rather than time series, which is why a row is its
+# one. Kind "ws" is the 3D path through (phi, theta, psi); kind "ws2" is that
+# same path projected onto one pair of angles, which is both easier to read
+# and far cheaper to draw. Neither is a time series, which is why a row is its
 # own figure -- see build_row_template.
-WING_SPACE = [("Wing angles", "wing angle space (left)", "left"),
-              ("Wing angles", "wing angle space (right)", "right")]
+ANGLE_SPACE_GROUP = "Wing angle space"
+WING_SPACE_PAIRS = [("phi", "theta"), ("phi", "psi"), ("theta", "psi")]
 
-# What the three rows show when the file is first opened. Row 3 starts on an
-# angle-space plot so the two kinds are both visible without touching a menu.
+
+def angle_space_entries():
+    """One menu entry per wing per view: the 3D path and its three projections."""
+    out = []
+    for side in ("left", "right"):
+        out.append({"group": ANGLE_SPACE_GROUP, "label": f"phi-theta-psi 3D ({side})",
+                    "unit": "deg", "kind": "ws", "side": side,
+                    "ax": ["phi", "theta"], "traces": []})
+        for xa, ya in WING_SPACE_PAIRS:
+            out.append({"group": ANGLE_SPACE_GROUP, "label": f"{ya} vs {xa} ({side})",
+                        "unit": "deg", "kind": "ws2", "side": side,
+                        "ax": [xa, ya], "traces": []})
+    return out
+
+
+# What the rows show when the file is first opened, in order; a row count below
+# the length of this list takes its first entries. The 3D scene is deliberately
+# last: it is the one panel heavy enough to be felt, so it is opened on purpose
+# rather than by default.
 DEFAULT_ROWS = ["phi (stroke)", "angular acceleration (components)",
-                "wing angle space (left)"]
+                "theta vs phi (left)", "phi-theta-psi 3D (left)"]
 
-# Slot colours. Left/right pairs land on blue/orange, matching wing_angles.png;
-# xyz triples get blue/orange/green.
-SLOT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+# Fallback colours for a row template's traces; the real colour of every trace
+# comes from its signal's role (ROLE_COLORS) and is restyled in on each swap.
+SLOT_COLORS = [ROLE_COLORS["x"], ROLE_COLORS["y"], ROLE_COLORS["z"]]
 MAX_TRACES_PER_ROW = 3
-N_ROWS = 3
+DEFAULT_ROW_COUNT = 2
+
+# Most points an angle-space panel ever draws. plotly re-renders and re-picks
+# every point of that trace on each orbit event, and a wingbeat loop retraced
+# 4000 times looks exactly like one retraced 1500 times, so the excess buys
+# nothing and costs the interaction.
+WS_MAX_POINTS = 1500
+
+# Playback speeds offered, in movie frames per second of wall clock. The menu
+# labels them in ms of flight per second, which is the quantity that means
+# something at 16 kHz. Above the display's refresh rate the browser cannot
+# paint every frame; the readout says when that starts.
+SPEEDS = [15, 30, 60, 120, 300, 600, 1500]
+DEFAULT_SPEED = 120
 
 
 # --------------------------------------------------------------------------
@@ -270,7 +328,7 @@ def build_signals(h5, n, step, n_full):
     out, dropped = [], []
     for group, label, members, unit, scale in SIGNALS:
         traces, ok = [], True
-        for key, col, name in members:
+        for key, col, name, role in members:
             raw = load(h5, key)
             if raw is None:
                 ok = False
@@ -289,14 +347,38 @@ def build_signals(h5, n, step, n_full):
                     dropped.append(f"{label}: {key} has no column {col}")
                     break
                 arr = arr[:, col]
-            traces.append({"name": name, "y": pack(arr * scale)})
+            traces.append({"name": name, "y": pack(arr * scale),
+                           "color": ROLE_COLORS[role]})
         if ok:
             out.append({"group": group, "label": label, "unit": unit,
                         "kind": "2d", "traces": traces})
-    for group, label, side in WING_SPACE:
-        out.append({"group": group, "label": label, "unit": "deg",
-                    "kind": "ws", "side": side, "traces": []})
+    out.extend(angle_space_entries())
     return out, dropped
+
+
+def wingbeat_hz(h5, rate):
+    """The dominant wingbeat frequency in Hz, or None.
+
+    Used only to tell the reader how many samples per wingbeat a chosen
+    playback speed leaves, so the peak of phi's spectrum is enough. The finite
+    samples are taken as one block: a head or tail of NaN pad is what is being
+    dropped, and a rough peak survives an interior gap being closed up.
+    """
+    if not rate:
+        return None
+    phi = load(h5, "wings_phi_left")
+    if phi is None:
+        return None
+    v = np.asarray(phi, dtype=float)
+    v = v[np.isfinite(v)]
+    if len(v) < 1024:
+        return None
+    spec = np.abs(np.fft.rfft((v - v.mean()) * np.hanning(len(v))))
+    freq = np.fft.rfftfreq(len(v), d=1.0 / rate)
+    band = (freq > 50) & (freq < 500)
+    if not band.any():
+        return None
+    return round(float(freq[band][np.argmax(spec[band])]), 1)
 
 
 def build_perturbation(h5, frames):
@@ -309,23 +391,16 @@ def build_perturbation(h5, frames):
     from fly visibility and knows nothing about the perturbation -- so the band
     is clipped to the axis instead of being dropped.
     """
-    if not load(h5, "perturbation"):
+    pert = perturbation_info(h5)
+    if pert is None:
         return None
-    onset = load(h5, "perturbation_start_frame")
-    if onset is None:
-        return None
-    end_known = bool(load(h5, "perturbation_end_known"))
-    end = load(h5, "perturbation_end_frame") if end_known else None
-    label = as_text(load(h5, "perturbation_type"), "perturbation")
-    if not end_known:
-        label += " (end unrecorded)"
     lo, hi = float(frames[0]), float(frames[-1])
-    onset = float(onset)
+    onset, end, end_known = pert["onset"], pert["end"], pert["end_known"]
     return {
         "onset": onset,
-        "end": float(end) if end is not None else None,
+        "end": end,
         "end_known": end_known,
-        "label": label,
+        "label": pert["label"],
         # Band drawn on the axis, clipped; None when it misses the range entirely.
         "band": [max(onset, lo), min(float(end) if end is not None else hi, hi)]
                 if min(float(end) if end is not None else hi, hi) > max(onset, lo) else None,
@@ -484,8 +559,9 @@ def build_row_template(x_label, pert):
     is a dozen lines and buys the ability to mix the two kinds.
 
     Shape indices are a contract with the control layer: 0 is the perturbation
-    band and 1 its onset line. Both are always present, merely invisible when
-    the movie declares no perturbation, so the indices never shift.
+    band, 1 its onset line and 2 the trigger. All three are always present,
+    merely invisible when they have nothing to mark, so the indices never
+    shift.
     """
     fig = go.Figure([
         go.Scattergl(x=[], y=[], mode="lines", line=dict(color=SLOT_COLORS[t], width=1),
@@ -506,22 +582,41 @@ def build_row_template(x_label, pert):
                  x0=(pert["onset"] if pert else 0), x1=(pert["onset"] if pert else 0),
                  y0=0, y1=1, line=dict(color="rgba(214,39,40,0.6)", width=1),
                  layer="below", visible=bool(pert and pert["onset_visible"])),
+            # The trigger, wherever it falls on the axis in force: at zero
+            # while the axis is trigger-relative, at -onset once it is not.
+            dict(type="line", xref="x", yref="y domain", x0=0, x1=0, y0=0, y1=1,
+                 line=dict(color="rgba(80,80,80,0.55)", width=1, dash="dash"),
+                 layer="below", visible=False),
         ],
         xaxis=dict(title=x_label), yaxis=dict(title=""),
         hovermode="x", dragmode="zoom",
-        margin=dict(l=58, r=14, t=8, b=34),
-        legend=dict(orientation="h", y=1.14, x=0, font=dict(size=10)),
+        # The top margin is the legend's room. Without it a legend placed above
+        # the axes has nowhere to go and plotly draws it over the trace.
+        margin=dict(l=58, r=14, t=30, b=34),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0,
+                    font=dict(size=10)),
         showlegend=True,
     )
     return fig
 
 
-def build_ws_template(side, unit_label):
+def colorbar(unit_label):
+    """The time gradient's scale, shared by every angle-space panel."""
+    return dict(size=2.2, colorscale="Viridis", showscale=True,
+                colorbar=dict(title=dict(text=unit_label, side="right"),
+                              thickness=9, len=0.75, x=1.0,
+                              tickfont=dict(size=9)))
+
+
+def build_ws_template(unit_label):
     """A wing's path through (phi, theta, psi), empty.
 
     Filled by the control layer from the packed angles, so that the zoom link
     can re-slice it without depending on plotly.js having normalised the
-    base64 {dtype, bdata} spec plotly.py emits for a numpy array.
+    base64 {dtype, bdata} spec plotly.py emits for a numpy array. Which wing,
+    and the axis titles, are restyled in the same way -- one template serves
+    every angle-space entry of this kind, so swapping between them is a
+    restyle rather than a rebuild.
 
     Trace 0 is the trajectory, trace 1 the marker for the current frame, and
     trace 2 the marker for whatever the pointer is over.
@@ -529,13 +624,8 @@ def build_ws_template(side, unit_label):
     fig = go.Figure([
         go.Scatter3d(x=[], y=[], z=[], mode="lines+markers",
                      line=dict(color="rgba(120,120,120,0.35)", width=1),
-                     marker=dict(size=1.8, colorscale="Viridis", showscale=True,
-                                 colorbar=dict(title=dict(text=unit_label, side="right"),
-                                               thickness=9, len=0.75, x=1.0,
-                                               tickfont=dict(size=9))),
-                     name=side,
-                     hovertemplate=("phi %{x:.1f}<br>theta %{y:.1f}"
-                                    "<br>psi %{z:.1f}<extra></extra>")),
+                     marker=colorbar(unit_label), name="",
+                     hovertemplate=("%{x:.1f}, %{y:.1f}, %{z:.1f}<extra></extra>")),
         go.Scatter3d(x=[], y=[], z=[], mode="markers",
                      marker=dict(size=7, color="#d62728"), name="now",
                      hoverinfo="skip"),
@@ -548,7 +638,37 @@ def build_ws_template(side, unit_label):
     fig.update_layout(
         scene=dict(xaxis_title="phi", yaxis_title="theta", zaxis_title="psi",
                    camera=dict(eye=dict(x=1.5, y=1.5, z=1.1))),
-        margin=dict(l=0, r=0, t=4, b=0), showlegend=False,
+        # Room on the right for the colour bar, which would otherwise be drawn
+        # over the scene.
+        margin=dict(l=0, r=46, t=4, b=0), showlegend=False,
+    )
+    return fig
+
+
+def build_ws2_template(unit_label):
+    """One 2D projection of that same path, empty.
+
+    The same three traces in the same order as the 3D template, so the control
+    layer drives both through one code path. Scattergl rather than a scene:
+    a projection carries the shape of the stroke without a camera to orbit, and
+    costs a fraction of the 3D panel to draw and to pick.
+    """
+    fig = go.Figure([
+        go.Scattergl(x=[], y=[], mode="lines+markers",
+                     line=dict(color="rgba(120,120,120,0.35)", width=1),
+                     marker=colorbar(unit_label), name="",
+                     hovertemplate="%{x:.1f}, %{y:.1f}<extra></extra>"),
+        go.Scattergl(x=[], y=[], mode="markers",
+                     marker=dict(size=10, color="#d62728"), name="now",
+                     hoverinfo="skip"),
+        go.Scattergl(x=[], y=[], mode="markers",
+                     marker=dict(size=9, color="#1f77b4", symbol="diamond"),
+                     name="hover", hoverinfo="skip"),
+    ])
+    fig.update_layout(
+        xaxis=dict(title="", zeroline=False), yaxis=dict(title="", zeroline=False),
+        margin=dict(l=52, r=64, t=8, b=34), showlegend=False,
+        hovermode="closest", dragmode="zoom",
     )
     return fig
 
@@ -573,12 +693,12 @@ HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><title>@@TITLE@@</title>
 <style>
   html,body{margin:0;padding:0;height:100%;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#222;background:#fff}
-  #page{display:flex;flex-direction:column;height:100%}
+  #page{display:flex;flex-direction:column;height:100%;overflow:hidden}
   #head{padding:6px 12px;border-bottom:1px solid #ddd;font-size:12px;color:#555;flex:0 0 auto}
   #head b{color:#111;font-size:13px}
-  #main{display:flex;flex:1 1 auto;min-height:0}
-  #graphsec{flex:1 1 52%;display:flex;flex-direction:column;min-width:0;min-height:0}
-  .row{flex:1 1 33.33%;display:flex;flex-direction:column;min-height:0;border-bottom:1px solid #f0f0f0;position:relative}
+  #main{display:flex;flex:1 1 auto;min-height:0;overflow:hidden}
+  #graphsec{flex:1 1 52%;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+  .row{flex:1 1 0;display:flex;flex-direction:column;min-height:0;border-bottom:1px solid #f0f0f0;position:relative;overflow:hidden}
   /* The time cursor and the hover marker are plain DOM, not plotly shapes:
      moving a shape costs a full redraw of the panel's 4500-point trace, which
      is far too much to do on every animation frame. */
@@ -587,10 +707,13 @@ HTML = r"""<!doctype html>
   .hline{border-left:1.5px dashed #1f77b4}
   .rowhead{flex:0 0 auto;padding:3px 8px 0}
   .rowhead select{font:12px inherit;max-width:100%}
-  .rowplot{flex:1 1 auto;min-height:0}
-  #scene3d{flex:1 1 48%;min-width:0;border-left:1px solid #ddd}
+  .rowplot{flex:1 1 auto;min-height:0;overflow:hidden}
+  #scene3d{flex:1 1 48%;min-width:0;min-height:0;overflow:hidden;border-left:1px solid #ddd}
+  /* Above the panels in the stacking order as well as below them on the page:
+     a plot that somehow renders too tall must never take the controls with
+     it. */
   #bar{flex:0 0 auto;padding:7px 12px;border-top:1px solid #ccc;background:#fafafa;
-       display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+       display:flex;align-items:center;gap:12px;flex-wrap:wrap;position:relative;z-index:10}
   #bar button{font:12px inherit;padding:3px 9px;cursor:pointer;border:1px solid #bbb;background:#fff;border-radius:3px}
   #bar button:hover{background:#eee}
   #play{min-width:56px;font-weight:600}
@@ -604,9 +727,7 @@ HTML = r"""<!doctype html>
   <div id="head">@@HEADER@@</div>
   <div id="main">
     <div id="graphsec">
-      <div class="row"><div class="rowhead"><select id="pick0"></select></div><div class="rowplot" id="row0"></div><div class="cursor" id="cur0"></div><div class="hline" id="hov0"></div></div>
-      <div class="row"><div class="rowhead"><select id="pick1"></select></div><div class="rowplot" id="row1"></div><div class="cursor" id="cur1"></div><div class="hline" id="hov1"></div></div>
-      <div class="row"><div class="rowhead"><select id="pick2"></select></div><div class="rowplot" id="row2"></div><div class="cursor" id="cur2"></div><div class="hline" id="hov2"></div></div>
+@@ROWS@@
     </div>
     <div id="scene3d"></div>
   </div>
@@ -620,13 +741,7 @@ HTML = r"""<!doctype html>
       <button id="last" title="last frame">&gt;|</button>
     </div>
     <div class="grp"><label for="speed">speed</label>
-      <select id="speed">
-        <option value="1">1 frame / tick</option>
-        <option value="2">2</option>
-        <option value="5" selected>5</option>
-        <option value="10">10</option>
-        <option value="25">25</option>
-      </select><span id="rate"></span>
+      <select id="speed"></select><span id="rate"></span>
     </div>
     <div class="grp"><label for="view">view</label>
       <select id="view"><option value="lab" selected>lab (whole flight)</option>
@@ -635,6 +750,10 @@ HTML = r"""<!doctype html>
     <div class="grp"><label for="units">x axis</label>
       <select id="units"><option value="frames" selected>frames</option>
                          <option value="ms">ms</option></select>
+    </div>
+    <div class="grp" id="origingrp"><label for="origin">from</label>
+      <select id="origin"><option value="pert" selected>perturbation onset</option>
+                          <option value="trigger">trigger</option></select>
     </div>
     <input id="fader" type="range" min="0" value="0" step="1">
     <div id="read"></div>
@@ -667,13 +786,24 @@ const SCENE = "scene3d";
 const DYN = [1,2,3,4,5,6,7,8,9,10,11,12];
 const CONN = @@CONNECTIONS@@, VIS = @@VISIBLE@@;
 
-let frame = 0, playing = false, follow = false, units = "frames", step = 5;
+let frame = 0, playing = false, follow = false, units = "frames";
+/* Which instant the x-axis calls zero. A perturbation movie opens on its
+   onset, because that is the instant such an experiment is about; the frame
+   NUMBERS never move, so the readout keeps naming the trigger-relative frame
+   the mp4 counter shows. */
+let originMode = P.origin_switch ? "pert" : "trigger";
+/* Playback speed as a rate -- movie frames per second of wall clock -- rather
+   than a stride per animation tick. See tick(). */
+let playRate = P.speed_default, refreshHz = 60;
 /* The visible index window. Zooming any time-series row narrows it, and every
    angle-space row is re-sliced to match -- that is the zoom link. */
 let win = [0, N - 1];
 let zooming = false;
 const rowLabel = P.defaults.slice();
-const rowKind = [null, null, null], rowSide = [null, null, null];
+const rowKind = new Array(NROWS).fill(null);
+/* How many frames one drawn point of an angle-space row stands for; see
+   wsSlice. A click has to undo it to land on the right frame. */
+const rowStride = new Array(NROWS).fill(1);
 const sigByLabel = {};
 P.signals.forEach(s => sigByLabel[s.label] = s);
 const yCache = new Map();
@@ -688,9 +818,23 @@ function seriesY(sig, t){
   if (!yCache.has(key)) yCache.set(key, unpack(sig.traces[t].y));
   return yCache.get(key);
 }
-function toX(f){ return (units === "ms" && P.frame_rate) ? f / P.frame_rate * 1000 : f; }
-function xvals(){ return units === "ms" && P.time_ms ? P.time_ms : P.frames; }
-function xLabel(){ return units === "ms" ? P.x_label_ms : P.x_label_frames; }
+/* The axis is (trigger-relative frame - origin) in the chosen unit. One
+   converter for the traces and for anything drawn at a given frame, so a
+   landmark cannot land where the data does not. */
+function originFrame(){ return (originMode === "pert" && P.pert) ? P.pert.onset : 0; }
+function xScale(){ return (units === "ms" && P.frame_rate) ? 1000 / P.frame_rate : 1; }
+function toX(f){ return (f - originFrame()) * xScale(); }
+const xCache = new Map();
+function xvals(){
+  const key = units + "|" + originMode;
+  if (!xCache.has(key)){
+    const o = originFrame(), k = xScale(), a = new Float64Array(N);
+    for (let i = 0; i < N; i++) a[i] = (P.frames[i] - o) * k;
+    xCache.set(key, a);
+  }
+  return xCache.get(key);
+}
+function xLabel(){ return P.x_labels[originMode][units]; }
 function xToIndex(xv){
   const x = xvals(), d = x.length > 1 ? (x[1] - x[0]) : 1;
   return Math.round((xv - x[0]) / d);
@@ -755,7 +899,10 @@ function pertLine(f){
 }
 function readout(i){
   const f = P.frames[i];
-  let s = "frame " + (f >= 0 ? "+" : "") + f;
+  /* Always the trigger-relative number, whatever the axis is drawn from, so
+     this line and the mp4 counter can be read against each other. The offset
+     from the perturbation is the line below. */
+  let s = (P.trigger_relative ? "trigger frame " : "box frame ") + (f >= 0 ? "+" : "") + f;
   if (P.time_ms) s += "   " + (P.time_ms[i] >= 0 ? "+" : "") + P.time_ms[i].toFixed(2) + " ms";
   const p = pertLine(f);
   if (p) s += "\n" + p;
@@ -763,13 +910,36 @@ function readout(i){
 }
 
 /* ---- rows: either a time series or an angle-space scene ---------------- */
+/* One angle-space panel's trajectory: the visible window, thinned to at most
+   P.wsMax points. The thinning is what keeps the 3D panel responsive -- plotly
+   re-renders and re-picks every point of this trace on each orbit event, and a
+   wingbeat loop retraced 4000 times looks exactly like one retraced 1500
+   times. The stride is remembered so a click still lands on the right frame.
+   Colour is the x-axis itself, so the bar reads in whatever unit and origin
+   the panels are on. */
 function wsSlice(r){
-  const a = wsFull[rowSide[r]];
-  Plotly.restyle(rowDiv(r), {
-    x: [a.phi.subarray(win[0], win[1] + 1)],
-    y: [a.theta.subarray(win[0], win[1] + 1)],
-    z: [a.psi.subarray(win[0], win[1] + 1)],
-    "marker.color": [P.frames.slice(win[0], win[1] + 1)]}, [0]);
+  const sig = sigByLabel[rowLabel[r]];
+  if (!sig || sig.kind === "2d") return;
+  const a = wsFull[sig.side];
+  const s = Math.max(1, Math.ceil((win[1] - win[0] + 1) / P.wsMax));
+  rowStride[r] = s;
+  const n = Math.floor((win[1] - win[0]) / s) + 1;
+  const take = src => { const o = new Float32Array(n);
+    for (let i = 0; i < n; i++) o[i] = src[win[0] + i * s]; return o; };
+  const x = xvals(), col = new Float64Array(n);
+  for (let i = 0; i < n; i++) col[i] = x[win[0] + i * s];
+  const u = {x: [take(a[sig.ax[0]])], y: [take(a[sig.ax[1]])], "marker.color": [col],
+             "marker.colorbar.title.text": [P.x_short[originMode][units]]};
+  if (sig.kind === "ws") u.z = [take(a.psi)];
+  Plotly.restyle(rowDiv(r), u, [0]);
+}
+/* One frame as a one-point update for an angle-space marker trace. */
+function wsPoint(sig, i){
+  const a = wsFull[sig.side];
+  const u = i === null ? {x: [[]], y: [[]]}
+                       : {x: [[a[sig.ax[0]][i]]], y: [[a[sig.ax[1]][i]]]};
+  if (sig.kind === "ws") u.z = i === null ? [[]] : [[a.psi[i]]];
+  return u;
 }
 /* Put a DOM overlay line at a data x on row r, or hide it. This is what the
    time cursor and the hover marker both use. Doing it in the DOM rather than
@@ -790,13 +960,12 @@ function placeLine(el, r, xv){
   el.style.display = "block";
 }
 function syncRow(r){
-  if (rowKind[r] === "ws"){
-    const a = wsFull[rowSide[r]];
-    Plotly.restyle(rowDiv(r), {x: [[a.phi[frame]]], y: [[a.theta[frame]]],
-                               z: [[a.psi[frame]]]}, [1]);
-    document.getElementById("cur" + r).style.display = "none";
-  } else if (rowKind[r] === "2d"){
+  const sig = sigByLabel[rowLabel[r]];
+  if (rowKind[r] === "2d"){
     placeLine(document.getElementById("cur" + r), r, xvals()[frame]);
+  } else if (rowKind[r] && sig){
+    Plotly.restyle(rowDiv(r), wsPoint(sig, frame), [1]);
+    document.getElementById("cur" + r).style.display = "none";
   }
 }
 /* The pointer's instant, shown on every OTHER panel. Deliberately does NOT
@@ -806,15 +975,13 @@ function setHover(i){
   hoverIdx = (i === null || !Number.isFinite(i)) ? null : clampIdx(i);
   for (let r = 0; r < NROWS; r++){
     const el = document.getElementById("hov" + r);
+    const sig = sigByLabel[rowLabel[r]];
     if (rowKind[r] === "2d"){
       if (hoverIdx === null) el.style.display = "none";
       else placeLine(el, r, xvals()[hoverIdx]);
-    } else if (rowKind[r] === "ws"){
+    } else if (rowKind[r] && sig){
       el.style.display = "none";
-      const a = wsFull[rowSide[r]];
-      Plotly.restyle(rowDiv(r), hoverIdx === null
-        ? {x: [[]], y: [[]], z: [[]]}
-        : {x: [[a.phi[hoverIdx]]], y: [[a.theta[hoverIdx]]], z: [[a.psi[hoverIdx]]]}, [2]);
+      Plotly.restyle(rowDiv(r), wsPoint(sig, hoverIdx), [2]);
     }
   }
 }
@@ -824,13 +991,19 @@ function refreshLines(){
   for (let r = 0; r < NROWS; r++) syncRow(r);
   if (hoverIdx !== null) setHover(hoverIdx);
 }
+/* The static landmarks on a time-series row, at wherever the axis in force
+   puts them. Shape indices are the contract from build_row_template. */
 function pertShapes(r){
-  const p = P.pert;
-  if (!p) return;
-  const u = {};
-  if (p.band){ u["shapes[0].x0"] = toX(p.band[0]); u["shapes[0].x1"] = toX(p.band[1]); }
-  if (p.onset_visible){ u["shapes[1].x0"] = toX(p.onset); u["shapes[1].x1"] = toX(p.onset); }
-  if (Object.keys(u).length) Plotly.relayout(rowDiv(r), u);
+  const p = P.pert, u = {};
+  if (p){
+    if (p.band){ u["shapes[0].x0"] = toX(p.band[0]); u["shapes[0].x1"] = toX(p.band[1]); }
+    if (p.onset_visible){ u["shapes[1].x0"] = toX(p.onset); u["shapes[1].x1"] = toX(p.onset); }
+  }
+  const x = xvals(), t = toX(0);
+  const on = t >= Math.min(x[0], x[N - 1]) && t <= Math.max(x[0], x[N - 1]);
+  u["shapes[2].visible"] = on;
+  if (on){ u["shapes[2].x0"] = t; u["shapes[2].x1"] = t; }
+  Plotly.relayout(rowDiv(r), u);
 }
 function setRow(r, label){
   const sig = sigByLabel[label];
@@ -838,30 +1011,44 @@ function setRow(r, label){
   rowLabel[r] = label;
   const div = rowDiv(r);
   /* Only rebuild the plot when the KIND changes -- swapping one time series
-     for another is a restyle, which keeps the user's zoom and is far cheaper. */
-  if (rowKind[r] !== sig.kind || (sig.kind === "ws" && rowSide[r] !== sig.side)){
-    const tpl = sig.kind === "ws" ? P.wsTemplate[sig.side] : P.rowTemplate;
+     for another, or one wing or angle pair for another, is a restyle, which
+     keeps the user's zoom and is far cheaper. */
+  if (rowKind[r] !== sig.kind){
+    const tpl = sig.kind === "2d" ? P.rowTemplate
+              : (sig.kind === "ws" ? P.wsTemplate : P.ws2Template);
     Plotly.newPlot(div, JSON.parse(JSON.stringify(tpl.data)),
                    JSON.parse(JSON.stringify(tpl.layout)),
                    {responsive: true, displaylogo: false});
-    rowKind[r] = sig.kind; rowSide[r] = sig.side || null;
+    rowKind[r] = sig.kind;
+    fitPlot(div);              // in case the page moved under the old panel
     attachRow(r);              // newPlot drops the div's event handlers
     if (sig.kind === "2d") pertShapes(r);
   }
-  if (sig.kind === "ws"){
-    wsSlice(r);
-  } else {
-    const x = xvals(), xs = [], ys = [], names = [], vis = [];
+  if (sig.kind === "2d"){
+    const x = xvals(), xs = [], ys = [], names = [], vis = [], cols = [];
     for (let t = 0; t < MAXTR; t++){
       const has = t < sig.traces.length;
       xs.push(has ? x : []); ys.push(has ? seriesY(sig, t) : []);
-      names.push(has ? sig.traces[t].name : ""); vis.push(has);
+      names.push(has ? sig.traces[t].name : "");
+      /* The colour travels with the quantity, not with the slot, so the same
+         signal is the same colour in every panel it appears in. */
+      cols.push(has ? sig.traces[t].color : "#888888");
+      vis.push(has);
     }
-    Plotly.restyle(div, {x: xs, y: ys, name: names, visible: vis},
-                   [0, 1, 2].slice(0, MAXTR));
+    Plotly.restyle(div, {x: xs, y: ys, name: names, visible: vis,
+                         "line.color": cols}, [0, 1, 2].slice(0, MAXTR));
     const u = {"yaxis.title.text": sig.unit, "xaxis.title.text": xLabel()};
     if (win[0] > 0 || win[1] < N - 1){ u["xaxis.range"] = [x[win[0]], x[win[1]]]; }
     Plotly.relayout(div, u);
+  } else {
+    Plotly.restyle(div, {name: [sig.side]}, [0]);
+    Plotly.relayout(div, sig.kind === "ws"
+      ? {"scene.xaxis.title.text": sig.ax[0] + " (deg)",
+         "scene.yaxis.title.text": sig.ax[1] + " (deg)",
+         "scene.zaxis.title.text": "psi (deg)"}
+      : {"xaxis.title.text": sig.ax[0] + " (deg)",
+         "yaxis.title.text": sig.ax[1] + " (deg)"});
+    wsSlice(r);
   }
   refreshLines();   // a swap rebuilds the panel, so the mapping is new
 }
@@ -890,9 +1077,9 @@ function setWindow(i0, i1, from){
   for (let r = 0; r < NROWS; r++){
     if (r === from) continue;
     if (rowKind[r] === "2d") Plotly.relayout(rowDiv(r), {"xaxis.range": [x[i0], x[i1]]});
-    else if (rowKind[r] === "ws") wsSlice(r);
+    else if (rowKind[r]) wsSlice(r);
   }
-  if (from !== undefined && rowKind[from] === "ws") wsSlice(from);
+  if (from !== undefined && rowKind[from] && rowKind[from] !== "2d") wsSlice(from);
   zooming = false;
   refreshLines();
 }
@@ -909,7 +1096,8 @@ function attachRow(r){
   /* Which frame a point on this row corresponds to. On an angle-space row the
      point index IS the frame index, offset by whatever window a zoom left
      visible; on a time series it comes from the x value. */
-  const frameOf = pt => rowKind[r] === "ws" ? pt.pointNumber + win[0] : xToIndex(pt.x);
+  const frameOf = pt => rowKind[r] === "2d" ? xToIndex(pt.x)
+                                            : win[0] + pt.pointNumber * rowStride[r];
   /* Clicking seeks. Hovering does NOT -- it only marks the instant on the
      other panels, so running the pointer across a graph cannot drag the fly
      around with it. */
@@ -920,22 +1108,64 @@ function attachRow(r){
 }
 
 /* ---- playback ---------------------------------------------------------- */
+/* Speed is a RATE -- movie frames per second of wall clock -- and the advance
+   comes from the time actually elapsed since the last painted frame. So the
+   same setting plays at the same speed on a 60 Hz and on a 144 Hz screen, a
+   slow update costs smoothness instead of speed, and every frame is shown for
+   as long as the requested rate stays under the display's refresh rate. Above
+   that the browser cannot paint them all: nothing can show 16000 frames a
+   second, and the readout says how many are being skipped rather than
+   pretending otherwise. */
 function showRate(){
-  /* What the chosen step actually means, since "slow motion" says nothing
-     without a number: 60 ticks a second at the acquisition rate. */
   const el = document.getElementById("rate");
-  el.textContent = P.frame_rate
-    ? "= " + (step * 60 / P.frame_rate * 1000).toFixed(1) + " ms of flight per second (1/"
-      + Math.round(P.frame_rate / (step * 60)) + " speed)"
-    : "";
+  const parts = [];
+  if (P.frame_rate){
+    parts.push("1/" + Math.round(P.frame_rate / playRate) + " speed");
+  }
+  const drop = playRate / refreshHz;
+  parts.push(drop <= 1.02
+    ? "every frame shown"
+    : "1 frame in " + drop.toFixed(1) + " shown (" + Math.round(refreshHz) + " Hz display)");
+  if (P.wingbeat_hz && P.frame_rate){
+    const perBeat = P.frame_rate / P.wingbeat_hz / Math.max(1, drop);
+    parts.push(perBeat.toFixed(0) + " per wingbeat" + (perBeat < 6 ? " -- aliased" : ""));
+  }
+  el.textContent = parts.join("   ");
 }
-function tick(){
+/* The display's own rate: how fast this can play without skipping is a
+   property of the screen, not of the movie. Median of a short sample, so one
+   slow first paint cannot skew it; 60 Hz stands if the sample is implausible. */
+function measureRefresh(){
+  const t = [];
+  const sample = ts => {
+    t.push(ts);
+    if (t.length < 12){ requestAnimationFrame(sample); return; }
+    const d = [];
+    for (let i = 1; i < t.length; i++) d.push(t[i] - t[i - 1]);
+    d.sort((a, b) => a - b);
+    const med = d[Math.floor(d.length / 2)];
+    if (med > 1 && med < 100) refreshHz = 1000 / med;
+    showRate();
+  };
+  requestAnimationFrame(sample);
+}
+let lastT = null, acc = 0;
+function tick(ts){
   if (!playing) return;
   /* Schedule the next frame BEFORE doing any work. If an update ever throws --
      a plotly call on a panel mid-swap, say -- playback drops that one frame
      instead of dying silently after the first. */
   requestAnimationFrame(tick);
-  const n = frame + step;
+  if (lastT === null){ lastT = ts; return; }
+  /* A backgrounded tab hands back one enormous delta on return. Clamping it
+     costs a skipped moment rather than a jump to the end of the movie. */
+  const dt = Math.min(ts - lastT, 200);
+  lastT = ts;
+  acc += dt / 1000 * playRate;
+  const adv = Math.floor(acc);
+  if (adv < 1) return;        // slower than the refresh: hold this frame
+  acc -= adv;
+  const n = frame + adv;
   if (n >= N - 1){ setFrame(N - 1); pause(); return; }
   setFrame(n);
 }
@@ -943,12 +1173,33 @@ function play(){
   if (playing) return;                  // never let two loops run at once
   if (frame >= N - 1) setFrame(0);
   playing = true;
+  lastT = null; acc = 0;
   document.getElementById("play").textContent = "Pause";
   requestAnimationFrame(tick);
 }
-function pause(){ playing = false; document.getElementById("play").textContent = "Play"; }
+function pause(){
+  playing = false; lastT = null; acc = 0;
+  document.getElementById("play").textContent = "Play";
+}
 
 /* ---- wiring ------------------------------------------------------------ */
+/* Size a plot to the box it actually sits in. plotly measures its container
+   once, when the plot is created; anything that changes the page afterwards
+   leaves the plot at its old size, drawn over whatever is now beneath it --
+   which is how the panels came to cover the control bar. Cheap to re-assert,
+   and a no-op when the two already agree. */
+function fitPlot(id){
+  const el = document.getElementById(id);
+  if (!el || !el._fullLayout) return;
+  const w = el.clientWidth, h = el.clientHeight;
+  if (w > 10 && h > 10 && (Math.abs(el._fullLayout.width - w) > 1 ||
+                           Math.abs(el._fullLayout.height - h) > 1))
+    Plotly.relayout(id, {width: w, height: h});
+}
+function fitPlots(){
+  fitPlot(SCENE);
+  for (let r = 0; r < NROWS; r++) fitPlot(rowDiv(r));
+}
 function buildPickers(){
   const groups = [];
   P.signals.forEach(s => { if (!groups.includes(s.group)) groups.push(s.group); });
@@ -968,21 +1219,50 @@ function buildPickers(){
     sel.addEventListener("change", e => setRow(r, e.target.value));
   }
 }
+/* The speed menu, labelled in the unit that means something at 16 kHz: ms of
+   flight per second of wall clock. */
+function buildSpeeds(){
+  const sel = document.getElementById("speed");
+  for (const v of P.speeds){
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = P.frame_rate
+      ? (v / P.frame_rate * 1000).toFixed(2) + " ms/s"
+      : v + " frames/s";
+    if (v === playRate) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.onchange = e => { playRate = +e.target.value; showRate(); };
+}
+/* A change of unit or of origin moves every x-axis on the page, including the
+   colour bar of an angle-space panel, which is drawn on that same axis. */
+function redrawAxes(){
+  for (let r = 0; r < NROWS; r++){
+    if (rowKind[r] === "2d"){ setRow(r, rowLabel[r]); pertShapes(r); }
+    else if (rowKind[r]) wsSlice(r);
+  }
+  setFrame(frame);
+}
 function boot(){
-  Plotly.newPlot(SCENE, P.scene.data, P.scene.layout, {responsive: true, displaylogo: false});
+  /* Every control is built and filled BEFORE the first plot is drawn. The bar
+     wraps onto a second line once the speed menu has its options and the
+     readout its two lines, and that wrap takes ~45px off the height of the
+     panels; a plot created before it is sized for a page that no longer
+     exists, and draws over the controls. Fill first, measure once. */
   buildPickers();
-  for (let r = 0; r < NROWS; r++) setRow(r, rowLabel[r]);
-
+  buildSpeeds();
+  document.getElementById("note").textContent = P.note;
   const fader = document.getElementById("fader");
   fader.max = N - 1;
   fader.addEventListener("input", e => { pause(); setFrame(+e.target.value, false); });
+  readout(0);
+  showRate();
 
   document.getElementById("play").onclick  = () => playing ? pause() : play();
   document.getElementById("prev").onclick  = () => { pause(); setFrame(frame - 1); };
   document.getElementById("next").onclick  = () => { pause(); setFrame(frame + 1); };
   document.getElementById("first").onclick = () => { pause(); setFrame(0); };
   document.getElementById("last").onclick  = () => { pause(); setFrame(N - 1); };
-  document.getElementById("speed").onchange = e => { step = +e.target.value; showRate(); };
   document.getElementById("view").onchange = e => {
     follow = e.target.value === "follow";
     /* The aspect ratio has to travel with the ranges to keep the axes equal:
@@ -998,15 +1278,14 @@ function boot(){
                                z: P.labAspect[2]}});
     sceneUpdate(frame);
   };
-  document.getElementById("units").onchange = e => {
-    units = e.target.value;
-    for (let r = 0; r < NROWS; r++){
-      if (rowKind[r] !== "2d") continue;
-      setRow(r, rowLabel[r]);
-      pertShapes(r);
-    }
-    setFrame(frame);
-  };
+  document.getElementById("units").onchange = e => { units = e.target.value; redrawAxes(); };
+  const org = document.getElementById("origin");
+  if (P.origin_switch){
+    org.value = originMode;
+    org.onchange = e => { originMode = e.target.value; redrawAxes(); };
+  } else {
+    document.getElementById("origingrp").style.display = "none";
+  }
   document.addEventListener("keydown", e => {
     if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
     if (e.key === " "){ e.preventDefault(); playing ? pause() : play(); }
@@ -1017,21 +1296,37 @@ function boot(){
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(refreshLines, 120);   // after plotly's own reflow
+    // after plotly's own reflow; the panels are re-fitted before the overlays,
+    // which are placed from the axis-to-pixel mapping the fit decides.
+    resizeTimer = setTimeout(() => { fitPlots(); refreshLines(); }, 120);
   });
 
-  document.getElementById("note").textContent = P.note;
-  showRate();
+  // The page is now its final shape, so every plot can be measured for the box
+  // it will actually keep.
+  Plotly.newPlot(SCENE, P.scene.data, P.scene.layout,
+                 {responsive: true, displaylogo: false});
+  for (let r = 0; r < NROWS; r++) setRow(r, rowLabel[r]);
+
+  measureRefresh();
   setFrame(0);
   // Axis offsets are only final once plotly has laid the panels out.
-  setTimeout(refreshLines, 0);
+  setTimeout(() => { fitPlots(); refreshLines(); }, 0);
 }
 boot();
 </script></body></html>
 """
 
 
-def render(h5_path, out_path, step, trail, cdn):
+def row_divs(rows):
+    """The graph column's markup, one block per row."""
+    return "\n".join(
+        f'      <div class="row"><div class="rowhead"><select id="pick{r}"></select>'
+        f'</div><div class="rowplot" id="row{r}"></div>'
+        f'<div class="cursor" id="cur{r}"></div>'
+        f'<div class="hline" id="hov{r}"></div></div>' for r in range(rows))
+
+
+def render(h5_path, out_path, step, trail, cdn, rows):
     with h5py.File(h5_path, "r") as h5:
         raw, geom, n, scales = build_geometry(h5, step)
         frames_all, rate, trigger_relative = frame_axis(h5, len(load(h5, "points_3D")))
@@ -1040,8 +1335,37 @@ def render(h5_path, out_path, step, trail, cdn):
         if not signals:
             raise ValueError("no plottable signals in this h5")
         pert = build_perturbation(h5, frames)
-        _, lbl_frames, _ = x_axis(frames, rate, "frames", trigger_relative)
-        lbl_ms = x_axis(frames, rate, "ms", trigger_relative)[1] if rate else lbl_frames
+        beat = wingbeat_hz(h5, rate)
+        # Every axis label the control layer can switch to, built here so the
+        # page never has to compose one: which instant is zero, and in which
+        # unit. The frame NUMBERS stay trigger-relative throughout -- only the
+        # drawing moves -- so the readout keeps agreeing with the mp4 counter.
+        def labels_for(mode):
+            zero, zero_name = axis_origin(
+                {"onset": pert["onset"]} if pert else None, mode, trigger_relative)
+            in_frames = x_axis(frames, rate, "frames", trigger_relative,
+                               zero, zero_name)[1]
+            # A file with no frame rate has no clock, so the ms menu entry is
+            # given the frame label rather than a time nothing can compute.
+            in_ms = (x_axis(frames, rate, "ms", trigger_relative, zero, zero_name)[1]
+                     if rate else in_frames)
+            return {"frames": in_frames, "ms": in_ms}
+
+        # The onset can only be an origin on a movie whose frames are numbered
+        # against the trigger in the first place; without that the offer would
+        # shift the axis by an onset the numbering knows nothing about.
+        origin_switch = bool(pert and trigger_relative)
+        x_labels = {"trigger": labels_for("trigger")}
+        x_labels["pert"] = labels_for("perturbation") if origin_switch else x_labels["trigger"]
+        default_origin = "pert" if origin_switch else "trigger"
+        lbl_default = x_labels[default_origin]["frames"]
+        # The same axis, named short enough to survive being rotated into the
+        # height of an angle-space panel's colour bar.
+        plain = ({"frames": "frame", "ms": "ms"} if trigger_relative
+                 else {"frames": "box index", "ms": "box index"})
+        x_short = {"trigger": plain,
+                   "pert": {"frames": "frame from onset", "ms": "ms from onset"}
+                           if origin_switch else plain}
         time_ms = (frames / rate * 1000).tolist() if rate else None
 
         stem = os.path.splitext(os.path.basename(h5_path))[0]
@@ -1054,11 +1378,12 @@ def render(h5_path, out_path, step, trail, cdn):
         ] if x)
 
         scene_fig, lab_range, lab_aspect = build_scene_figure(raw, scales)
-        # One empty template per row kind; the control layer newPlots a row
-        # from whichever the chosen menu entry calls for.
-        row_tpl = build_row_template(lbl_frames, pert)
-        ws_tpl = {side: build_ws_template(side, lbl_frames)
-                  for side in ("left", "right")}
+        # One empty template per row KIND -- not per entry: which wing, which
+        # angles and which axis titles are all restyled in, so switching
+        # between two entries of the same kind never rebuilds the panel.
+        row_tpl = build_row_template(lbl_default, pert)
+        ws_tpl = build_ws_template(x_short[default_origin]["frames"])
+        ws2_tpl = build_ws2_template(x_short[default_origin]["frames"])
         angles = {side: read_wing_angles(h5, side, n, step)
                   for side in ("left", "right")}
 
@@ -1076,14 +1401,18 @@ def render(h5_path, out_path, step, trail, cdn):
         "frame_rate": rate,
         "geom": geom, "scales": scales, "labRange": lab_range,
         "labAspect": lab_aspect,
-        "signals": signals, "defaults": DEFAULT_ROWS,
+        "signals": signals, "defaults": DEFAULT_ROWS[:rows],
         "pert": pert, "note": note,
-        "x_label_frames": lbl_frames, "x_label_ms": lbl_ms,
+        "x_labels": x_labels, "x_short": x_short, "origin_switch": origin_switch,
+        "trigger_relative": bool(trigger_relative),
+        "wsMax": WS_MAX_POINTS, "speeds": SPEEDS, "speed_default": DEFAULT_SPEED,
+        "wingbeat_hz": beat,
         "ws": {side: {k: pack(v) for k, v in angles[side].items()}
                for side in angles},
         "scene": json.loads(scene_fig.to_json()),
         "rowTemplate": json.loads(row_tpl.to_json()),
-        "wsTemplate": {side: json.loads(ws_tpl[side].to_json()) for side in ws_tpl},
+        "wsTemplate": json.loads(ws_tpl.to_json()),
+        "ws2Template": json.loads(ws2_tpl.to_json()),
     }
 
     if cdn:
@@ -1097,7 +1426,8 @@ def render(h5_path, out_path, step, trail, cdn):
             .replace("@@HEADER@@", header)
             .replace("@@CONNECTIONS@@", json.dumps(CONNECTIONS))
             .replace("@@VISIBLE@@", json.dumps(VISIBLE_JOINTS))
-            .replace("@@NROWS@@", str(N_ROWS))
+            .replace("@@NROWS@@", str(rows))
+            .replace("@@ROWS@@", row_divs(rows))
             .replace("@@MAXTR@@", str(MAX_TRACES_PER_ROW))
             .replace("@@PLOTLY@@", script)
             # Last, and with the payload as the replacement value rather than
@@ -1117,7 +1447,8 @@ def plotlyjs_version():
     return m.group(1) if m else "3.1.1"
 
 
-def make_viewer(h5_path, out=None, step=1, trail=400, cdn=False):
+def make_viewer(h5_path, out=None, step=1, trail=400, cdn=False,
+                rows=DEFAULT_ROW_COUNT):
     """Write the viewer for one analysis h5. Returns the path, or None on failure.
 
     Named from the h5 stem rather than a constant, because collect_analysis_h5
@@ -1126,7 +1457,7 @@ def make_viewer(h5_path, out=None, step=1, trail=400, cdn=False):
     out = out or os.path.join(os.path.dirname(os.path.abspath(h5_path)),
                               os.path.splitext(os.path.basename(h5_path))[0] + OUT_SUFFIX)
     try:
-        render(h5_path, out, step, trail, cdn)
+        render(h5_path, out, step, trail, cdn, rows)
     except Exception as e:
         print(f"flight viewer failed for {h5_path}: {e}", file=sys.stderr)
         return None
@@ -1152,6 +1483,12 @@ def main():
     ap.add_argument("--trail", type=int, default=400, metavar="N",
                     help="length of the highlighted recent flight path, in "
                          "frames (default: 400)")
+    ap.add_argument("--rows", type=int, default=DEFAULT_ROW_COUNT, metavar="N",
+                    help=f"graph panels down the left-hand side (default: "
+                         f"{DEFAULT_ROW_COUNT}). Each is its own plotly figure, "
+                         f"so a row costs layout work and, for an angle-space "
+                         f"panel, a WebGL context; raise it on a big screen, "
+                         f"lower it if the 3D panels feel sluggish")
     ap.add_argument("--cdn", action="store_true",
                     help="load plotly.js from the CDN instead of inlining it: "
                          "~4.8 MB smaller per file, but needs a network "
@@ -1160,10 +1497,12 @@ def main():
 
     if args.every < 1:
         sys.exit("--every must be at least 1")
+    if not 1 <= args.rows <= len(DEFAULT_ROWS):
+        sys.exit(f"--rows must be between 1 and {len(DEFAULT_ROWS)}")
 
     if os.path.isfile(args.target):
         sys.exit(0 if make_viewer(args.target, args.out, args.every, args.trail,
-                                  args.cdn) else 1)
+                                  args.cdn, args.rows) else 1)
 
     if not os.path.isdir(args.target):
         sys.exit(f"Not a file or directory: {args.target}")
@@ -1174,7 +1513,7 @@ def main():
                  f"expected exactly one for single mode.")
     if len(direct) == 1:
         sys.exit(0 if make_viewer(direct[0], args.out, args.every, args.trail,
-                                  args.cdn) else 1)
+                                  args.cdn, args.rows) else 1)
 
     subdirs = sorted(d for d in (os.path.join(args.target, name)
                                  for name in os.listdir(args.target)) if os.path.isdir(d))
@@ -1188,7 +1527,8 @@ def main():
                   file=sys.stderr)
             n_skip += 1
             continue
-        if make_viewer(matches[0], None, args.every, args.trail, args.cdn):
+        if make_viewer(matches[0], None, args.every, args.trail, args.cdn,
+                       args.rows):
             n_ok += 1
         else:
             n_skip += 1
