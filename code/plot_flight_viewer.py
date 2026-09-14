@@ -22,10 +22,10 @@ The page has two sections side by side, and one control bar along the bottom:
           which instant the axis calls zero
 
 The x-axis is the trigger-relative numbering the mp4 counter, the analysis CSV
-and wing_angles.png all share. On a movie that declares a perturbation it is
-zeroed on the ONSET instead, which only shifts the drawing -- the readout keeps
-naming the trigger-relative frame, and the trigger stays marked on every
-panel.
+and wing_angles.png all share: frame 0 is the camera trigger, and the pulse and
+the light-off are marked where they fall. On a perturbation movie the "from"
+menu can redraw the axis from the pulse onset instead, which only shifts the
+drawing -- the readout keeps naming the trigger-relative frame.
 
 Everything stays tied to one instant: the fader marks it in every panel, and
 zooming one time series zooms the others and narrows the stretch of the
@@ -58,6 +58,7 @@ import sys
 
 import h5py
 import numpy as np
+import html as _html
 import plotly.graph_objects as go
 from plotly.offline import get_plotlyjs
 
@@ -66,7 +67,10 @@ from plotly.offline import get_plotlyjs
 # lets an older h5 lose a dataset without taking the whole viewer down.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from plot_wing_and_body import (load, frame_axis, x_axis, axis_origin,  # noqa: E402
-                                perturbation_info, ROLE_COLORS)
+                                perturbation_info, pert_window_text,
+                                is_perturbed, ROLE_COLORS,
+                                lighting_text, lighting_segments, LIGHT_COLORS,
+                                LIGHT_WORDS, LIGHT_TEXT_COLORS, LIGHT_REGIME_KIND)
 
 SUFFIX = "_analysis_smoothed.h5"
 # Also matches collect_analysis_h5.py's <stem>__<parent>.h5 renaming.
@@ -101,7 +105,7 @@ STROKE_PLANE_SIZE = 0.005
 # it is drawn first in "body rates p, q, r" or last in "yaw / pitch / roll", and
 # the x of a position is the x of a velocity.
 #
-# Three things this table has to get right, all of them traps in the h5:
+# Four things this table has to get right, all of them traps in the h5:
 #   * wing_tips_speed stores RIGHT in column 0 and LEFT in column 1 -- the
 #     reverse of every other left/right pair in the file (get_wing_tips_speed
 #     concatenates right first). Hence the column numbers below.
@@ -110,6 +114,8 @@ STROKE_PLANE_SIZE = 0.005
 #   * anything whose length differs from num_frames is dropped at build time
 #     (see build_signals) -- roll_angle_roni is stored unpadded and would
 #     silently misalign the shared x-axis.
+#   * pitch_angle and pitch_dot changed sign to nose-down positive, matching q.
+#     An older h5 still holds them nose-up; load() flips those on read.
 SIGNALS = [
     ("Wing angles", "phi (stroke)",
      [("wings_phi_left", None, "left", "left"),
@@ -134,16 +140,16 @@ SIGNALS = [
       ("right_deformation_angle", None, "right", "right")], "deg", 1.0),
 
     ("Body attitude", "yaw / pitch / roll",
-     [("yaw_angle", None, "yaw", "z"), ("pitch_angle", None, "pitch", "y"),
+     [("yaw_angle", None, "yaw", "z"), ("pitch_angle", None, "pitch (+ nose down)", "y"),
       ("roll_angle", None, "roll", "x")], "deg", 1.0),
     ("Body attitude", "yaw / pitch / roll rate",
-     [("yaw_dot", None, "yaw rate", "z"), ("pitch_dot", None, "pitch rate", "y"),
+     [("yaw_dot", None, "yaw rate", "z"), ("pitch_dot", None, "pitch rate (+ nose down)", "y"),
       ("roll_dot", None, "roll rate", "x")], "deg/s", 1.0),
     ("Body attitude", "body rates p, q, r",
-     [("p", None, "p (roll)", "x"), ("q", None, "q (pitch)", "y"),
+     [("p", None, "p (roll)", "x"), ("q", None, "q (pitch, + nose down)", "y"),
       ("r", None, "r (yaw)", "z")], "deg/s", 1.0),
     ("Body attitude", "omega_body",
-     [("omega_body", 0, "about x_body", "x"), ("omega_body", 1, "about y_body", "y"),
+     [("omega_body", 0, "about x_body", "x"), ("omega_body", 1, "about y_body (+ nose down)", "y"),
       ("omega_body", 2, "about z_body", "z")], "deg/s", 1.0),
     ("Body attitude", "omega_lab",
      [("omega_lab", 0, "x", "x"), ("omega_lab", 1, "y", "y"),
@@ -152,7 +158,7 @@ SIGNALS = [
      [("angular_speed_body", None, "|omega_body|", "mag")], "deg/s", 1.0),
     ("Body attitude", "angular acceleration (components)",
      [("omega_body_dot", 0, "about x_body (roll)", "x"),
-      ("omega_body_dot", 1, "about y_body (pitch)", "y"),
+      ("omega_body_dot", 1, "about y_body (pitch, + nose down)", "y"),
       ("omega_body_dot", 2, "about z_body (yaw)", "z")], "10^3 deg/s^2", 1e-3),
     ("Body attitude", "angular acceleration (magnitude)",
      [("angular_acceleration_body", None, "|omega_body_dot|", "mag")],
@@ -381,6 +387,25 @@ def wingbeat_hz(h5, rate):
     return round(float(freq[band][np.argmax(spec[band])]), 1)
 
 
+def build_lighting(pert, lo, hi, rate=None):
+    """The declared lighting in the terms the page draws, or None when nothing is
+    declared: labelled strip segments (the same ones the PNGs draw), the
+    light-off / relight frames, and the long and short texts."""
+    if pert is None:
+        return None
+    off = pert.get("light_off_frame")
+    regime = pert.get("lighting_regime") or "unknown"
+    return {
+        "regime": regime,
+        "declared": bool(pert.get("lighting_declared")),
+        "off": off, "on": pert.get("light_on_frame"),
+        "off_visible": (regime == "darkening" and off is not None and lo <= off <= hi),
+        "segments": [[a, b, k] for a, b, k in lighting_segments(pert, lo, hi)][:3],
+        "label": lighting_text(pert, rate),
+        "short": lighting_text(pert, rate, short=True),
+    }
+
+
 def build_perturbation(h5, frames):
     """The declared perturbation window, in the same terms the mp4 counter uses.
 
@@ -395,16 +420,40 @@ def build_perturbation(h5, frames):
     if pert is None:
         return None
     lo, hi = float(frames[0]), float(frames[-1])
-    onset, end, end_known = pert["onset"], pert["end"], pert["end_known"]
+    onset = pert.get("onset_frame")
+    end = pert.get("end_frame")
+    rate = load(h5, "frame_rate")
+    rate = float(rate) if rate is not None else None
+    label = pert_window_text(pert, rate)
+    lighting = build_lighting(pert, lo, hi, rate)
+    # A control or status-unknown movie is still DECLARED -- the header must say
+    # so -- but it has no window, so nothing is shaded and the origin switch is
+    # withheld (there is no onset to zero on).
+    if not is_perturbed(pert) or onset is None:
+        return {
+            "onset": None, "end": None, "end_known": False,
+            "status": pert.get("status", "unknown"),
+            "type": pert.get("type", "unknown"),
+            "duration_source": pert.get("duration_source", "n/a"),
+            "label": label, "band": None, "onset_visible": False,
+            "perturbed": False, "lighting": lighting,
+        }
+    band_hi = min(float(end) if end is not None else hi, hi)
     return {
         "onset": onset,
         "end": end,
-        "end_known": end_known,
-        "label": pert["label"],
+        # The JS compares frame numbers against `end`, so this must mean "the
+        # end is locatable in frames", not merely "a duration is known".
+        "end_known": end is not None,
+        "status": pert.get("status", "perturbed"),
+        "type": pert.get("type", "unknown"),
+        "duration_source": pert.get("duration_source", "n/a"),
+        "label": label,
         # Band drawn on the axis, clipped; None when it misses the range entirely.
-        "band": [max(onset, lo), min(float(end) if end is not None else hi, hi)]
-                if min(float(end) if end is not None else hi, hi) > max(onset, lo) else None,
+        "band": [max(onset, lo), band_hi] if band_hi > max(onset, lo) else None,
         "onset_visible": lo <= onset <= hi,
+        "perturbed": True,
+        "lighting": lighting,
     }
 
 
@@ -549,6 +598,40 @@ def build_scene_figure(raw, scales):
     )
     return fig, [lo.tolist(), hi.tolist()], aspect
 
+def lighting_shapes(pert):
+    """Shapes 3-7 of a time-series row: the lighting strip (up to three labelled
+    segments -- lit / dark / lit again), the grey wash over a darkening's dark
+    part, and its light-off line. Always five entries, merely invisible when
+    unused, so the shape indices the control layer relies on never shift."""
+    light = (pert or {}).get("lighting") or {}
+    segs = list(light.get("segments") or [])[:3]
+    shapes = []
+    for k in range(3):
+        s = segs[k] if k < len(segs) else None
+        kind = s[2] if s else "unknown"
+        shapes.append(dict(
+            type="rect", xref="x", yref="y domain",
+            x0=(s[0] if s else 0), x1=(s[1] if s else 0), y0=0.95, y1=1.0,
+            fillcolor=LIGHT_COLORS[kind], opacity=0.9, line_width=0,
+            layer="above", visible=bool(s),
+            label=dict(text=(LIGHT_WORDS[kind] if s else ""),
+                       font=dict(size=9, color=LIGHT_TEXT_COLORS[kind]),
+                       textposition="middle center")))
+    dark = (next((s for s in segs if s[2] == "dark"), None)
+            if light.get("regime") == "darkening" else None)
+    shapes.append(dict(type="rect", xref="x", yref="y domain",
+                       x0=(dark[0] if dark else 0), x1=(dark[1] if dark else 0),
+                       y0=0, y1=0.95, fillcolor="rgba(40,40,40,0.07)",
+                       line_width=0, layer="below", visible=bool(dark)))
+    off = light.get("off")
+    shapes.append(dict(type="line", xref="x", yref="y domain",
+                       x0=(off if off is not None else 0),
+                       x1=(off if off is not None else 0), y0=0, y1=1,
+                       line=dict(color="rgba(0,0,0,0.85)", width=1.3, dash="dashdot"),
+                       layer="above", visible=bool(light.get("off_visible"))))
+    return shapes
+
+
 def build_row_template(x_label, pert):
     """One graph row, empty. All three rows are newPlot'd from this same spec.
 
@@ -559,7 +642,8 @@ def build_row_template(x_label, pert):
     is a dozen lines and buys the ability to mix the two kinds.
 
     Shape indices are a contract with the control layer: 0 is the perturbation
-    band, 1 its onset line and 2 the trigger. All three are always present,
+    band, 1 its onset line and 2 the trigger; 3-5 are the lighting strip, 6 the
+    grey wash over a darkening's dark part and 7 its light-off line. All three are always present,
     merely invisible when they have nothing to mark, so the indices never
     shift.
     """
@@ -579,7 +663,8 @@ def build_row_template(x_label, pert):
                  fillcolor="rgba(214,39,40,0.08)", line_width=0, layer="below",
                  visible=bool(pert and pert["band"])),
             dict(type="line", xref="x", yref="y domain",
-                 x0=(pert["onset"] if pert else 0), x1=(pert["onset"] if pert else 0),
+                 x0=(pert["onset"] if (pert and pert.get("onset") is not None) else 0),
+                 x1=(pert["onset"] if (pert and pert.get("onset") is not None) else 0),
                  y0=0, y1=1, line=dict(color="rgba(214,39,40,0.6)", width=1),
                  layer="below", visible=bool(pert and pert["onset_visible"])),
             # The trigger, wherever it falls on the axis in force: at zero
@@ -587,6 +672,7 @@ def build_row_template(x_label, pert):
             dict(type="line", xref="x", yref="y domain", x0=0, x1=0, y0=0, y1=1,
                  line=dict(color="rgba(80,80,80,0.55)", width=1, dash="dash"),
                  layer="below", visible=False),
+            *lighting_shapes(pert),
         ],
         xaxis=dict(title=x_label), yaxis=dict(title=""),
         hovermode="x", dragmode="zoom",
@@ -752,7 +838,7 @@ HTML = r"""<!doctype html>
                          <option value="ms">ms</option></select>
     </div>
     <div class="grp" id="origingrp"><label for="origin">from</label>
-      <select id="origin"><option value="pert" selected>perturbation onset</option>
+      <select id="origin"><option value="pert">perturbation onset</option>
                           <option value="trigger">trigger</option></select>
     </div>
     <input id="fader" type="range" min="0" value="0" step="1">
@@ -791,7 +877,7 @@ let frame = 0, playing = false, follow = false, units = "frames";
    onset, because that is the instant such an experiment is about; the frame
    NUMBERS never move, so the readout keeps naming the trigger-relative frame
    the mp4 counter shows. */
-let originMode = P.origin_switch ? "pert" : "trigger";
+let originMode = "trigger";
 /* Playback speed as a rate -- movie frames per second of wall clock -- rather
    than a stride per animation tick. See tick(). */
 let playRate = P.speed_default, refreshHz = 60;
@@ -821,7 +907,11 @@ function seriesY(sig, t){
 /* The axis is (trigger-relative frame - origin) in the chosen unit. One
    converter for the traces and for anything drawn at a given frame, so a
    landmark cannot land where the data does not. */
-function originFrame(){ return (originMode === "pert" && P.pert) ? P.pert.onset : 0; }
+function originFrame(){
+  if (originMode === "pert" && P.pert) return P.pert.onset;
+  if (originMode === "light" && P.pert && P.pert.lighting) return P.pert.lighting.off;
+  return 0;
+}
 function xScale(){ return (units === "ms" && P.frame_rate) ? 1000 / P.frame_rate : 1; }
 function toX(f){ return (f - originFrame()) * xScale(); }
 const xCache = new Map();
@@ -891,11 +981,34 @@ function sceneUpdate(i){
 function pertLine(f){
   const p = P.pert;
   if (!p) return "";
+  if (!p.perturbed) return p.status === "control"
+      ? "CONTROL (no perturbation)" : "PERTURBATION STATUS UNKNOWN";
   const rate = P.frame_rate, ms = d => rate ? (d / rate * 1000).toFixed(2) : String(d);
+  const tail = p.duration_source === "assumed" ? "  (end assumed)" : "";
   if (f < p.onset) return "PRE  -" + ms(p.onset - f) + " ms";
   if (!p.end_known) return "PERT +" + ms(f - p.onset) + " ms  (end unrecorded)";
-  if (f <= p.end)   return "PERT +" + ms(f - p.onset) + " ms";
+  /* DURING is the half-open interval [onset, end): the frame AT p.end is
+     already after. Matches utils.perturbation_frame_labels and the mp4. */
+  if (f < p.end)    return "PERT +" + ms(f - p.onset) + " ms" + tail;
   return "POST +" + ms(f - p.end) + " ms";
+}
+/* The lighting line: whether this frame was lit or dark and, for a darkening,
+   how far it is from the light-off. Mirrors Visualizer._lighting_label. */
+function lightLine(f){
+  const L = P.pert && P.pert.lighting;
+  if (!L) return {text: "", dark: false};
+  if (L.regime === "constant_dark") return {text: "LIGHT: CONSTANT DARKNESS", dark: true};
+  if (L.regime === "constant_light") return {text: "LIGHT: CONSTANT LIGHT", dark: false};
+  if (L.regime !== "darkening" || L.off === null || L.off === undefined || !P.trigger_relative)
+    return {text: L.declared ? "LIGHT: UNKNOWN" : "LIGHT: NOT DECLARED", dark: false};
+  const rate = P.frame_rate;
+  const ms = d => rate ? (d >= 0 ? "+" : "-") + (Math.abs(d) / rate * 1000).toFixed(2) + " ms"
+                       : (d >= 0 ? "+" : "") + d + " fr";
+  if (f < L.off) return {text: "LIGHT ON " + ms(f - L.off) + " to light-off", dark: false};
+  if (L.on === null || L.on === undefined)
+    return {text: "LIGHT ? " + ms(f - L.off) + " since light-off (relight unknown)", dark: false};
+  if (f >= L.on) return {text: "LIGHT ON (relit) " + ms(f - L.on), dark: false};
+  return {text: "DARK " + ms(f - L.off) + " since light-off", dark: true};
 }
 function readout(i){
   const f = P.frames[i];
@@ -906,7 +1019,13 @@ function readout(i){
   if (P.time_ms) s += "   " + (P.time_ms[i] >= 0 ? "+" : "") + P.time_ms[i].toFixed(2) + " ms";
   const p = pertLine(f);
   if (p) s += "\n" + p;
-  document.getElementById("read").textContent = s;
+  const l = lightLine(f);
+  if (l.text) s += "\n" + l.text;
+  const el = document.getElementById("read");
+  el.textContent = s;
+  /* The readout itself goes dark on a dark frame, as the mp4 counter does. */
+  el.style.background = l.dark ? "#262626" : "";
+  el.style.color = l.dark ? "#ffffff" : "";
 }
 
 /* ---- rows: either a time series or an angle-space scene ---------------- */
@@ -998,6 +1117,16 @@ function pertShapes(r){
   if (p){
     if (p.band){ u["shapes[0].x0"] = toX(p.band[0]); u["shapes[0].x1"] = toX(p.band[1]); }
     if (p.onset_visible){ u["shapes[1].x0"] = toX(p.onset); u["shapes[1].x1"] = toX(p.onset); }
+  }
+  const L = p && p.lighting;
+  if (L){
+    (L.segments || []).slice(0, 3).forEach((s, k) => {
+      u["shapes[" + (3 + k) + "].x0"] = toX(s[0]);
+      u["shapes[" + (3 + k) + "].x1"] = toX(s[1]);
+    });
+    const d = L.regime === "darkening" ? (L.segments || []).find(s => s[2] === "dark") : null;
+    if (d){ u["shapes[6].x0"] = toX(d[0]); u["shapes[6].x1"] = toX(d[1]); }
+    if (L.off_visible){ u["shapes[7].x0"] = toX(L.off); u["shapes[7].x1"] = toX(L.off); }
   }
   const x = xvals(), t = toX(0);
   const on = t >= Math.min(x[0], x[N - 1]) && t <= Math.max(x[0], x[N - 1]);
@@ -1280,6 +1409,15 @@ function boot(){
   };
   document.getElementById("units").onchange = e => { units = e.target.value; redrawAxes(); };
   const org = document.getElementById("origin");
+  /* Name the trigger for what it is ("camera trigger = light off" in a
+     darkening movie), and offer the light-off as an origin of its own only
+     when it is not simply the trigger. */
+  org.querySelector('option[value="trigger"]').textContent = P.trigger_option || "trigger";
+  if (P.light_origin){
+    const o = document.createElement("option");
+    o.value = "light"; o.textContent = "light off";
+    org.appendChild(o);
+  }
   if (P.origin_switch){
     org.value = originMode;
     org.onchange = e => { originMode = e.target.value; redrawAxes(); };
@@ -1342,7 +1480,8 @@ def render(h5_path, out_path, step, trail, cdn, rows):
         # drawing moves -- so the readout keeps agreeing with the mp4 counter.
         def labels_for(mode):
             zero, zero_name = axis_origin(
-                {"onset": pert["onset"]} if pert else None, mode, trigger_relative)
+                ({"status": "perturbed", "onset_frame": pert["onset"]}
+                 if (pert and pert.get("perturbed")) else None), mode, trigger_relative)
             in_frames = x_axis(frames, rate, "frames", trigger_relative,
                                zero, zero_name)[1]
             # A file with no frame rate has no clock, so the ms menu entry is
@@ -1354,10 +1493,34 @@ def render(h5_path, out_path, step, trail, cdn, rows):
         # The onset can only be an origin on a movie whose frames are numbered
         # against the trigger in the first place; without that the offer would
         # shift the axis by an onset the numbering knows nothing about.
-        origin_switch = bool(pert and trigger_relative)
+        origin_switch = bool(pert and pert.get("perturbed") and trigger_relative)
         x_labels = {"trigger": labels_for("trigger")}
         x_labels["pert"] = labels_for("perturbation") if origin_switch else x_labels["trigger"]
-        default_origin = "pert" if origin_switch else "trigger"
+        # Frame 0 is the camera trigger in every product, so the page opens on
+        # it; the pulse onset stays available in the "from" menu.
+        default_origin = "trigger"
+        # Name the trigger for what it is. In a darkening movie whose light goes
+        # off on the trigger, that instant IS the light-off, and the menu says so;
+        # a light-off anywhere else gets an origin entry of its own.
+        light = (pert or {}).get("lighting") or {}
+        light_off = light.get("off") if light.get("regime") == "darkening" else None
+        trigger_name = "camera trigger" + (
+            " = light off" if light_off is not None and round(light_off) == 0 else "")
+
+        def labels_zero(zero, name):
+            in_frames = x_axis(frames, rate, "frames", trigger_relative, zero, name)[1]
+            in_ms = (x_axis(frames, rate, "ms", trigger_relative, zero, name)[1]
+                     if rate else in_frames)
+            return {"frames": in_frames, "ms": in_ms}
+
+        if trigger_relative:
+            x_labels["trigger"] = labels_zero(0.0, trigger_name)
+            if not origin_switch:
+                x_labels["pert"] = x_labels["trigger"]
+        light_origin = bool(origin_switch and light_off is not None
+                            and round(light_off) != 0)
+        if light_origin:
+            x_labels["light"] = labels_zero(float(light_off), "light off")
         lbl_default = x_labels[default_origin]["frames"]
         # The same axis, named short enough to survive being rotated into the
         # height of an angle-space panel's colour bar.
@@ -1366,6 +1529,8 @@ def render(h5_path, out_path, step, trail, cdn, rows):
         x_short = {"trigger": plain,
                    "pert": {"frames": "frame from onset", "ms": "ms from onset"}
                            if origin_switch else plain}
+        if light_origin:
+            x_short["light"] = {"frames": "frame from light off", "ms": "ms from light off"}
         time_ms = (frames / rate * 1000).tolist() if rate else None
 
         stem = os.path.splitext(os.path.basename(h5_path))[0]
@@ -1376,6 +1541,15 @@ def render(h5_path, out_path, step, trail, cdn, rows):
             f"{rate:g} Hz" if rate else "",
             pert["label"] if pert else "",
         ] if x)
+        light = (pert or {}).get("lighting")
+        if light:
+            # The lighting on a line of its own, as a badge in its regime's
+            # colour, so a darkening movie cannot pass for a lit one at a glance.
+            kind = LIGHT_REGIME_KIND.get(light["regime"], "unknown")
+            header += ('<br><span style="background:%s;color:%s;padding:1px 8px;'
+                       'border-radius:3px;font-weight:600">%s</span>'
+                       % (LIGHT_COLORS[kind], LIGHT_TEXT_COLORS[kind],
+                          _html.escape(light["label"])))
 
         scene_fig, lab_range, lab_aspect = build_scene_figure(raw, scales)
         # One empty template per row KIND -- not per entry: which wing, which
@@ -1404,6 +1578,7 @@ def render(h5_path, out_path, step, trail, cdn, rows):
         "signals": signals, "defaults": DEFAULT_ROWS[:rows],
         "pert": pert, "note": note,
         "x_labels": x_labels, "x_short": x_short, "origin_switch": origin_switch,
+        "trigger_option": trigger_name, "light_origin": light_origin,
         "trigger_relative": bool(trigger_relative),
         "wsMax": WS_MAX_POINTS, "speeds": SPEEDS, "speed_default": DEFAULT_SPEED,
         "wingbeat_hz": beat,

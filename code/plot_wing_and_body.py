@@ -16,12 +16,17 @@ as the `frame` column of the analysis CSV -- so a disturbance spotted here can
 be looked up directly in the video. A second axis on top gives the same instant
 in the other unit (ms when the primary axis is frames, and vice versa).
 
-When the movie declares a perturbation, the axis is zeroed on the ONSET instead
-(--origin), since that is the instant the experiment is about. Only the drawn
-axis moves: the onset is stored trigger-relative like everything else, so this
-is a shift, and the numbering in the h5, the CSV and the mp4 counter is
-untouched. The axis label always names its own zero, and the trigger is still
-marked, so the two readings can never be confused.
+Frame 0 is the camera trigger on every figure, as in every other product --
+the pulse and the light-off are drawn as events at their own frames (e.g. the
+pulse at 960 in ex210824, 60 ms after the trigger), never as a second zero.
+`--origin perturbation` redraws the axis from the pulse onset instead; that
+only shifts the drawing, and the axis label then names its zero.
+
+The LIGHTING is drawn on every panel as a strip along the top -- amber
+"LIGHT ON", black "DARK", grey "LIGHT ?" -- and a movie whose white light is
+switched off during the recording (a darkening, itself a visual perturbation)
+also gets a dash-dot line at the light-off frame and a faint grey wash over its
+dark part. The suptitle's last line names the lighting regime in words.
 
 Usage:
     python code/plot_wing_and_body.py <dir>
@@ -73,12 +78,13 @@ ANGLE_PAIRS = [
 
 # omega_body's three components are the roll, pitch and yaw rates about the
 # fly's own axes (extract_flight_data names them p, q, r), so the components of
-# its derivative are the angular accelerations about those same axes. The line
+# its derivative are the angular accelerations about those same axes (pitch is
+# nose-down positive, like pitch_angle). The line
 # style repeats the identity the colour carries, so the three stay separable
 # where they overlap and for a colour-blind reader.
 OMEGA_DOT_COMPONENTS = [
     (0, "about x_body (roll)",  ROLE_COLORS["x"], "-"),
-    (1, "about y_body (pitch)", ROLE_COLORS["y"], "--"),
+    (1, "about y_body (pitch, + nose down)", ROLE_COLORS["y"], "--"),
     (2, "about z_body (yaw)",   ROLE_COLORS["z"], ":"),
 ]
 
@@ -99,11 +105,22 @@ KILO = 1e-3
 ACCEL_UNIT = r"$10^3$ deg/s$^2$"
 
 
+# Copied from utils (which pulls in torch) rather than imported. pitch datasets in
+# an h5 without a pitch_convention dataset were written nose-UP positive, the
+# opposite of today's nose-down, so load() flips them and every caller sees one
+# sign whatever the file's age.
+PITCH_CONVENTION_KEY = "pitch_convention"
+PITCH_SIGNED_KEYS = ("pitch_angle", "pitch_dot", "pitch_dot_dot")
+
+
 def load(h5, key):
     if key not in h5:
         return None
     ds = h5[key]
-    return ds[()] if ds.shape == () else ds[:]
+    value = ds[()] if ds.shape == () else ds[:]
+    if key in PITCH_SIGNED_KEYS and PITCH_CONVENTION_KEY not in h5:
+        value = -value
+    return value
 
 
 def find_h5(directory):
@@ -143,26 +160,327 @@ def frame_axis(h5, n_frames):
 
 
 def perturbation_info(h5):
-    """The declared perturbation window in trigger-relative frames, or None.
+    """What the analysis h5 says about this movie's perturbation, or None.
 
-    The onset is always known once an experiment is declared perturbed; the
-    duration often is not (perturbation_end_known == 0), and an unknown end is
-    left as None rather than guessed at.
+    Returns the SAME key names `utils.load_perturbation` produces, so one
+    formatter serves both the writer side and every reader:
+      status, type, type_known, onset_frame, end_frame, end_known,
+      duration_ms, duration_source, frames_trigger_relative, label.
+
+    None means the h5 records no declaration at all -- which is different from
+    a declaration saying this movie is an unperturbed CONTROL (status
+    "control"), and different again from one saying the status is not known.
+
+    Older h5s carry only the original datasets; their values are back-filled
+    here so a file written before the four-state contract still reads correctly.
     """
-    if not load(h5, "perturbation"):
-        return None
+    declared = load(h5, "perturbation_declared")
+    has_window = bool(load(h5, "perturbation"))
+    if declared is None and not has_window:
+        return None                      # nothing was ever declared
+
+    status = as_text(load(h5, "perturbation_status")) or (
+        "perturbed" if has_window else "unknown")
     onset = load(h5, "perturbation_start_frame")
-    if onset is None:
-        return None
     end_known = bool(load(h5, "perturbation_end_known"))
-    end = load(h5, "perturbation_end_frame") if end_known else None
-    kind = load(h5, "perturbation_type")
-    label = kind.decode() if isinstance(kind, bytes) else str(kind or "perturbation")
-    if not end_known:
-        label += " (end unrecorded)"
-    return {"onset": float(onset),
-            "end": float(end) if end is not None else None,
-            "end_known": end_known, "label": label}
+    end = load(h5, "perturbation_end_frame")
+    duration = load(h5, "perturbation_duration_ms")
+    kind = as_text(load(h5, "perturbation_type")) or "unknown"
+
+    type_known_ds = load(h5, "perturbation_type_known")
+    type_known = (bool(type_known_ds) if type_known_ds is not None
+                  else kind.strip().lower() not in ("", "unspecified", "unknown"))
+    source_ds = load(h5, "perturbation_duration_source")
+    duration_source = as_text(source_ds) if source_ds is not None else (
+        "recorded" if duration is not None else "unrecorded")
+    tr = load(h5, "perturbation_frames_trigger_relative")
+
+    return {
+        "status": status,
+        "type": kind,
+        "type_known": type_known,
+        "onset_frame": float(onset) if onset is not None else None,
+        "end_frame": float(end) if end is not None else None,
+        "end_known": end_known,
+        "duration_ms": float(duration) if duration is not None else None,
+        "duration_source": duration_source,
+        "frames_trigger_relative": True if tr is None else bool(tr),
+        "label": pert_window_text({
+            "status": status, "type": kind, "type_known": type_known,
+            "onset_frame": onset, "end_frame": end, "duration_ms": duration,
+            "duration_source": duration_source}, short=True),
+        # Written by the same declaration as the pulse, and read back the same way.
+        **lighting_info(h5),
+    }
+
+
+def as_text(value):
+    """h5 scalars come back as bytes or numpy scalars; give me a str."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return str(value)
+
+
+def is_perturbed(pert):
+    """True when this movie actually has a window -- mirrors utils.pert_is_perturbed."""
+    return pert is not None and pert.get("status") == "perturbed"
+
+
+# Lighting, drawn the same way by both PNGs, the flight viewer and the plotly
+# pages: amber while the white light is on, near-black while it is off, grey
+# where the declaration cannot say. Every segment also carries its word, so the
+# strip survives greyscale printing and colour-blind reading.
+LIGHT_COLORS = {"lit": "#f6c343", "dark": "#262626", "unknown": "#b0b0b0"}
+LIGHT_TEXT_COLORS = {"lit": "black", "dark": "white", "unknown": "black"}
+LIGHT_WORDS = {"lit": "LIGHT ON", "dark": "DARK", "unknown": "LIGHT ?"}
+# The colour a whole-movie badge takes, per regime.
+LIGHT_REGIME_KIND = {"constant_light": "lit", "constant_dark": "dark",
+                     "darkening": "dark", "unknown": "unknown"}
+# Axes-fraction band the lighting strip occupies at the top of every panel.
+STRIP = (0.94, 1.0)
+# Height reserved under the panels for the shared legend, in inches.
+LEGEND_BAND_IN = 0.55
+
+
+def figure_legend(fig, axes):
+    """ONE legend for the whole figure, in a row under the panels.
+
+    A per-panel legend sits on the traces (a wingbeat trace has no empty
+    corner), and on the stacked wing plot it repeated the same entries three
+    times. Entries are collected from every panel and de-duplicated by label,
+    so a panel-specific series (the magnitude) still gets its entry. Call it
+    before tight_layout, passing `rect=legend_rect(fig)` so the panels leave
+    it room."""
+    seen, handles, labels = set(), [], []
+    for ax in axes:
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            if lab and not lab.startswith("_") and lab not in seen:
+                seen.add(lab)
+                handles.append(h)
+                labels.append(lab)
+    if handles:
+        fig.legend(handles, labels, loc="lower center", ncol=len(handles),
+                   fontsize=9, frameon=False, bbox_to_anchor=(0.5, 0.0))
+
+
+def legend_rect(fig):
+    """tight_layout rect leaving LEGEND_BAND_IN at the bottom for figure_legend."""
+    return (0, LEGEND_BAND_IN / fig.get_figheight(), 1, 1)
+
+
+def from_trigger(frame, rate=None):
+    """Where a trigger-relative frame sits, in words: "at the camera trigger",
+    "60.00 ms after the camera trigger", ...
+
+    Frame 0 is the camera trigger in every product, figures included, so a
+    frame number is unambiguous; this adds how far from the trigger it is in
+    time, which is what "the pulse came 60 ms after the light-off" is about."""
+    frame = int(round(float(frame)))
+    if frame == 0:
+        return "at the camera trigger"
+    side = "after" if frame > 0 else "before"
+    size = (f"{abs(frame) * 1000.0 / rate:.2f} ms" if rate
+            else f"{abs(frame)} frames")
+    return f"{size} {side} the camera trigger"
+
+
+def lighting_info(h5):
+    """The lighting keys of `utils.load_perturbation`, read back from an analysis h5.
+
+    An h5 written before lighting was recorded has no `lighting_regime`; that
+    reads as undeclared (regime "unknown"), never as lit."""
+    declared = load(h5, "lighting_declared")
+    off = load(h5, "lighting_light_off_frame")
+    on = load(h5, "lighting_light_on_frame")
+    relight = load(h5, "lighting_relight_after_ms")
+    tr = load(h5, "lighting_frames_trigger_relative")
+    return {
+        "lighting_declared": bool(declared) if declared is not None else False,
+        "lighting_regime": as_text(load(h5, "lighting_regime")) or "unknown",
+        "light_off_frame": float(off) if off is not None else None,
+        "light_on_frame": float(on) if on is not None else None,
+        "relight_after_ms": float(relight) if relight is not None else None,
+        "lighting_note": as_text(load(h5, "lighting_note")) or None,
+        "lighting_frames_trigger_relative": True if tr is None else bool(tr),
+    }
+
+
+def lighting_text(pert, frame_rate=None, short=False):
+    """One line naming the LIGHTING -- the lighting counterpart of pert_window_text.
+
+    Every product takes its words from here, so a darkening can never be called
+    one thing in the mp4 and another in the viewer. The long form also places
+    the coil pulse relative to the light-off, which is what separates a
+    darkening response from a pulse response inside one movie."""
+    if pert is None:
+        return ""
+    regime = pert.get("lighting_regime") or "unknown"
+    if regime == "constant_light":
+        return ("CONSTANT LIGHT" if short else
+                "LIGHTING: CONSTANT LIGHT - white LED on for the whole session")
+    if regime == "constant_dark":
+        return ("CONSTANT DARKNESS" if short else
+                "LIGHTING: CONSTANT DARKNESS - white LED off for the whole session, "
+                "no light change in this movie")
+    if regime == "darkening":
+        off = pert.get("light_off_frame")
+        if off is None:
+            return ("DARKENING, light-off frame unknown" if short else
+                    "LIGHTING: DARKENING (visual perturbation) - light-off frame NOT declared")
+        if short:
+            return f"DARKENING: light off {from_trigger(off)}"
+        # Relative to the pulse first -- that is the pairing the experiment is
+        # about -- then to the camera trigger, then the counter's frame number.
+        rel = ""
+        onset = pert.get("onset_frame")
+        if is_perturbed(pert) and onset is not None:
+            d = int(round(float(onset))) - int(round(float(off)))
+            if d == 0:
+                rel = "together with the pulse, "
+            else:
+                gap = (f"{abs(d) * 1000.0 / frame_rate:.2f} ms" if frame_rate
+                       else f"{abs(d)} frames")
+                rel = f"{gap} {'before' if d > 0 else 'after'} the pulse, "
+        off_i = int(round(float(off)))
+        where = "the camera trigger" if off_i == 0 else from_trigger(off, frame_rate)
+        text = (f"LIGHTING: DARKENING (visual perturbation) - light switched OFF at "
+                f"frame {off_i} ({where})" + (f", {rel.rstrip(', ')}" if rel else ""))
+        relight = pert.get("relight_after_ms")
+        if relight is not None:
+            text += f"; relit {relight / 1000.0:g} s later"
+        return text
+    if not pert.get("lighting_declared"):
+        return "LIGHTING NOT DECLARED"
+    return "LIGHTING UNKNOWN"
+
+
+def declaration_text(pert, frame_rate=None):
+    """The pulse line and the lighting line, for a subtitle."""
+    return "\n".join(s for s in (pert_window_text(pert, frame_rate),
+                                 lighting_text(pert, frame_rate)) if s)
+
+
+def lighting_segments(pert, lo, hi):
+    """[(first_frame, last_frame, "lit" | "dark" | "unknown")] tiling [lo, hi].
+
+    The drawn form of utils.lighting_frame_labels, shared by both PNGs, the
+    viewer and the plotly pages so none can disagree about where the light
+    changed. DARK spans [light_off, light_on); a relight that cannot be located
+    leaves the frames after the light-off "unknown", as the labels do."""
+    if pert is None:
+        return []
+    regime = pert.get("lighting_regime") or "unknown"
+    if regime == "constant_light":
+        return [(lo, hi, "lit")]
+    if regime == "constant_dark":
+        return [(lo, hi, "dark")]
+    off = pert.get("light_off_frame")
+    if (regime != "darkening" or off is None
+            or not pert.get("lighting_frames_trigger_relative", True)
+            or not pert.get("frames_trigger_relative", True)):
+        return [(lo, hi, "unknown")]
+    on = pert.get("light_on_frame")
+    inf = float("inf")
+    cuts = ([(-inf, off, "lit"), (off, on, "dark"), (on, inf, "lit")] if on is not None
+            else [(-inf, off, "lit"), (off, inf, "unknown")])
+    out = []
+    for a, b, kind in cuts:
+        a, b = max(float(a), lo), min(float(b), hi)
+        if b > a:
+            out.append((a, b, kind))
+    return out
+
+
+def mark_lighting(ax, pert, to_x, frames):
+    """Show whether the fly was in the light or the dark, on one panel.
+
+    A labelled strip along the top of the axes; for a darkening also a dash-dot
+    line at the light-off frame (with a legend entry) and a faint grey wash over
+    the dark part, since the light-off is a stimulus in its own right. Call it
+    AFTER the traces: the y-range is padded first so the strip sits in headroom
+    rather than over the data."""
+    if pert is None:
+        return
+    lo, hi = float(frames[0]), float(frames[-1])
+    segs = lighting_segments(pert, lo, hi)
+    if not segs:
+        return
+    y0, y1 = ax.get_ylim()
+    ax.set_ylim(y0, y1 + (y1 - y0) * 0.09)
+    trans = ax.get_xaxis_transform()          # x in data, y in axes fraction
+    span = abs(float(to_x(hi)) - float(to_x(lo))) or 1.0
+    darkening = pert.get("lighting_regime") == "darkening"
+    for a, b, kind in segs:
+        xa, xb = float(to_x(a)), float(to_x(b))
+        ax.axvspan(xa, xb, ymin=STRIP[0], ymax=STRIP[1], color=LIGHT_COLORS[kind],
+                   alpha=0.95, zorder=4, linewidth=0)
+        if darkening and kind == "dark":
+            ax.axvspan(xa, xb, color="0.25", alpha=0.07, zorder=0, linewidth=0)
+        if abs(xb - xa) / span >= 0.05:
+            ax.text((xa + xb) / 2, sum(STRIP) / 2, LIGHT_WORDS[kind], transform=trans,
+                    ha="center", va="center", fontsize=7, fontweight="bold",
+                    color=LIGHT_TEXT_COLORS[kind], zorder=5, clip_on=True)
+    off = pert.get("light_off_frame")
+    if darkening and off is not None and lo <= off <= hi:
+        ax.axvline(float(to_x(off)), color="black", linestyle="-.", linewidth=1.1,
+                   zorder=3, label="light off")
+
+
+def pert_window_text(pert, frame_rate=None, short=False):
+    """One line naming the perturbation TYPE, its ONSET and its END.
+
+    The single place any product turns a window into words, so the mp4, both
+    PNGs, the interactive viewer and the CLI cannot drift apart. The duration's
+    provenance travels with it: a value the log never recorded and that came
+    from the rig-wide default is always marked ASSUMED, so nobody reads it as a
+    measurement of this experiment.
+    """
+    if pert is None:
+        return ""
+    status = pert.get("status", "unknown")
+    if status == "control":
+        return "CONTROL - declared unperturbed"
+    if status != "perturbed":
+        return "PERTURBATION STATUS UNKNOWN"
+
+    kind = pert.get("type") or "unknown"
+    name = kind if pert.get("type_known") else "type unknown"
+    onset = pert.get("onset_frame")
+    end = pert.get("end_frame")
+    duration = pert.get("duration_ms")
+    src = pert.get("duration_source", "n/a")
+    provenance = {"recorded": "recorded", "assumed": "ASSUMED"}.get(src, src)
+
+    if short:
+        # The mp4 form: its counter is numbered from the trigger, so trigger
+        # frame numbers are the ones a viewer can read off the same screen.
+        onset_txt = ("onset trigger frame "
+                     f"{int(onset)}" if onset is not None else "onset unknown")
+        if duration is None:
+            end_txt = "end NOT RECORDED"
+        else:
+            dur = f"{float(duration):.2f} ms, {provenance}"
+            end_txt = (f"end {int(end)} ({dur})" if end is not None
+                       else f"duration {dur}, end not locatable")
+        return " | ".join((name, onset_txt, end_txt))
+
+    # The figure form. Every product counts frames from the camera trigger, so
+    # these frame numbers are the ones on the figure's own axis; the words say
+    # how the pulse sits against the trigger.
+    if onset is None:
+        return f"{name} pulse, onset unknown"
+    rate = frame_rate or pert.get("frame_rate")
+    first = int(round(float(onset)))
+    if duration is None:
+        length = "duration NOT RECORDED"
+        frames = f"from frame {first}"
+    else:
+        length = f"{float(duration):.2f} ms long ({provenance})"
+        frames = (f"frames {first}-{int(round(float(end))) - 1}"
+                  if end is not None else f"from frame {first}")
+    return f"{name} pulse, {length}: {frames}, starting {from_trigger(onset, rate)}"
 
 
 def axis_origin(pert, mode, trigger_relative=True):
@@ -172,8 +490,9 @@ def axis_origin(pert, mode, trigger_relative=True):
     that is the instant such an experiment is about; without one it means the
     trigger, which is what every other product uses.
     """
-    if mode in ("auto", "perturbation") and pert is not None and trigger_relative:
-        return pert["onset"], "perturbation onset"
+    if (mode in ("auto", "perturbation") and is_perturbed(pert)
+            and pert.get("onset_frame") is not None and trigger_relative):
+        return pert["onset_frame"], "perturbation onset"
     if mode == "perturbation":
         print("warning: --origin perturbation, but this movie declares no "
               "perturbation window; falling back to the trigger", file=sys.stderr)
@@ -200,7 +519,7 @@ def x_axis(frames, rate, units, trigger_relative, origin=0.0, origin_name=None):
     if origin_name:
         relative = f" relative to {origin_name}"
     else:
-        relative = " relative to trigger" if trigger_relative else " (box index)"
+        relative = " relative to camera trigger" if trigger_relative else " (box index)"
     x = frame_to_x(rate, units, origin)(frames)
     if units == "s":
         return x, f"time (s){relative}", relative
@@ -290,17 +609,24 @@ def mark_perturbation(ax, pert, to_x, frames):
     perturbation -- so the band is clipped to what was recorded and only the
     onset LINE is withheld when it falls outside.
     """
-    if pert is None:
-        return
+    if not is_perturbed(pert) or pert.get("onset_frame") is None:
+        return                      # a control or unknown movie has no window
     lo, hi = float(frames[0]), float(frames[-1])
-    end = pert["end"] if pert["end"] is not None else hi
-    band = (max(pert["onset"], lo), min(end, hi))
+    onset = pert["onset_frame"]
+    end = pert["end_frame"] if pert.get("end_frame") is not None else hi
+    band = (max(onset, lo), min(end, hi))
     if band[1] > band[0]:
+        # An ASSUMED end is drawn hatched, so the eye cannot mistake a boundary
+        # taken from the rig-wide default for one the log actually recorded.
+        assumed = pert.get("duration_source") == "assumed"
         ax.axvspan(float(to_x(band[0])), float(to_x(band[1])), color="tab:red",
-                   alpha=0.08, zorder=0)
-    if lo <= pert["onset"] <= hi:
-        ax.axvline(float(to_x(pert["onset"])), color="tab:red", linestyle="-",
-                   linewidth=0.9, alpha=0.6, zorder=0, label=pert["label"])
+                   alpha=0.08, zorder=0,
+                   hatch="//" if assumed else None,
+                   edgecolor="tab:red" if assumed else None, linewidth=0.0,
+                   label="pulse window" + (" (end ASSUMED)" if assumed else ""))
+    if lo <= onset <= hi:
+        ax.axvline(float(to_x(onset)), color="tab:red", linestyle="-",
+                   linewidth=0.9, alpha=0.6, zorder=0, label="pulse onset")
 
 
 def mark_trigger(ax, to_x, frames, trigger_relative):
@@ -312,10 +638,11 @@ def mark_trigger(ax, to_x, frames, trigger_relative):
     """
     if not trigger_relative or not (frames[0] <= 0 <= frames[-1]):
         return
-    ax.axvline(float(to_x(0)), color="0.4", linestyle="--", linewidth=0.8)
+    ax.axvline(float(to_x(0)), color="0.4", linestyle="--", linewidth=0.8,
+               label="camera trigger")
 
 
-def plot_wing_angles(h5_path, units, origin="auto"):
+def plot_wing_angles(h5_path, units, origin="trigger"):
     out_path = os.path.join(os.path.dirname(h5_path), WING_PNG)
 
     with h5py.File(h5_path, "r") as h5:
@@ -358,22 +685,26 @@ def plot_wing_angles(h5_path, units, origin="auto"):
         ax.plot(x[:len(r)], r, label="right", color=ROLE_COLORS["right"], linewidth=0.9)
         ax.set_ylabel(f"{label}\n(deg)")
         ax.grid(alpha=0.3)
-        ax.legend(loc="upper right", fontsize=9)
+        # After the traces, so the strip's headroom is added to their range.
+        mark_lighting(ax, pert, to_x, frames)
         mark_trigger(ax, to_x, frames, trigger_relative)
 
     # Second scale on top: the same instant in the other unit.
     add_secondary_axis(axes[0], units, rate, relative)
 
     axes[-1].set_xlabel(xlabel)
-    fig.suptitle(os.path.basename(h5_path), fontsize=11)
-    fig.tight_layout()
+    subtitle = declaration_text(pert, rate)
+    fig.suptitle(os.path.basename(h5_path)
+                 + (f"\n{subtitle}" if subtitle else ""), fontsize=11)
+    figure_legend(fig, axes)
+    fig.tight_layout(rect=legend_rect(fig))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     print(f"wrote {out_path}")
     return True
 
 
-def plot_body_angular_acceleration(h5_path, units, origin="auto"):
+def plot_body_angular_acceleration(h5_path, units, origin="trigger"):
     """Body angular acceleration vs time, on the same x-axis as the wing plot.
 
     Top panel: the three components of d(omega_body)/dt, i.e. how fast the roll,
@@ -424,21 +755,23 @@ def plot_body_angular_acceleration(h5_path, units, origin="auto"):
 
     for ax in (ax_comp, ax_mag):
         ax.grid(alpha=0.3)
-        ax.legend(loc="upper right", fontsize=9)
+        mark_lighting(ax, pert, to_x, frames)
         mark_trigger(ax, to_x, frames, trigger_relative)
 
     add_secondary_axis(ax_comp, units, rate, relative)
     ax_mag.set_xlabel(xlabel)
-    fig.suptitle(f"{os.path.basename(h5_path)} -- body angular acceleration",
-                 fontsize=11)
-    fig.tight_layout()
+    subtitle = declaration_text(pert, rate)
+    fig.suptitle(f"{os.path.basename(h5_path)} -- body angular acceleration"
+                 + (f"\n{subtitle}" if subtitle else ""), fontsize=11)
+    figure_legend(fig, (ax_comp, ax_mag))
+    fig.tight_layout(rect=legend_rect(fig))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     print(f"wrote {out_path}")
     return True
 
 
-def plot_one(h5_path, units="frames", origin="auto"):
+def plot_one(h5_path, units="frames", origin="trigger"):
     """Write every per-movie figure for one analysis h5.
 
     Returns True if at least one figure was written. One figure failing does not
@@ -465,11 +798,11 @@ def main():
                          "(default: frames, matching the mp4 counter). The "
                          "other unit is drawn as a second axis on top.")
     ap.add_argument("--origin", choices=["auto", "trigger", "perturbation"],
-                    default="auto",
-                    help="Which instant the x-axis calls zero: 'trigger' for "
+                    default="trigger",
+                    help="Which instant the x-axis calls zero: 'trigger' (default) for "
                          "the numbering the mp4 counter and the CSV use, "
                          "'perturbation' for the declared onset, 'auto' "
-                         "(default) for the onset when the movie declares one "
+                         "for the onset when the movie declares one "
                          "and the trigger otherwise. Only the drawn axis "
                          "moves; the stored numbering never does.")
     args = ap.parse_args()

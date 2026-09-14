@@ -102,6 +102,20 @@ What happens:
 (the parent output directory). The optional 5th arg caps concurrent GPU tasks
 (default 32).
 
+Two environment variables tune the predict array without editing any script
+(set them in the shell before `sbatch`; SLURM carries them into the job, and
+`pipeline.sh` carries them on to the array it submits):
+
+| variable | effect |
+|---|---|
+| `PREDICT_SBATCH_ARGS` | extra `sbatch` options for the predict array, e.g. `"-p catfish,salmon --gres=gpu:1 --mem=96g --cpus-per-task=12"`. `predict_array.sh`'s own defaults (256 GB, 32 CPUs, an L40S on salmon) are sized for full 5500-frame movies and can queue behind a deep salmon backlog; measured peak RSS is ~8.4 MB per frame + ~3 GB, so 96 GB covers any 5527-frame movie. |
+| `DROP_BOX_CACHE=1` | each predict task deletes its movie's `saved_box_dir` after a **successful** prediction. It is a regenerable cache and ~236 kB/frame — over half of the ~413 kB/frame a predicted movie costs in total (built h5 ~85, cache ~236, `predict_output` ~92). |
+
+Prep itself needs little memory (peak ~1.8 GB) but can run long: builds are
+serial across experiments (concurrent prep jobs stall each other on MATLAB), so
+chain experiments with `--dependency=afterany:<previous job>` and raise
+`--time` for large ones — `pipeline.sh` defaults to 6 h.
+
 > The `<experiment_name>` you pass to `-J` should match the input dir's basename
 > (e.g. `101to110`) so the manifest the prep step writes
 > (`manifests/good_movies_<basename>.txt`) is the one `pipeline.sh` looks for.
@@ -203,16 +217,77 @@ Every predicted movie then gets, in its `*_analysis_smoothed.h5`:
 
 | dataset | meaning |
 |---|---|
-| `perturbation`, `perturbation_type` | 1, and e.g. `roll` |
-| `perturbation_start_frame` | onset, trigger-relative — always known |
+| `perturbation_declared` | 1 — a declaration applied to this movie. **Its absence is how "nothing was declared" is expressed** |
+| `perturbation_status` | `perturbed` / `control` / `unknown` |
+| `perturbation` | 1 only when there is a window to draw; 0 for control and unknown |
+| `perturbation_type`, `perturbation_type_known` | e.g. `roll`; `_known` is 0 when the log never named a type |
+| `perturbation_start_frame` | onset, trigger-relative — always known when perturbed |
 | `perturbation_start_index` | row holding the onset, or `-1` if outside this movie |
-| `perturbation_end_known` | 0 when the log never recorded a duration |
-| `perturbation_state` | per frame: 0 before, 1 during, 2 after, **-1 unknown** |
-| `perturbation_end_frame` / `_end_index` / `_duration_ms` | only when the duration is known |
+| `perturbation_end_known` | 0 when no duration is known at all |
+| `perturbation_end_frame` / `_end_index` | only when the end could be located in frames |
+| `perturbation_duration_ms` | whenever a duration is known — recorded **or** assumed |
+| `perturbation_duration_source` | `recorded` / `assumed` / `unrecorded` / `n/a` |
+| `perturbation_duration_assumed_ms` | only when the duration was assumed |
+| `perturbation_duration_note` | the declaration's own provenance sentence |
+| `perturbation_frames_trigger_relative` | 0 when the trigger could not be established |
+| `perturbation_source`, `perturbation_movie_key` | which file and which per-movie entry applied |
+| `perturbation_state` | per frame: 0 before, 1 during, 2 after, 3 control, **-1 unknown** |
 
-plus a `perturbation_state` column (`before`/`during`/`after`/`unknown`) in the
-CSV and a third counter line in the mp4 (`PRE -7.50 ms`, `PERT +0.25 ms`,
-`POST +0.75 ms`, or `PERT +0.25 ms  (end unknown)`).
+**The four states a reader must be able to tell apart**
+
+| on disk | means |
+|---|---|
+| no `perturbation_declared` | nothing was declared for this movie |
+| `declared=1, perturbation=1, status=perturbed` | it was perturbed |
+| `declared=1, perturbation=0, status=control` | declared **unperturbed** — an experimental control |
+| `declared=1, perturbation=0, status=unknown` | declared, but the status itself is not known |
+
+**Mixed experiments.** One experiment can hold both perturbed and unperturbed
+movies — 030121 is exactly that, a chamber of flies some of which carried a
+magnet. A `movies` block keyed by movie-directory basename overrides the
+experiment-level block key by key:
+
+```jsonc
+{
+  "schema_version": 2,
+  "perturbation": {"type": "yaw", "status": "perturbed",
+                   "onset_trigger_frame": 0, "duration_ms": 7.5,
+                   "duration_source": "assumed"},
+  "movies": {
+    "mov9":  {"status": "perturbed"},
+    "mov16": {"status": "control", "evidence": "no magnet on this fly"},
+    "mov2":  {"status": "unknown", "evidence": "absent from the log"}
+  }
+}
+```
+
+A file with no `status` anywhere resolves exactly as it did before, so old
+declarations keep working unchanged.
+
+**Assumed durations.** When a movie is known to be perturbed but the log never
+recorded how long the pulse lasted, `utils.PERT_DEFAULT_DURATION_MS` (7.5 ms,
+the rig's pre-set per the thesis) is applied and marked
+`duration_source: "assumed"`. It is never silent: the word travels into the h5,
+the CSV, both PNG subtitles, the mp4 counter and the viewer header, the
+shaded band is drawn hatched, and `"assume_duration": false` opts out and
+restores the honest `unrecorded`.
+
+plus, in the CSV, a per-row `perturbation_state`
+(`before`/`during`/`after`/`control`/`unknown`), the constant columns
+`perturbation_status`, `perturbation_type`, `perturbation_onset_frame`,
+`perturbation_end_frame`, `perturbation_duration_ms` and
+`perturbation_duration_source`, and the per-row `frames_from_onset` /
+`time_from_onset_ms`.
+
+In the mp4 the counter gains a **static** line naming the perturbation
+(`yaw | onset trigger frame 960 | end 1080 (7.50 ms, ASSUMED)`) above the
+per-frame `PRE -7.50 ms` / `PERT +0.25 ms` / `POST +0.75 ms` line — the type
+appears in the video for the first time. A control movie shows
+`CONTROL (no perturbation)`; an unknown one `PERTURBATION STATUS UNKNOWN`.
+Both PNGs carry the same line as a subtitle and the viewer as its header.
+
+`DURING` is the half-open interval `[onset, end)`: the frame at `end_frame` is
+already `after`, in every product.
 
 **`-1` / `unknown` is a real answer, not a gap.** When the onset was logged but
 the duration never was, frames before the onset are still labelled exactly;
@@ -228,6 +303,69 @@ Prep also prints a **PERTURBATION COVERAGE** section. The prescan picks its
 build range from fly visibility and knows nothing about the perturbation, so
 some movies get clipped to start after the onset and hold no pre-perturbation
 baseline. That count is worth reading before the GPU array runs.
+
+### 2a-ter. Lighting — a second stimulus axis
+
+The same `perturbation.json` carries a `lighting` block (schema 3), resolved per
+movie exactly like the pulse (a `movies[<dir>].lighting` entry overrides it):
+
+```jsonc
+"lighting": {
+  "regime": "darkening",            // constant_light | constant_dark | darkening | unknown
+  "light_off_trigger_frame": 0,     // darkening only: the frame the white light goes OFF
+  "relight_after_ms": 1000,         // darkening only (default: the rig's 1 s)
+  "note": "...", "evidence": "..."  // provenance, in words
+}
+```
+
+`darkening` means the light is switched off *during the recording* — a visual
+perturbation in its own right, distinct from `constant_dark` (dark all session,
+no light change inside any movie). A file with no `lighting` block reads as
+**not declared**, never as lit. At prep, `--lighting-regime`, `--light-off-frame`,
+`--relight-after-ms` and `--lighting-note` write the block (CLI declarations only;
+an existing file is kept as usual).
+
+Every product then states it:
+
+| product | what it shows |
+|---|---|
+| `*_analysis_smoothed.h5` | `lighting_declared`, `lighting_regime`, `lighting_darkening` (strict 0/1), `lighting_light_off_frame`/`_index`, `lighting_light_on_frame`/`_index`, `lighting_relight_after_ms`, `lighting_note`, `lighting_evidence`, `lighting_frames_trigger_relative`, per-frame `lighting_state` (0 lit, 1 dark, -1 unknown) |
+| CSV | `lighting_regime`, `light_off_frame`, per-row `light_state` (`lit`/`dark`/`unknown`), `frames_from_light_off`, `time_from_light_off_ms` |
+| `wing_angles.png`, `body_angular_acceleration.png` | a strip along the top of every panel (amber LIGHT ON / black DARK / grey LIGHT ?), a dash-dot light-off line and grey wash for a darkening, and a lighting line in the subtitle |
+| `*_flight_viewer.html` | the same strip and line on every time-series row, a lighting badge in the header, and a readout line (`DARK +12.50 ms since light-off`) whose box turns dark on dark frames |
+| `movie 2D and 3D.mp4` | a per-frame lighting line under the pulse line; the counter box turns dark on every dark frame |
+| `All body data.html`, `movie_html.html` | the pulse and lighting as title lines, the strip/band/line as shapes (All body data), and light-off / pulse onset / pulse end markers on the 3D trajectory (movie_html) |
+| `source.json` | the resolved `perturbation` and `lighting` blocks |
+
+**Which frame is 0.** Frame 0 is the **camera trigger** in every product --
+the h5 `frame_index`, the CSV `frame` column, the mp4 counter, both PNGs and the
+flight viewer. The rig's Arduino schedules both stimuli from that same trigger,
+so the pulse sits at frame 0 only in experiments that fire it on the trigger
+(ex210824/26 fire it at 960, 60 ms later, and switch the light off at 0). The
+figures draw the pulse and the light-off as events at their own frames, and
+their texts add the timing in words ("yaw pulse, 7.50 ms long (ASSUMED): frames
+960-1079, starting 60.00 ms after the camera trigger"; "light switched OFF at
+frame 0 (the camera trigger), 60.00 ms before the pulse"). The viewer's "from"
+menu can still redraw the axis from the pulse onset, and `plot_wing_and_body.py
+--origin perturbation` does the same for the PNGs; the axis label then names its
+zero. The CSV's `frames_from_onset` / `frames_from_light_off` give the other
+two references per row.
+
+DARK is the half-open interval `[light_off, light_on)`, the same convention as
+the pulse's DURING. Constant regimes are labelled even without a trigger; a
+darkening without trigger-relative frames is `unknown`.
+
+**Changing the declaration after prediction does not need the GPU.**
+`reanalyse_movies.py` (and its array wrapper `sbatch_files/reanalyse_array.sh`)
+rewrites every derived product — h5, CSV, PNGs, viewer, both plotly pages,
+source.json and, with `--with-mp4 --force-mp4`, the mp4 — from the cached 3D
+points, reading the **live** `perturbation.json` (`--perturbation-source auto`):
+
+```bash
+# manifest = one predicted movie OUTPUT dir per line
+N=$(wc -l < manifests/reanalyse_X.txt)
+sbatch -J reanalyse_X --array=0-$((N-1))%40 sbatch_files/reanalyse_array.sh manifests/reanalyse_X.txt
+```
 
 ### 2b. Predict only (movies already built)
 
@@ -272,6 +410,15 @@ predict_output/<run_name>/<mov_name>/
 parent). Per-movie/per-step timings accumulate in the experiment's
 `pipeline_timings.csv` (`predict`, `plot`, `viewer`, `total` rows joined on
 `mov<N>`).
+
+Body pitch -- `pitch_angle` and `pitch_dot` in the h5, `body_pitch_deg` in the
+CSV -- is **nose-down positive**: the right-hand rule about `y_body`, which
+points left. It shares its sign with `omega_body[:, 1]` (`q`) and
+`omega_body_dot[:, 1]`, and a fly holding its nose above the horizon reads a
+negative pitch. Analysis files written before this carry no `pitch_convention`
+dataset and hold the opposite sign. The plotting tools here flip those on read;
+the CSV and any other direct reader do not, so re-run `code/reanalyse_movies.py`
+on them.
 
 Body roll -- `roll_angle` and `roll_dot` in the h5, `body_roll_deg` in the CSV --
 is measured only once per wingbeat (about every 73 frames): when both wings are

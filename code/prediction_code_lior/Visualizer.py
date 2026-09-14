@@ -12,13 +12,14 @@ import plotly.io as pio
 from scipy.interpolate import make_interp_spline
 from scipy.spatial.transform import Rotation as R
 import os
+import sys
 import cv2
 import itertools
 from skimage import measure
 from plotly.subplots import make_subplots
 from scipy.integrate import simpson
 from utils import add_nan_frames
-from utils import get_trigger_frame_info, load_perturbation
+from utils import get_trigger_frame_info, load_perturbation, pitch_read_sign
 import glob
 from scipy.optimize import curve_fit
 from scipy.linalg import svd
@@ -660,7 +661,8 @@ class Visualizer:
         return box
 
     @staticmethod
-    def create_movie_plot(com, x_body, y_body, points_3D, start_frame, save_path):
+    def create_movie_plot(com, x_body, y_body, points_3D, start_frame, save_path,
+                          frame_numbers=None, perturbation=None, frame_rate=None):
         facing = -np.cross(x_body, y_body, axis=1)
         left_tip = points_3D[:, 3, :]
         right_tip = points_3D[:, 3 + 8, :]
@@ -680,10 +682,18 @@ class Visualizer:
         # Create markers
         marker_start = go.Scatter3d(x=[com[0, 0]], y=[com[0, 1]], z=[com[0, 2]], mode='markers',
                                     marker=dict(size=8, color='red'), name='start')
-        marker_start_dark = go.Scatter3d(x=[com[frame0, 0]], y=[com[frame0, 1]], z=[com[frame0, 2]], mode='markers',
-                                         marker=dict(size=8, color='orange'), name='start dark')
-        marker_40_ms = go.Scatter3d(x=[com[frame_40_ms, 0]], y=[com[frame_40_ms, 1]], z=[com[frame_40_ms, 2]],
-                                    mode='markers', marker=dict(size=8, color='yellow'), name='+ 40 ms')
+        landmarks, title_lines = Visualizer._movie_plot_landmarks(
+            com, frame_numbers, perturbation, frame_rate)
+        if landmarks is None:
+            # No declaration: the legacy markers, at a fixed box frame
+            # (340 - start_frame) inherited from an earlier rig. They mean nothing
+            # for an experiment that declares its own lighting, which is why a
+            # declared movie gets the landmarks it actually has instead.
+            landmarks = [
+                go.Scatter3d(x=[com[frame0, 0]], y=[com[frame0, 1]], z=[com[frame0, 2]], mode='markers',
+                             marker=dict(size=8, color='orange'), name='start dark'),
+                go.Scatter3d(x=[com[frame_40_ms, 0]], y=[com[frame_40_ms, 1]], z=[com[frame_40_ms, 2]],
+                             mode='markers', marker=dict(size=8, color='yellow'), name='+ 40 ms')]
         # Create quiver plot
         name = 'body yaw pitch'
         size = 0.003
@@ -711,8 +721,10 @@ class Visualizer:
 
         # Create a figure and add the traces
         fig = go.Figure(
-            data=[trace_com, trace_left_tip, trace_right_tip, marker_start, marker_start_dark, marker_40_ms,
+            data=[trace_com, trace_left_tip, trace_right_tip, marker_start, *landmarks,
                   quiver_x_body, quiver_y_body, qx_points, qy_points, arrow_trace])
+        if title_lines:
+            fig.update_layout(title=dict(text="<br>".join(title_lines), font=dict(size=15)))
 
         # Update the scene
         scene = dict(camera=dict(eye=dict(x=1., y=1, z=1)),
@@ -736,6 +748,72 @@ class Visualizer:
         )
         # Write the figure to an HTML file
         pio.write_html(fig, save_path)
+
+    @staticmethod
+    def _movie_plot_landmarks(com, frame_numbers, pert, frame_rate):
+        """(marker traces, title lines) for the declared landmarks of movie_html.html.
+
+        (None, []) when nothing is declared, so the caller keeps its legacy
+        markers. A landmark outside the analysed range is simply absent."""
+        if pert is None or frame_numbers is None:
+            return None, []
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            import plot_wing_and_body as pwb
+            title = [s for s in (pwb.pert_window_text(pert, frame_rate),
+                                 pwb.lighting_text(pert, frame_rate)) if s]
+            pwb_from_trigger = pwb.from_trigger
+        except Exception:
+            title = []
+
+            def pwb_from_trigger(frame, rate=None):
+                return f"frame {int(frame)}"
+        fn = np.round(np.asarray(frame_numbers, dtype=float))
+
+        def at(frame):
+            hit = np.nonzero(fn == round(float(frame)))[0]
+            return int(hit[0]) if len(hit) else None
+
+        marks = []
+        if pert.get("lighting_regime") == "darkening" and pert.get("light_off_frame") is not None:
+            off = pert["light_off_frame"]
+            marks.append((at(off), f"light off (frame {int(off)}, {pwb_from_trigger(off, frame_rate)})", "black"))
+            if frame_rate:
+                marks.append((at(off + round(40 * frame_rate / 1000.0)),
+                              "+40 ms after light-off", "gray"))
+        if pert.get("status") == "perturbed" and pert.get("onset_frame") is not None:
+            marks.append((at(pert["onset_frame"]),
+                          f"pulse onset (frame {int(pert['onset_frame'])}, "
+                          f"{pwb_from_trigger(pert['onset_frame'], frame_rate)})", "red"))
+            if pert.get("end_frame") is not None:
+                marks.append((at(pert["end_frame"]),
+                              f"pulse end (frame {int(pert['end_frame'])}, "
+                              f"{pwb_from_trigger(pert['end_frame'], frame_rate)})", "darkred"))
+        traces = [go.Scatter3d(x=[com[i, 0]], y=[com[i, 1]], z=[com[i, 2]], mode='markers',
+                               marker=dict(size=8, color=color), name=name)
+                  for i, name, color in marks if i is not None]
+        return traces, title
+
+    @staticmethod
+    def create_movie_plot_from_h5(h5_path, analysis, save_path=None):
+        """movie_html.html for a FlightAnalysis, with the landmarks and title that the
+        declaration stored in its analysis h5 names (light-off, pulse onset / end).
+
+        Read back from the h5 rather than off perturbation.json, so the page always
+        agrees with the h5 it sits beside."""
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        import plot_wing_and_body as pwb
+        n = len(analysis.center_of_mass)
+        with h5py.File(h5_path, "r") as h5:
+            pert = pwb.perturbation_info(h5)
+            frames, rate, trig = pwb.frame_axis(h5, n)
+        save_path = save_path or os.path.join(os.path.dirname(h5_path), 'movie_html.html')
+        Visualizer.create_movie_plot(com=analysis.center_of_mass, x_body=analysis.x_body,
+                                     y_body=analysis.y_body, points_3D=analysis.points_3D,
+                                     start_frame=analysis.first_y_body_frame,
+                                     save_path=save_path,
+                                     frame_numbers=frames if trig else None,
+                                     perturbation=pert, frame_rate=rate)
 
     @staticmethod
     def get_orientation_scatter(com, interval, name, size, x_body, points_color=['orange', 'blue'], width=5):
@@ -824,7 +902,10 @@ class Visualizer:
                 data = h5py.File(h5_path, 'r')[data_name][frames]
         except:
             data = h5py.File(h5_path, 'r')[data_name]
-        return data
+        # a file older than the pitch convention holds pitch nose-up; flip it to today's sign
+        with h5py.File(h5_path, 'r') as h5:
+            sign = pitch_read_sign(h5, data_name)
+        return data * sign if sign != 1 else data
 
     @staticmethod
     def _perturbation_label(trigger_frame, pert, frame_rate=None):
@@ -834,17 +915,69 @@ class Visualizer:
         applies. When no duration was recorded the line says so on every frame
         from the onset onward, rather than implying the perturbation is still
         running or has ended -- neither is known."""
+        if pert.get("status") == "control":
+            return "CONTROL (no perturbation)"
+        if pert.get("status") != "perturbed" or pert.get("onset_frame") is None:
+            return "PERTURBATION STATUS UNKNOWN"
         onset = pert["onset_frame"]
+        end = pert.get("end_frame")
         def ms(d):
             return f"{d * 1000.0 / frame_rate:+.2f} ms" if frame_rate else f"{d:+d} fr"
         if trigger_frame < onset:
             return f"PRE  {ms(trigger_frame - onset)}"
-        if not pert["end_known"]:
+        if end is None:
             return f"PERT {ms(trigger_frame - onset)}  (end unknown)"
-        end = pert["end_frame"]
+        # DURING is [onset, end): the frame AT `end` is already after.
         if trigger_frame < end:
-            return f"PERT {ms(trigger_frame - onset)}"
+            tail = "  (end assumed)" if pert.get("duration_source") == "assumed" else ""
+            return f"PERT {ms(trigger_frame - onset)}{tail}"
         return f"POST {ms(trigger_frame - end)}"
+
+    @staticmethod
+    def _perturbation_banner(pert):
+        """The STATIC line naming what this movie's perturbation IS.
+
+        The per-frame line says where a frame sits relative to the window; it
+        never said what the perturbation was. Without this the type (roll vs
+        yaw) appears nowhere in the video at all."""
+        if pert is None:
+            return None
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from plot_wing_and_body import pert_window_text
+            return pert_window_text(pert, short=True) or None
+        except Exception:
+            kind = pert.get("type", "unknown")
+            return f"{kind} perturbation" if pert.get("type_known") else None
+
+    @staticmethod
+    def _lighting_label(trigger_frame, pert, frame_rate=None):
+        """(line, is_dark) -- the mp4's lighting line for one trigger-relative frame.
+
+        A darkening reads LIGHT ON / DARK with the time from the light-off, so the
+        instant the light went out is on screen; the constant regimes say so on
+        every frame. `is_dark` turns the counter box itself dark. Mirrors
+        utils.lighting_frame_labels (DARK is [light_off, light_on))."""
+        pert = pert or {}
+        regime = pert.get("lighting_regime") or "unknown"
+        if regime == "constant_dark":
+            return "LIGHT: CONSTANT DARKNESS", True
+        if regime == "constant_light":
+            return "LIGHT: CONSTANT LIGHT", False
+        off = pert.get("light_off_frame")
+        if regime != "darkening" or off is None:
+            return ("LIGHT: UNKNOWN" if pert.get("lighting_declared")
+                    else "LIGHT: NOT DECLARED"), False
+        def ms(d):
+            return f"{d * 1000.0 / frame_rate:+.2f} ms" if frame_rate else f"{d:+d} fr"
+        on = pert.get("light_on_frame")
+        if trigger_frame < off:
+            return f"LIGHT ON {ms(trigger_frame - off)} to light-off", False
+        if on is None:
+            return f"LIGHT ? {ms(trigger_frame - off)} since light-off (relight unknown)", False
+        if trigger_frame >= on:
+            return f"LIGHT ON (relit) {ms(trigger_frame - on)}", False
+        return f"DARK {ms(trigger_frame - off)} since light-off", True
 
     @staticmethod
     def create_movie_mp4(h5_path_movie_path, mode=DISPLAY, save_frames=None,
@@ -865,6 +998,16 @@ class Visualizer:
         # third counter line without the caller having to know about it.
         if perturbation is None and box_path is not None:
             perturbation = load_perturbation(box_path, frame_rate)
+        # Computed ONCE: it is the same on every frame, and building it inside
+        # update() would re-import per frame for a few thousand frames.
+        _pert_banner = Visualizer._perturbation_banner(perturbation)
+        if _pert_banner:
+            print(f"mp4 perturbation banner: {_pert_banner}", flush=True)
+        if perturbation is not None:
+            print(f"mp4 lighting: {perturbation.get('lighting_regime', 'unknown')}"
+                  + (f", light off at trigger frame {perturbation['light_off_frame']}"
+                     if perturbation.get('light_off_frame') is not None else ""),
+                  flush=True)
         points_2D = np.load(reprojected_points_path)
         first_analized_frame = Visualizer.get_data_from_h5(h5_path_movie_path, 'first_analysed_frame')[()]
         points_2D = add_nan_frames(points_2D, first_analized_frame)
@@ -1136,8 +1279,21 @@ class Visualizer:
                 # still leaves a useful readout -- it just cannot claim the
                 # perturbation has finished.
                 if perturbation is not None:
+                    if _pert_banner:
+                        lines.insert(0, _pert_banner)
                     lines.append(Visualizer._perturbation_label(
                         disp_frame, perturbation, frame_rate))
+                    # The lighting line -- and the counter box itself turns dark on
+                    # every dark frame, so the light-off is visible at a glance.
+                    light_line, is_dark = Visualizer._lighting_label(
+                        disp_frame, perturbation, frame_rate)
+                    lines.append(light_line)
+                    # NOT `box`: that name is the movie's image dataset in this
+                    # function, and assigning it here would make it local to update().
+                    counter_box = counter_text.get_bbox_patch()
+                    if counter_box is not None:
+                        counter_box.set_facecolor("#1e1e1e" if is_dark else "white")
+                    counter_text.set_color("white" if is_dark else "black")
                 counter_text.set_text("\n".join(lines))
             else:
                 counter_text.set_text(f"frame {int(frame)}")
@@ -1672,6 +1828,59 @@ class Visualizer:
             return num_objects
 
     @staticmethod
+    def _declaration_overlay(h5_path, n_rows):
+        """(title lines, plotly shapes, x-axis note) stating a movie's declared pulse and
+        lighting, for a page whose x-axis is the analysis h5's ROW index.
+
+        Words and segments come from plot_wing_and_body, so this page cannot state
+        or place them differently from the PNGs and the flight viewer. Empty when
+        nothing was declared."""
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            import plot_wing_and_body as pwb
+            with h5py.File(h5_path, "r") as h5:
+                pert = pwb.perturbation_info(h5)
+                frames, rate, trig = pwb.frame_axis(h5, n_rows)
+        except Exception as e:
+            print(f"declaration overlay unavailable for {h5_path}: {e}", flush=True)
+            return [], [], ""
+        frames = np.asarray(frames, dtype=float)
+        if not len(frames):
+            return [], [], ""
+        first = float(frames[0])
+        x_note = (f"row index; frame 0 (the camera trigger) is row {int(round(-first))}"
+                  if trig else "row index")
+        if pert is None:
+            return [], [], x_note
+        lines = [s for s in (pwb.pert_window_text(pert, rate),
+                             pwb.lighting_text(pert, rate)) if s]
+        lo, hi = first, float(frames[-1])
+
+        def row(f):
+            return float(f) - first
+
+        shapes = []
+        if pwb.is_perturbed(pert) and pert.get("onset_frame") is not None:
+            end = pert["end_frame"] if pert.get("end_frame") is not None else hi
+            a, b = max(pert["onset_frame"], lo), min(end, hi)
+            if b > a:
+                shapes.append(dict(type="rect", xref="x", yref="paper", x0=row(a), x1=row(b),
+                                   y0=0, y1=1, fillcolor="rgba(214,39,40,0.12)",
+                                   line_width=0, layer="below"))
+        for a, b, kind in pwb.lighting_segments(pert, lo, hi):
+            shapes.append(dict(type="rect", xref="x", yref="paper", x0=row(a), x1=row(b),
+                               y0=0.95, y1=1.0, fillcolor=pwb.LIGHT_COLORS[kind],
+                               opacity=0.9, line_width=0,
+                               label=dict(text=pwb.LIGHT_WORDS[kind],
+                                          font=dict(size=10,
+                                                    color=pwb.LIGHT_TEXT_COLORS[kind]))))
+        off = pert.get("light_off_frame")
+        if pert.get("lighting_regime") == "darkening" and off is not None and lo <= off <= hi:
+            shapes.append(dict(type="line", xref="x", yref="paper", x0=row(off), x1=row(off),
+                               y0=0, y1=1, line=dict(color="black", width=1.5, dash="dashdot")))
+        return lines, shapes, x_note
+
+    @staticmethod
     def plot_all_body_data(h5_path_movie_path):
         print(f"plot all body data for movie:\n{h5_path_movie_path}")
         # convert_to_ms = self.frame_rate / 1000
@@ -1725,7 +1934,8 @@ class Visualizer:
 
         data = [yaw, pitch, roll,yaw_dot, pitch_dot, roll_dot, omega_body[:, 0], omega_body[:, 1], omega_body[:, 2],
                       phi_left, phi_right, psi_left, psi_right, theta_left, theta_right]
-        angles_names = ['yaw', 'pitch', 'roll', 'yaw_dot', 'pitch_dot', 'roll_dot', 'omega_body_x', 'omega_body_y',
+        angles_names = ['yaw', 'pitch (+nose down)', 'roll', 'yaw_dot', 'pitch_dot (+nose down)', 'roll_dot',
+                        'omega_body_x', 'omega_body_y (+nose down)',
                         'omega_body_z', 'phi_left', 'phi_right', 'psi_left', 'psi_right', 'theta_left', 'theta_right']
 
         # 'normalize the data'
@@ -1779,11 +1989,17 @@ class Visualizer:
         #     name=f'right middle frame',
         # ))
 
+        # What the experiment declares about this movie -- pulse and lighting --
+        # as title lines and shapes, so this page states it like every other.
+        decl_lines, decl_shapes, x_note = Visualizer._declaration_overlay(
+            h5_path_movie_path, len(yaw))
         fig.update_layout(
-            title=f'All body data',
-            xaxis_title='Frames',
+            title='All body data' + ''.join(f'<br><sub>{s}</sub>' for s in decl_lines),
+            xaxis_title='Frames' + (f' ({x_note})' if x_note else ''),
             yaxis_title=f'normalized y',
-            legend_title='Legend'
+            legend_title='Legend',
+            shapes=decl_shapes,
+            margin=dict(t=70 + 24 * len(decl_lines)),
         )
         save_name = f'All body data.html'
         dir = os.path.dirname(h5_path_movie_path)

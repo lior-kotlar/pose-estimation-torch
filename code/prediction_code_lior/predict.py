@@ -9,7 +9,8 @@ abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
 sys.path.append(code_directory)
 from utils import (get_start_frame, show_interest_points_with_index, PredictConfig,
-                   get_trigger_frame_info, load_perturbation)
+                   get_trigger_frame_info, load_perturbation,
+                   stamp_declaration)
 from pipeline_timing import record as record_timing, earliest_start
 from plot_wing_and_body import plot_one as plot_movie_figures
 from plot_flight_viewer import make_viewer as make_flight_viewer
@@ -203,12 +204,29 @@ class PredictingManager:
                 # `pert` is None and nothing perturbation-related is written.
                 pert = load_perturbation(box_path, frame_rate)
                 if pert is not None:
-                    print(f"perturbation: {pert['type']} from trigger frame "
-                          f"{pert['onset_frame']}, "
-                          + (f"ends at {pert['end_frame']} "
-                             f"({pert['duration_ms']:g} ms)"
-                             if pert["end_known"] else "duration NOT recorded")
-                          + f"  [{pert['source']}]", flush=True)
+                    if pert["status"] != "perturbed":
+                        print(f"perturbation: this movie is declared "
+                              f"{pert['status'].upper()} "
+                              f"(no window)  [{pert['source']}]", flush=True)
+                    else:
+                        kind = pert['type'] if pert['type_known'] else 'TYPE UNKNOWN'
+                        print(f"perturbation: {kind} from trigger frame "
+                              f"{pert['onset_frame']}, "
+                              + (f"ends at {pert['end_frame']} "
+                                 f"({pert['duration_ms']:g} ms, "
+                                 f"{pert['duration_source']})"
+                                 if pert["end_frame"] is not None
+                                 else "duration NOT recorded")
+                              + f"  [{pert['source']}]", flush=True)
+                if pert is not None:
+                    print(f"lighting: {pert.get('lighting_regime', 'unknown')}"
+                          + (f", light OFF at trigger frame {pert['light_off_frame']}"
+                             if pert.get('light_off_frame') is not None else "")
+                          + ("" if pert.get('lighting_declared') else "  (NOT declared)"),
+                          flush=True)
+                # source.json names what this movie WAS (pulse + lighting), not
+                # only where it came from.
+                stamp_declaration(movie_run_directory_path, pert)
                 movie_hdf5_path, FA = create_movie_analysis_h5(
                     movie, movie_run_directory_path, points_3D_path, smooth=True,
                     trigger_offset=trig_off, frame_rate=frame_rate, source=source,
@@ -218,7 +236,7 @@ class PredictingManager:
                 # here must not abort the movie's prediction.
                 try:
                     csv_path = movie_hdf5_path.replace('.h5', '.csv')
-                    export_analysis_csv(FA, csv_path, trig_off or 0, frame_rate,
+                    export_analysis_csv(FA, csv_path, trig_off, frame_rate,
                                         perturbation=pert)
                 except Exception as e:
                     print(f"analysis CSV export failed: {e}", flush=True)
@@ -226,9 +244,14 @@ class PredictingManager:
                 reprojected = triangulator.get_reprojections(FA.points_3D[FA.first_analysed_frame:], cropzone)
                 From2Dto3D.save_points_3D(movie_run_directory_path, reprojected,
                                           name="points_ensemble_smoothed_reprojected.npy")  # better 2D points
+                # Pass the resolved window rather than letting the mp4 re-read
+                # perturbation.json: otherwise the video and the analysis h5 can
+                # disagree whenever the declaration changed between them.
                 Visualizer.create_movie_mp4(movie_hdf5_path, save_frames=None, mode='SAVE',
                                             reprojected_points_path=reprojected_points_path,
-                                            box_path=box_path, save_path=save_path, rotate=rotate)
+                                            box_path=box_path, save_path=save_path, rotate=rotate,
+                                            trigger_offset=trig_off, frame_rate=frame_rate,
+                                            perturbation=pert)
             except Exception as e:
                 print(f"wasn't able to analyes the movie and reproject the points: {e}")
                 exit(1)

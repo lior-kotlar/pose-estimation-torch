@@ -68,6 +68,7 @@ echo "host        : $(hostname)"
 echo "GPU(s)      : ${CUDA_VISIBLE_DEVICES:-<none>}"
 echo "movie_dir   : $MOVIE_DIR"
 echo "base config : $BASE_CONFIG"
+echo "drop cache  : ${DROP_BOX_CACHE:-0}"
 echo "==========================================="
 
 # Generate a per-task config that points 'data directory' at just this movie.
@@ -100,6 +101,17 @@ print('wrote', '$TMP_CONFIG  (run name: $RUN_NAME, calib:', calib, ', timings:',
 # tailing the log while the array is running).
 python -u code/prediction_code_lior/predict.py "$TMP_CONFIG"
 rc=$?
+
+# Opt-in (DROP_BOX_CACHE=1): delete this movie's saved_box_dir once its
+# prediction has succeeded. It is a pure cache -- predict rebuilds it from the
+# dataset h5 whenever it is missing (see code/prune_old_archive.py) -- and at
+# ~236 kB per frame it is over half of everything a prediction leaves behind.
+# Only reached on success: under `set -e` a failed predict has already exited.
+if [ "${DROP_BOX_CACHE:-0}" = "1" ] && [ -d "$MOVIE_DIR/saved_box_dir" ]; then
+    echo "dropping box cache: $MOVIE_DIR/saved_box_dir" \
+         "($(du -sh --apparent-size "$MOVIE_DIR/saved_box_dir" | cut -f1))"
+    rm -rf "$MOVIE_DIR/saved_box_dir"
+fi
 
 rm -f "$TMP_CONFIG"
 echo "==========================================="

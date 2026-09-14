@@ -17,7 +17,10 @@ re-prediction. Movies whose source movie has since been deleted keep their old v
 listed at the end -- their angles are up to date either way.
 
 The trigger offset, frame rate and provenance are read back out of the existing analysis h5,
-so no other input is needed. The superseded h5/csv/png are moved into superseded_<timestamp>/
+so no other input is needed. The declaration (pulse window AND lighting) is taken from the live
+perturbation.json when one applies (--perturbation-source auto, the default), so an edit to the
+declaration reaches every product without re-predicting; --perturbation-source h5 keeps what the
+old analysis h5 recorded instead. The superseded h5/csv/png are moved into superseded_<timestamp>/
 rather than deleted, so a run can be compared against what it replaced.
 
 Usage:
@@ -51,7 +54,8 @@ from Triangulator import Triangulator
 from Visualizer import Visualizer
 
 from extract_flight_data import FlightAnalysis, create_movie_analysis_h5, export_analysis_csv
-from plot_wing_and_body import plot_one as plot_movie_figures, FIGURE_NAMES
+from plot_wing_and_body import plot_one as plot_movie_figures, FIGURE_NAMES, lighting_info
+from utils import load_perturbation, stamp_declaration
 from plot_flight_viewer import (make_viewer as make_flight_viewer,
                                 OUT_SUFFIX as VIEWER_SUFFIX)
 
@@ -88,7 +92,7 @@ def read_prediction_config(movie_dir):
 
 
 def regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
-                    stamp=None, archive=True, force=False):
+                    stamp=None, archive=True, force=False, perturbation=None):
     """Rewrite the reprojected 2D points and the overlay mp4 from the re-analysed points.
 
     FlightAnalysis decides left from right, so its points_3D can come out in a different
@@ -139,7 +143,8 @@ def regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
                                     reprojected_points_path=staged_path,
                                     box_path=box_path,
                                     save_path=mp4_path, rotate=True,
-                                    trigger_offset=trigger_offset, frame_rate=frame_rate)
+                                    trigger_offset=trigger_offset, frame_rate=frame_rate,
+                                    perturbation=perturbation)
     except BaseException:
         for leftover in (staged_path, mp4_path):
             if os.path.exists(leftover):
@@ -176,7 +181,9 @@ def read_existing_context(movie_dir):
     """
     matches = [f for f in os.listdir(movie_dir) if f.endswith('_analysis_smoothed.h5')]
     if not matches:
-        return None, None, None, None
+        # Five values, matching the unpack in reanalyse(): a movie dir with the
+        # 3D points but no analysis h5 must return cleanly, not ValueError.
+        return None, None, None, None, None
     h5_path = os.path.join(movie_dir, matches[0])
     trigger_offset = frame_rate = None
     source = {}
@@ -211,16 +218,44 @@ def read_perturbation(h5_path):
     """
     try:
         with h5py.File(h5_path, 'r') as hdf:
-            if 'perturbation' not in hdf or not int(hdf['perturbation'][()]):
+            # Key off `perturbation_declared`, not `perturbation`: a movie
+            # declared as an unperturbed CONTROL has perturbation == 0 but is
+            # still declared, and dropping that on every re-analysis would turn
+            # a known control back into an undeclared movie.
+            declared = ('perturbation_declared' in hdf
+                        and bool(int(hdf['perturbation_declared'][()])))
+            has_window = ('perturbation' in hdf and bool(int(hdf['perturbation'][()])))
+            if not declared and not has_window:
                 return None
+            status = (hdf['perturbation_status'][()].decode(errors='replace')
+                      if 'perturbation_status' in hdf
+                      else ('perturbed' if has_window else 'unknown'))
+            if status != 'perturbed':
+                return {'status': status, 'type': 'unknown', 'type_known': False,
+                        'onset_frame': None, 'duration_ms': None,
+                        'duration_source': 'n/a', 'duration_assumed_ms': None,
+                        'duration_note': None, 'end_frame': None,
+                        'end_known': False, 'frame_rate': None,
+                        'movie_key': os.path.basename(os.path.dirname(h5_path)),
+                        'source': f'restored from {os.path.basename(h5_path)}',
+                        **lighting_info(hdf)}
             kind = hdf['perturbation_type'][()] if 'perturbation_type' in hdf else b'unspecified'
             # An absent duration is how "the log never recorded one" is expressed, so carry the
             # absence through rather than defaulting it to zero -- see utils.PERT_UNKNOWN. The
             # onset is known whenever an experiment is declared perturbed, so it is read flat.
             end_known = (bool(int(hdf['perturbation_end_known'][()]))
                          if 'perturbation_end_known' in hdf else False)
+            kind_text = kind.decode() if isinstance(kind, bytes) else str(kind)
+            dsrc = hdf['perturbation_duration_source'][()] if 'perturbation_duration_source' in hdf else None
+            dsrc = (dsrc.decode() if isinstance(dsrc, bytes) else dsrc) if dsrc is not None else None
             return {
-                'type': kind.decode() if isinstance(kind, bytes) else str(kind),
+                # Without 'status' the writer would read this as not perturbed and
+                # drop the window it is restoring.
+                'status': 'perturbed',
+                'type_known': kind_text.strip().lower() not in ('', 'unspecified', 'unknown'),
+                'duration_source': dsrc or ('recorded' if end_known else 'unrecorded'),
+                'movie_key': os.path.basename(os.path.dirname(h5_path)),
+                'type': kind_text,
                 'onset_frame': int(hdf['perturbation_start_frame'][()]),
                 'duration_ms': (float(hdf['perturbation_duration_ms'][()])
                                 if end_known and 'perturbation_duration_ms' in hdf else None),
@@ -228,9 +263,31 @@ def read_perturbation(h5_path):
                               if end_known and 'perturbation_end_frame' in hdf else None),
                 'end_known': end_known,
                 'source': f'restored from {os.path.basename(h5_path)}',
+                **lighting_info(hdf),
             }
     except (OSError, KeyError):
         return None
+
+
+def declaration_from_json(movie_dir, source, frame_rate):
+    """The live perturbation.json's declaration for this movie, or None.
+
+    Found through the source movie's path -- the analysis h5's provenance, else
+    source.json, else the saved member config. load_perturbation needs only that
+    path to find the experiment dir, not the movie file itself."""
+    box = (source or {}).get('box_h5')
+    if not box:
+        try:
+            with open(os.path.join(movie_dir, 'source.json')) as f:
+                box = json.load(f).get('box_h5')
+        except (OSError, json.JSONDecodeError):
+            box = None
+    if not box:
+        try:
+            box = read_prediction_config(movie_dir)[0]
+        except Exception:
+            box = None
+    return load_perturbation(box, frame_rate) if box else None
 
 
 def archive_previous(movie_dir, stamp, names=None):
@@ -241,7 +298,7 @@ def archive_previous(movie_dir, stamp, names=None):
                   or f.endswith('_analysis_smoothed.csv')
                   or f in FIGURE_NAMES
                   or f.endswith(VIEWER_SUFFIX)
-                  or f == 'All body data.html']
+                  or f in ('All body data.html', 'movie_html.html')]
     else:
         doomed = [f for f in names if os.path.exists(os.path.join(movie_dir, f))]
     if not doomed:
@@ -253,10 +310,34 @@ def archive_previous(movie_dir, stamp, names=None):
     return archive_dir
 
 
-def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=False):
+def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=False,
+              pert_source='auto'):
     points_path = os.path.join(movie_dir, POINTS_NAME)
     movie = os.path.basename(movie_dir.rstrip(os.sep))
-    trigger_offset, frame_rate, source, perturbation, _ = read_existing_context(movie_dir)
+    trigger_offset, frame_rate, source, h5_perturbation, _ = read_existing_context(movie_dir)
+    # Provenance normally rides in the analysis h5; an h5 left behind by an
+    # interrupted analysis can lack it, and writing a new one from that would
+    # drop it for good. source.json, written at predict time, holds the same keys.
+    if not source:
+        try:
+            with open(os.path.join(movie_dir, 'source.json')) as f:
+                saved = json.load(f)
+            source = {k: str(saved[k]) for k in PROVENANCE_KEYS if saved.get(k)} or None
+        except (OSError, json.JSONDecodeError):
+            source = None
+    # The live declaration wins under 'auto': it is the only place a lighting
+    # block added after prediction can come from.
+    perturbation, used = h5_perturbation, ('analysis h5' if h5_perturbation else 'none')
+    if pert_source in ('auto', 'json'):
+        live = declaration_from_json(movie_dir, source, frame_rate)
+        if live is not None:
+            perturbation, used = live, live.get('source') or 'perturbation.json'
+        elif pert_source == 'json':
+            perturbation, used = None, 'none (no perturbation.json applies)'
+    print(f"  declaration: {used}"
+          + (f" | status {perturbation.get('status')} | lighting "
+             f"{perturbation.get('lighting_regime', 'unknown')}" if perturbation else ""),
+          flush=True)
 
     # build the analysis first, so a movie that fails keeps the products it already had
     analysis = FlightAnalysis(points_3D_path=points_path, find_auto_correlation=True,
@@ -269,17 +350,19 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
                                           trigger_offset=trigger_offset,
                                           frame_rate=frame_rate, source=source,
                                           perturbation=perturbation)
-    export_analysis_csv(analysis, h5_path.replace('.h5', '.csv'), trigger_offset or 0, frame_rate,
+    export_analysis_csv(analysis, h5_path.replace('.h5', '.csv'), trigger_offset, frame_rate,
                         perturbation=perturbation)
     plot_movie_figures(h5_path, units="frames")
     make_flight_viewer(h5_path)
+    stamp_declaration(movie_dir, perturbation)
 
     video = None
     if with_video:
         # a missing source movie costs the mp4, not the analysis that already succeeded
         try:
             video = regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
-                                     stamp=stamp, archive=archive, force=force_video)
+                                     stamp=stamp, archive=archive, force=force_video,
+                                     perturbation=perturbation)
         except NoSourceMovie as e:
             video = f'skipped (source movie gone: {e})'
 
@@ -308,6 +391,11 @@ def main():
                              'overlay mp4. needs the source box h5 and the calibration, both '
                              'read from the saved member config; movies whose source movie is '
                              'no longer on disk keep their old video and are reported')
+    parser.add_argument('--perturbation-source', choices=('auto', 'json', 'h5'), default='auto',
+                        help="where the declaration (pulse window + lighting) comes from: "
+                             "'json' the experiment's live perturbation.json, 'h5' what the "
+                             "existing analysis h5 recorded, 'auto' (default) the json when "
+                             "one applies, else the h5")
     args = parser.parse_args()
 
     movie_dirs = []
@@ -334,7 +422,8 @@ def main():
             _, (span_l, span_r), video = reanalyse(movie_dir, stamp,
                                                    archive=not args.no_archive,
                                                    with_video=args.with_mp4,
-                                                   force_video=args.force_mp4)
+                                                   force_video=args.force_mp4,
+                                                   pert_source=args.perturbation_source)
             print(f"  psi span: left {span_l:.0f} deg, right {span_r:.0f} deg", flush=True)
             if video is not None:
                 print(f"  video: {video}", flush=True)

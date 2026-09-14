@@ -902,6 +902,23 @@ def find_flip_in_files(movie_dir_path):
         return False
 
 
+# pitch_angle and pitch_dot are nose-DOWN positive -- the right-hand rule about
+# y_body, which points left -- so they share a sign with omega_body about y_body.
+# An analysis h5 records this in a text dataset named PITCH_CONVENTION_KEY. A file
+# written before the convention was fixed has no such dataset and holds the
+# opposite, nose-up sign; multiply what is read by pitch_read_sign to undo that.
+PITCH_CONVENTION = "nose_down_positive"
+PITCH_CONVENTION_KEY = "pitch_convention"
+PITCH_SIGNED_KEYS = ("pitch_angle", "pitch_dot", "pitch_dot_dot")
+
+
+def pitch_read_sign(h5, key):
+    """-1 if `key` is a pitch dataset in a file still on the old nose-up sign, else +1."""
+    if key in PITCH_SIGNED_KEYS and PITCH_CONVENTION_KEY not in h5:
+        return -1
+    return 1
+
+
 # Written next to each movie by process_experiment's prescan; see
 # process_experiment.write_cam_validity_sidecar.
 # Declared by process_experiment.py --perturbation, and read back at predict
@@ -919,8 +936,69 @@ PERT_UNKNOWN = -1
 PERT_BEFORE = 0
 PERT_DURING = 1
 PERT_AFTER = 2
+# A movie the declaration explicitly marks as UNPERTURBED. Distinct from
+# PERT_UNKNOWN: "we know there was no perturbation" is a positive fact and a
+# usable experimental control, while "unknown" is an absence of knowledge.
+PERT_CONTROL = 3
 PERT_STATE_NAMES = {PERT_UNKNOWN: "unknown", PERT_BEFORE: "before",
-                    PERT_DURING: "during", PERT_AFTER: "after"}
+                    PERT_DURING: "during", PERT_AFTER: "after",
+                    PERT_CONTROL: "control"}
+
+# The three per-movie statuses a declaration can assign.
+PERT_STATUSES = ("perturbed", "control", "unknown")
+
+# Applied when a movie is known to be perturbed but the log never recorded how
+# long the pulse lasted. Source: Noam Tsory's MSc thesis, section 4.1.3, which
+# describes the rig as firing "the magnetic perturbation using pre-set duration
+# (7.5 ms)" -- a property of the apparatus, not of any one experiment.
+# It is NEVER applied silently: process_experiment writes the number and its
+# provenance into perturbation.json, load_perturbation reports
+# duration_source == "assumed", and every product carries that word through.
+PERT_DEFAULT_DURATION_MS = 7.5
+
+# LIGHTING -- a second stimulus axis, independent of the magnetic pulse. An
+# experiment can be lit throughout, dark throughout, or have its white light
+# switched OFF during the recording; that switch is a visual perturbation in its
+# own right (Tsory thesis s.5.2), so a movie holding one is a two-stimulus movie
+# even when its coil pulse comes later. Declared in the same perturbation.json,
+# in a "lighting" block that a per-movie entry can override exactly like the
+# pulse. The word "dark" in a directory name can mean either of the two dark
+# regimes, which is precisely why the regime has to be stated rather than read
+# off a name.
+LIGHTING_REGIMES = ("constant_light", "constant_dark", "darkening", "unknown")
+_LIGHTING_ALIASES = {
+    "light": "constant_light", "lit": "constant_light",
+    "constant light": "constant_light",
+    "dark": "constant_dark", "constant_darkness": "constant_dark",
+    "constant dark": "constant_dark", "constant darkness": "constant_dark",
+    "darkening_at_trigger": "darkening", "dark_at_trigger": "darkening",
+    "light_off": "darkening",
+}
+# Per-frame lighting state, the lighting counterpart of PERT_*.
+LIGHT_UNKNOWN = -1
+LIGHT_LIT = 0
+LIGHT_DARK = 1
+LIGHT_STATE_NAMES = {LIGHT_UNKNOWN: "unknown", LIGHT_LIT: "lit", LIGHT_DARK: "dark"}
+# How long the light stays off once the trigger switches it. Tsory thesis
+# s.4.1.3: the trigger turns "off the ambient white light ... and turn on again
+# after 1s". A property of the rig's Arduino program, like the 7.5 ms pulse.
+LIGHT_DEFAULT_RELIGHT_MS = 1000.0
+
+
+def lighting_is_darkening(pert):
+    """True when the light is switched OFF during this movie's timeline."""
+    return (pert is not None and pert.get("lighting_regime") == "darkening"
+            and pert.get("light_off_frame") is not None)
+
+
+def pert_is_perturbed(pert):
+    """True when this movie actually carries a perturbation window.
+
+    The one predicate every consumer should branch on. `load_perturbation`
+    returns a dict for control and unknown movies too -- that is how a mixed
+    experiment declares which of its movies are controls -- so `pert is not
+    None` no longer means "perturbed"."""
+    return pert is not None and pert.get("status") == "perturbed"
 
 
 def resolve_perturbation_path(movie_path):
@@ -938,17 +1016,35 @@ def resolve_perturbation_path(movie_path):
 
 
 def load_perturbation(movie_path, frame_rate=None):
-    """The perturbation window declared for this movie, or None if undeclared.
+    """What the experiment declares about THIS movie, or None if it declares nothing.
 
-    Returns a dict with `onset_frame` (trigger-relative), `duration_ms`,
-    `end_frame` (trigger-relative, None when the duration was never recorded)
-    and `end_known`. The duration is stored in MILLISECONDS and converted here
-    using the movie's own `frame_rate`, so an experiment recorded at more than
-    one frame rate cannot silently acquire the wrong window.
+    Returns None only when no perturbation.json applies (absent, or unreadable).
+    Whenever a declaration is found a dict comes back -- including for a movie
+    the declaration marks as a CONTROL or as UNKNOWN. That is what lets one
+    experiment hold both perturbed and unperturbed movies: `pert is not None`
+    means "declared", and `pert_is_perturbed(pert)` means "perturbed".
 
-    A per-movie entry overrides the experiment-level values, because the parts
-    of one experiment can differ -- ex241220's dark parts ran 7.5 ms and 12 ms
-    off the same declaration.
+    A per-movie entry in `movies` (keyed by the movie's directory basename)
+    overrides the experiment-level block key by key, because the parts of one
+    experiment can differ -- ex241220's dark parts ran 7.5 ms and 12 ms off the
+    same declaration.
+
+    The duration is stored in MILLISECONDS and converted here using the movie's
+    own frame_rate, so an experiment recorded at more than one frame rate cannot
+    silently acquire the wrong window. `end_known` says whether a duration is
+    known at all; `end_frame` is separately None when it could not be located in
+    frames (no frame rate) -- those are different failures and callers that
+    place the boundary must branch on `end_frame is not None`.
+
+    NOTE: a `"usable": false` flag in a movies entry means the movie was
+    excluded from the build. It is NOT a status and is never mapped to one.
+
+    The LIGHTING is resolved from the same file, from a "lighting" block (and a
+    per-movie "lighting" override), into the flat keys `lighting_declared`,
+    `lighting_regime`, `light_off_frame`, `light_on_frame`, `relight_after_ms`,
+    `lighting_note` and `lighting_evidence` -- see _resolve_lighting. They are
+    present on every returned dict, control and unknown movies included: the
+    light is a property of the session, not of whether this fly had a magnet.
     """
     path = resolve_perturbation_path(movie_path)
     if path is None:
@@ -972,29 +1068,213 @@ def load_perturbation(movie_path, frame_rate=None):
                     return src[k]
         return default
 
-    onset = int(pick("onset_trigger_frame", "onset_frame", default=0))
-    duration_ms = pick("duration_ms")
+    status = str(pick("status", default="perturbed")).strip().lower()
+    if status not in PERT_STATUSES:
+        print(f"{path}: unrecognised perturbation status {status!r} for "
+              f"{movie_key}; treating as 'unknown'", flush=True)
+        status = "unknown"
+
+    # A type that was never really stated must not be presented as one.
+    raw_type = pick("type", default=None)
+    type_known = str(raw_type).strip().lower() not in (
+        "", "none", "unspecified", "unknown") if raw_type is not None else False
+
+    onset = duration_ms = None
+    duration_source = "n/a"
+    if status == "perturbed":
+        onset = int(pick("onset_trigger_frame", "onset_frame", default=0))
+        declared = pick("duration_ms")
+        if declared is not None:
+            duration_ms = float(declared)
+            # A declaration may state its own provenance -- a duration copied
+            # from a rig-wide default is NOT a measurement of this experiment,
+            # and only the file that wrote it knows which it is. Inferring
+            # "recorded" from mere presence would launder an assumption into a
+            # fact, so an explicit duration_source always wins.
+            stated = pick("duration_source")
+            duration_source = (str(stated).strip().lower()
+                               if str(stated).strip().lower() in
+                               ("recorded", "assumed", "unrecorded")
+                               else "recorded")
+        elif bool(pick("assume_duration", default=True)):
+            duration_ms = float(pick("duration_assumed_ms",
+                                     default=PERT_DEFAULT_DURATION_MS))
+            duration_source = "assumed"
+        else:
+            duration_source = "unrecorded"
+
     end_frame = None
-    if duration_ms is not None and frame_rate:
+    if duration_ms is not None and onset is not None and frame_rate:
         end_frame = onset + int(round(float(duration_ms) * float(frame_rate) / 1000.0))
+
     return {
-        "type": str(pick("type", default="unspecified")),
+        "status": status,
+        "type": str(raw_type) if raw_type is not None else "unknown",
+        "type_known": type_known,
         "onset_frame": onset,
-        "duration_ms": float(duration_ms) if duration_ms is not None else None,
+        "duration_ms": duration_ms,
+        "duration_source": duration_source,
+        "duration_assumed_ms": (duration_ms if duration_source == "assumed"
+                                else None),
+        "duration_note": pick("duration_status", default=None),
         "end_frame": end_frame,
-        "end_known": end_frame is not None,
+        # "is a duration known at all", independent of whether it could be
+        # located in frames -- see the docstring.
+        "end_known": duration_ms is not None,
+        "frame_rate": float(frame_rate) if frame_rate else None,
+        "movie_key": movie_key,
         "source": path,
+        **_resolve_lighting(doc, over, frame_rate, path, movie_key),
     }
 
 
-def perturbation_frame_labels(frame_numbers, pert):
+def _resolve_lighting(doc, over, frame_rate, path, movie_key):
+    """The lighting half of a declaration, as flat keys for load_perturbation's dict.
+
+    movies[<dir>]["lighting"] overrides the experiment-level "lighting" block
+    key by key. A file with no lighting block anywhere says nothing about the
+    light: that comes back as `lighting_declared` False with regime "unknown",
+    never as "lit".
+
+    For a darkening, `light_off_frame` is trigger-relative and `light_on_frame`
+    is where the light comes back (`relight_after_ms` later, located with this
+    movie's own frame rate -- None when there is no frame rate).
+    """
+    base = doc.get("lighting") or {}
+    mine = (over or {}).get("lighting") or {}
+
+    def pick(key, default=None):
+        for src in (mine, base):
+            if src.get(key) is not None:
+                return src[key]
+        return default
+
+    raw = str(pick("regime", default="unknown")).strip().lower()
+    regime = _LIGHTING_ALIASES.get(raw, raw)
+    if regime not in LIGHTING_REGIMES:
+        print(f"{path}: unrecognised lighting regime {raw!r} for {movie_key}; "
+              f"treating as 'unknown'", flush=True)
+        regime = "unknown"
+
+    off = on = relight_ms = None
+    if regime == "darkening":
+        off_raw = pick("light_off_trigger_frame")
+        off = int(off_raw) if off_raw is not None else None
+        relight_ms = float(pick("relight_after_ms", default=LIGHT_DEFAULT_RELIGHT_MS))
+        if off is not None and frame_rate:
+            on = off + int(round(relight_ms * float(frame_rate) / 1000.0))
+    return {
+        "lighting_declared": bool(base or mine),
+        "lighting_regime": regime,
+        "light_off_frame": off,
+        "light_on_frame": on,
+        "relight_after_ms": relight_ms,
+        "lighting_note": pick("note", default=None),
+        "lighting_evidence": pick("evidence", default=None),
+    }
+
+
+def lighting_frame_labels(frame_numbers, pert, trigger_relative=True):
+    """(state, off_index, on_index): was each trigger-relative frame LIT or DARK.
+
+    Constant regimes need no clock -- every frame is lit, or every frame is
+    dark, whatever the numbering -- so they are labelled even without the
+    trigger. A darkening can only be located in trigger-relative frames; without
+    them, or without a light-off frame, every frame is LIGHT_UNKNOWN.
+
+    DARK is the half-open interval [light_off, light_on), the same convention as
+    DURING for the pulse. A relight that could not be located in frames leaves
+    the frames from the light-off onward UNKNOWN rather than asserting that the
+    light stayed off.
+
+    `off_index` / `on_index` are positions within `frame_numbers`, or -1 when
+    that boundary lies outside it.
+    """
+    f = np.asarray(frame_numbers)
+    regime = (pert or {}).get("lighting_regime") or "unknown"
+    if regime == "constant_light":
+        return np.full(f.shape, LIGHT_LIT, dtype=np.int8), -1, -1
+    if regime == "constant_dark":
+        return np.full(f.shape, LIGHT_DARK, dtype=np.int8), -1, -1
+    off = (pert or {}).get("light_off_frame")
+    if regime != "darkening" or off is None or not trigger_relative:
+        return np.full(f.shape, LIGHT_UNKNOWN, dtype=np.int8), -1, -1
+    on = pert.get("light_on_frame")
+    state = np.full(f.shape, LIGHT_UNKNOWN, dtype=np.int8)
+    state[f < off] = LIGHT_LIT
+    if on is not None:
+        state[(f >= off) & (f < on)] = LIGHT_DARK
+        state[f >= on] = LIGHT_LIT
+
+    def index_of(target):
+        if target is None:
+            return -1
+        hit = np.nonzero(f == target)[0]
+        return int(hit[0]) if len(hit) else -1
+
+    return state, index_of(off), index_of(on)
+
+
+def declaration_summary(pert):
+    """The resolved declaration as two plain dicts, for provenance files."""
+    if pert is None:
+        return {"perturbation": None, "lighting": None}
+    return {
+        "perturbation": {k: pert.get(k) for k in (
+            "status", "type", "type_known", "onset_frame", "end_frame",
+            "duration_ms", "duration_source", "movie_key", "source")},
+        "lighting": {
+            "declared": pert.get("lighting_declared"),
+            "regime": pert.get("lighting_regime"),
+            "light_off_frame": pert.get("light_off_frame"),
+            "light_on_frame": pert.get("light_on_frame"),
+            "relight_after_ms": pert.get("relight_after_ms"),
+            "note": pert.get("lighting_note"),
+        },
+    }
+
+
+def stamp_declaration(run_dir, pert):
+    """Add the resolved pulse + lighting declaration to a movie's source.json.
+
+    source.json says where a movie came from; with this it also says what the
+    movie WAS, so the one small file travelling with the outputs is enough to
+    tell a darkening movie from a constant-dark one."""
+    path = os.path.join(run_dir, "source.json")
+    doc = {}
+    if os.path.isfile(path):
+        try:
+            with open(path) as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            doc = {}
+    doc.update(declaration_summary(pert))
+    try:
+        with open(path, "w") as f:
+            json.dump(doc, f, indent=4, default=str)
+    except OSError as e:
+        print(f"could not update {path}: {e}", flush=True)
+
+
+def perturbation_frame_labels(frame_numbers, pert, trigger_relative=True):
     """(state, start_index, end_index) for a sequence of trigger-relative frames.
 
-    `state` is one int8 per frame (PERT_BEFORE / PERT_DURING / PERT_AFTER, or
-    PERT_UNKNOWN from the onset onward when no duration was recorded). Frames
-    BEFORE the onset stay exactly labelled either way -- the onset is known
-    even when the duration is not, so the pre-perturbation window is never in
-    doubt.
+    `state` is one int8 per frame. For a perturbed movie: PERT_BEFORE /
+    PERT_DURING / PERT_AFTER, or PERT_UNKNOWN from the onset onward when no
+    duration is known. Frames BEFORE the onset stay exactly labelled either way
+    -- the onset is known even when the duration is not.
+
+    DURING is the half-open interval [onset, end): `end_frame` is the first
+    frame that is AFTER the perturbation. Every product must agree on this.
+
+    A movie declared CONTROL is labelled PERT_CONTROL throughout, and one
+    declared UNKNOWN is PERT_UNKNOWN throughout -- neither has a window, so
+    neither has boundaries to index.
+
+    `trigger_relative=False` says the caller could not establish the trigger, so
+    these frame numbers are box indices and the window cannot be located in
+    them. Everything is then PERT_UNKNOWN, which is the honest answer -- the
+    alternative is labelling against a fabricated origin.
 
     `start_index` / `end_index` are positions within `frame_numbers`, or -1
     when that boundary lies outside the built range. That is a normal outcome,
@@ -1002,11 +1282,17 @@ def perturbation_frame_labels(frame_numbers, pert):
     can legitimately begin after the perturbation started.
     """
     f = np.asarray(frame_numbers)
+    if pert.get("status") == "control":
+        return np.full(f.shape, PERT_CONTROL, dtype=np.int8), -1, -1
+    if (not trigger_relative or pert.get("status") != "perturbed"
+            or pert.get("onset_frame") is None):
+        return np.full(f.shape, PERT_UNKNOWN, dtype=np.int8), -1, -1
+
     onset = pert["onset_frame"]
+    end = pert.get("end_frame")
     state = np.full(f.shape, PERT_UNKNOWN, dtype=np.int8)
     state[f < onset] = PERT_BEFORE
-    if pert["end_known"]:
-        end = pert["end_frame"]
+    if end is not None:
         state[(f >= onset) & (f < end)] = PERT_DURING
         state[f >= end] = PERT_AFTER
 
@@ -1015,7 +1301,7 @@ def perturbation_frame_labels(frame_numbers, pert):
         return int(hit[0]) if len(hit) else -1
 
     return (state, index_of(onset),
-            index_of(pert["end_frame"]) if pert["end_known"] else -1)
+            index_of(end) if end is not None else -1)
 
 
 CAM_VALIDITY_SIDECAR = "prescan_cam_validity.npz"

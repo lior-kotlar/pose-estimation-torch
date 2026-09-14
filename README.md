@@ -331,6 +331,15 @@ predict_output/<run_name>/<mov_name>/
 `<run_name>` is the `-J` job name, so all movies of one experiment share a
 parent directory.
 
+Body pitch -- `pitch_angle` and `pitch_dot` in the h5, `body_pitch_deg` in the
+CSV -- is **nose-down positive**: the right-hand rule about `y_body`, which
+points left. It shares its sign with `omega_body[:, 1]` (`q`) and
+`omega_body_dot[:, 1]`, and a fly holding its nose above the horizon reads a
+negative pitch. Analysis files written before this carry no `pitch_convention`
+dataset and hold the opposite sign. The plotting tools here flip those on read;
+the CSV and any other direct reader do not, so re-run `code/reanalyse_movies.py`
+on them.
+
 Body roll -- `roll_angle` and `roll_dot` in the h5, `body_roll_deg` in the CSV --
 is measured only once per wingbeat (about every 73 frames): when both wings are
 spread sideways, the plane of the wing tips gives the fly's left-right axis

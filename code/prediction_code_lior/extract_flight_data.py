@@ -16,7 +16,8 @@ from Visualizer import Visualizer
 from scipy.signal import savgol_filter, find_peaks
 from numpy.polynomial.polynomial import Polynomial
 from utils import (get_start_frame, find_flip_in_files, perturbation_frame_labels,
-                   PERT_STATE_NAMES)
+                   lighting_frame_labels, LIGHT_STATE_NAMES,
+                   PERT_STATE_NAMES, PITCH_CONVENTION, PITCH_CONVENTION_KEY)
 from scipy.spatial.transform import Rotation as R
 import re
 import pandas as pd
@@ -342,12 +343,14 @@ class FlightAnalysis:
         #                                      omega=None)
 
         self.yaw_angle_roni = self.get_body_yaw(self.x_body)
-        self.pitch_angle_roni = self.get_body_pitch(self.x_body)
+        # nose-UP positive, the opposite of pitch_angle, so it stays a local input to the roll
+        # below rather than landing in the h5 as a second "pitch" with the other sign
+        pitch_angle_roni = self.get_body_pitch(self.x_body)
         self.roll_angle_roni = self.get_body_roll(phi=self.yaw_angle_roni,
-                                             theta=self.pitch_angle_roni,
+                                             theta=pitch_angle_roni,
                                              x_body=self.x_body,
                                              yaw=self.yaw_angle_roni,
-                                             pitch=self.pitch_angle_roni,
+                                             pitch=pitch_angle_roni,
                                              start=self.first_y_body_frame,
                                              end=self.end_frame,
                                              y_body=self.y_body)
@@ -447,7 +450,8 @@ class FlightAnalysis:
         # self.frames_confidence_score = self.get_frames_confidence_score()
         # Body roll/pitch/yaw rates. These ARE the components of omega_body -- the
         # standard aerospace names for them, not a second computation. Assigned
-        # after adjust_starting_frame so they carry its NaN padding.
+        # after adjust_starting_frame so they carry its NaN padding. q is nose-down
+        # positive, the same sign as pitch_angle and pitch_dot.
         self.p, self.q, self.r = self.omega_body.T
         # if not validation:
         #     force_body, force_lab, torque_body =  self.get_wings_forces()
@@ -513,7 +517,10 @@ class FlightAnalysis:
 
     @staticmethod
     def get_pitch_from_euler(Rs):
-        return -np.degrees(np.unwrap(np.array([np.arcsin(-r[2, 0]) for r in Rs]), period=np.pi))
+        # The ZYX Euler pitch, arcsin(-R[2, 0]), used as it comes: the right-hand
+        # rule about y_body. y_body points LEFT, so positive is nose-DOWN, the same
+        # sign as q = omega_body about y_body -- a fly flying nose-up reads negative.
+        return np.degrees(np.unwrap(np.array([np.arcsin(-r[2, 0]) for r in Rs]), period=np.pi))
 
     @staticmethod
     def get_roll_from_euler(Rs):
@@ -638,7 +645,7 @@ class FlightAnalysis:
         wings_psi_dot = [self.wings_psi_left_dot, -self.wings_psi_right_dot]
 
         roll_all = self.roll_angle
-        pitch_all = -self.pitch_angle  # minus here
+        pitch_all = self.pitch_angle  # already the ZYX Euler pitch that from_euler('xyz') expects
         yaw_all = self.yaw_angle
         start = np.where(~np.isnan(self.wings_theta_right_dot))[0][0]
         end = np.where(~np.isnan(self.wings_theta_right_dot))[0][-1]
@@ -2298,52 +2305,181 @@ def save_movies_data_to_hdf5(base_path, output_hdf5_path, smooth=True, one_h5_fo
         f"All data saved to {output_hdf5_path}" if one_h5_for_all else "All data saved to individual movie HDF5 files")
 
 
-def write_perturbation_datasets(hdf, frame_index, pert):
-    """Stamp a movie's perturbation window into an open analysis h5.
+def _h5_text(value):
+    """A scalar text dataset value, UTF-8 encoded.
+
+    np.bytes_(str) encodes as ASCII and raises on anything else -- and a
+    declaration's provenance can legitimately quote Hebrew lab sheets. Readers
+    decode with bytes.decode(), whose default is UTF-8, so this round-trips."""
+    if isinstance(value, bytes):
+        return np.bytes_(value)
+    return np.bytes_(str(value).encode("utf-8"))
+
+
+def write_perturbation_datasets(hdf, frame_index, pert, trigger_relative=True):
+    """Stamp what the experiment declares about this movie into an open analysis h5.
 
     Datasets are deleted before being rewritten, so this is safe to apply to an
-    h5 that already carries a window -- a re-analysis of the same movie
-    refreshes it rather than failing on an existing name.
+    h5 that already carries a window -- a re-analysis refreshes it rather than
+    failing on an existing name.
 
-    Datasets written (all trigger-relative unless the name says `_index`):
-      perturbation             1, i.e. this movie is from a perturbation experiment
-      perturbation_type        e.g. "roll"
-      perturbation_start_frame the onset -- always known when declared
-      perturbation_start_index row holding the onset, or -1 if outside this movie
-      perturbation_end_known   0 when the log never recorded a duration
-      perturbation_state       per frame; see utils.PERT_* (-1 == unknown)
-      perturbation_end_frame   \\ only when the duration is known
-      perturbation_end_index    | (an absent end is how "we do not know"
-      perturbation_duration_ms /   is expressed -- see PERT_UNKNOWN)
+    FOUR-STATE CONTRACT. A reader must be able to tell these apart:
+      no `perturbation_declared`            nothing was declared for this movie
+      declared=1, perturbation=1, status=perturbed   it was perturbed
+      declared=1, perturbation=0, status=control     declared UNPERTURBED (a control)
+      declared=1, perturbation=0, status=unknown     declared, status not known
+    `perturbation` stays a strict 0/1 "there is a window to draw here", because
+    every downstream reader branches on its truthiness; the three-way
+    distinction lives in `perturbation_status`.
+
+    Datasets written (frames trigger-relative unless the name says `_index`):
+      perturbation_declared      1 -- a declaration applied to this movie
+      perturbation_status        b"perturbed" / b"control" / b"unknown"
+      perturbation               1 only when there is a window
+      perturbation_type          e.g. b"roll"; b"unknown" when never stated
+      perturbation_type_known    0 when the declaration never named a type
+      perturbation_start_frame   the onset -- always known when perturbed
+      perturbation_start_index   row holding the onset, or -1 if outside this movie
+      perturbation_end_known     0 when no duration is known at all
+      perturbation_end_frame     \ only when the end could be located in frames
+      perturbation_end_index      | (needs both a duration and a frame rate)
+      perturbation_duration_ms   /  written whenever a duration is known
+      perturbation_duration_source   b"recorded" / b"assumed" / b"unrecorded" / b"n/a"
+      perturbation_duration_assumed_ms  only when the duration was ASSUMED
+      perturbation_duration_note b"..." the declaration's own provenance note
+      perturbation_frames_trigger_relative  0 when the trigger could not be
+                                 established, so the window could not be located
+                                 in these rows and every state is `unknown`
+      perturbation_source        b"..." path of the declaration that was applied
+      perturbation_movie_key     b"movN" which per-movie entry matched
+      perturbation_state         per frame; see utils.PERT_* (-1 unknown, 3 control)
     """
-    state, start_idx, end_idx = perturbation_frame_labels(frame_index, pert)
+    state, start_idx, end_idx = perturbation_frame_labels(
+        frame_index, pert, trigger_relative=trigger_relative)
+    perturbed = pert.get("status") == "perturbed"
+
     scalars = {
-        "perturbation": np.int64(1),
-        "perturbation_start_frame": np.int64(pert["onset_frame"]),
-        "perturbation_start_index": np.int64(start_idx),
-        "perturbation_end_known": np.int64(1 if pert["end_known"] else 0),
+        "perturbation_declared": np.int64(1),
+        "perturbation": np.int64(1 if perturbed else 0),
+        "perturbation_type_known": np.int64(1 if pert.get("type_known") else 0),
+        "perturbation_end_known": np.int64(1 if pert.get("end_known") else 0),
+        "perturbation_frames_trigger_relative": np.int64(1 if trigger_relative else 0),
     }
-    if pert["end_known"]:
+    if perturbed:
+        scalars["perturbation_start_frame"] = np.int64(pert["onset_frame"])
+        scalars["perturbation_start_index"] = np.int64(start_idx)
+    if pert.get("duration_ms") is not None:
+        scalars["perturbation_duration_ms"] = float(pert["duration_ms"])
+    if pert.get("duration_assumed_ms") is not None:
+        scalars["perturbation_duration_assumed_ms"] = float(pert["duration_assumed_ms"])
+    # The end is written only when it could actually be located in frames --
+    # a known duration with no frame rate is not a locatable boundary.
+    if pert.get("end_frame") is not None:
         scalars["perturbation_end_frame"] = np.int64(pert["end_frame"])
         scalars["perturbation_end_index"] = np.int64(end_idx)
-        scalars["perturbation_duration_ms"] = float(pert["duration_ms"])
+
+    strings = {
+        "perturbation_status": str(pert.get("status", "unknown")),
+        "perturbation_type": str(pert.get("type", "unknown")),
+        "perturbation_duration_source": str(pert.get("duration_source", "n/a")),
+        "perturbation_duration_note": str(pert.get("duration_note") or ""),
+        "perturbation_source": str(pert.get("source") or ""),
+        "perturbation_movie_key": str(pert.get("movie_key") or ""),
+    }
+
+    # Clear every name this function can write, including ones a PREVIOUS
+    # analysis wrote but this call will not -- otherwise a movie re-declared as
+    # a control keeps the stale end frame of its old perturbed declaration.
+    for name in ("perturbation", "perturbation_declared", "perturbation_status",
+                 "perturbation_type", "perturbation_type_known",
+                 "perturbation_start_frame", "perturbation_start_index",
+                 "perturbation_end_known", "perturbation_end_frame",
+                 "perturbation_end_index", "perturbation_duration_ms",
+                 "perturbation_duration_source", "perturbation_duration_assumed_ms",
+                 "perturbation_duration_note", "perturbation_frames_trigger_relative",
+                 "perturbation_source", "perturbation_movie_key",
+                 "perturbation_state"):
+        if name in hdf:
+            del hdf[name]
+
     for name, value in scalars.items():
-        if name in hdf:
-            del hdf[name]
         hdf.create_dataset(name, data=value)
-    for name in ("perturbation_type", "perturbation_state"):
-        if name in hdf:
-            del hdf[name]
-    hdf.create_dataset("perturbation_type", data=np.bytes_(str(pert["type"])))
+    for name, value in strings.items():
+        hdf.create_dataset(name, data=_h5_text(value))
     hdf.create_dataset("perturbation_state", data=state)
     return state, start_idx, end_idx
+
+
+# Every name write_lighting_datasets can write, so a rewrite clears them all.
+LIGHTING_DATASETS = ("lighting_declared", "lighting_regime", "lighting_darkening",
+                     "lighting_light_off_frame", "lighting_light_off_index",
+                     "lighting_light_on_frame", "lighting_light_on_index",
+                     "lighting_relight_after_ms", "lighting_note", "lighting_evidence",
+                     "lighting_frames_trigger_relative", "lighting_state")
+
+
+def write_lighting_datasets(hdf, frame_index, pert, trigger_relative=True):
+    """Stamp the declared LIGHTING into an open analysis h5, beside the pulse.
+
+    Written under the same condition as the perturbation datasets -- whenever a
+    declaration applies -- so their joint absence means nothing was declared.
+    `lighting_declared` = 0 with regime `unknown` means a declaration applied but
+    said nothing about the light; it does NOT mean the movie was lit.
+
+      lighting_declared          1 when the declaration has a lighting block
+      lighting_regime            b"constant_light" / b"constant_dark" /
+                                 b"darkening" / b"unknown"
+      lighting_darkening         1 when the white light is switched OFF in this
+                                 movie's timeline -- a visual perturbation. Strict
+                                 0/1 "there is a light-off to draw", like
+                                 `perturbation`
+      lighting_light_off_frame   \ darkening only: trigger-relative frame the light
+      lighting_light_off_index   / went off, and its row (-1 when outside this movie)
+      lighting_light_on_frame    \ darkening only, when locatable: the frame it came
+      lighting_light_on_index    / back on, and its row (-1 when outside this movie)
+      lighting_relight_after_ms  darkening only: off-to-on interval
+      lighting_note, lighting_evidence   the declaration's own words
+      lighting_frames_trigger_relative   0 when the trigger was not established,
+                                 so a darkening could not be located in these rows
+      lighting_state             per frame: 0 lit, 1 dark, -1 unknown (utils.LIGHT_*)
+    """
+    state, off_idx, on_idx = lighting_frame_labels(frame_index, pert,
+                                                   trigger_relative=trigger_relative)
+    regime = str(pert.get("lighting_regime") or "unknown")
+    darkening = regime == "darkening" and pert.get("light_off_frame") is not None
+    for name in LIGHTING_DATASETS:
+        if name in hdf:
+            del hdf[name]
+    hdf.create_dataset("lighting_declared",
+                       data=np.int64(1 if pert.get("lighting_declared") else 0))
+    hdf.create_dataset("lighting_regime", data=_h5_text(regime))
+    hdf.create_dataset("lighting_darkening", data=np.int64(1 if darkening else 0))
+    if darkening:
+        hdf.create_dataset("lighting_light_off_frame", data=np.int64(pert["light_off_frame"]))
+        hdf.create_dataset("lighting_light_off_index", data=np.int64(off_idx))
+        if pert.get("relight_after_ms") is not None:
+            hdf.create_dataset("lighting_relight_after_ms",
+                               data=float(pert["relight_after_ms"]))
+        if pert.get("light_on_frame") is not None:
+            hdf.create_dataset("lighting_light_on_frame", data=np.int64(pert["light_on_frame"]))
+            hdf.create_dataset("lighting_light_on_index", data=np.int64(on_idx))
+    hdf.create_dataset("lighting_note", data=_h5_text(str(pert.get("lighting_note") or "")))
+    hdf.create_dataset("lighting_evidence",
+                       data=_h5_text(str(pert.get("lighting_evidence") or "")))
+    hdf.create_dataset("lighting_frames_trigger_relative",
+                       data=np.int64(1 if trigger_relative else 0))
+    hdf.create_dataset("lighting_state", data=state)
+    return state, off_idx, on_idx
 
 
 def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_object=None,
                              trigger_offset=None, frame_rate=None, source=None,
                              perturbation=None):
     if analysis_object is None:
-        FA = FlightAnalysis(points_3D_path, create_html=True)  # Assuming FlightAnalysis is properly defined
+        # movie_html.html is written below, from the finished h5, so that it can
+        # carry the declared pulse and lighting; building it here would write a
+        # copy that knows neither and is then overwritten.
+        FA = FlightAnalysis(points_3D_path, create_html=False)
     else:
         FA = analysis_object
     name = f'{movie}_analysis_smoothed.h5' if smooth else f'{movie}_analysis.h5'
@@ -2390,23 +2526,31 @@ def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_
         # above (same length as points_3D / center_of_mass), and consistent with
         # the counter in the movie and the analysis CSV. Written only when the
         # trigger info is available (see utils.get_trigger_frame_info).
-        if trigger_offset is not None and "frame_index" not in hdf:
-            n = int(np.asarray(FA.center_of_mass).shape[0])
-            first = int(getattr(FA, "first_analysed_frame", 0) or 0)
-            frame_index = trigger_offset + (np.arange(n) - first)
+        # The trigger is what makes a frame number mean something shared with the
+        # mp4 counter and the CSV. Without it the rows are plain box indices.
+        have_trigger = trigger_offset is not None
+        n = int(np.asarray(FA.center_of_mass).shape[0])
+        first = int(getattr(FA, "first_analysed_frame", 0) or 0)
+        frame_index = (int(trigger_offset) if have_trigger else 0) + (np.arange(n) - first)
+
+        if have_trigger and "frame_index" not in hdf:
             hdf.create_dataset("frame_index", data=frame_index.astype(np.int64))
             hdf.create_dataset("trigger_offset", data=np.int64(trigger_offset))
             if frame_rate:
                 hdf.create_dataset("frame_rate", data=float(frame_rate))
                 hdf.create_dataset("time_ms", data=frame_index * 1000.0 / frame_rate)
 
-            # Perturbation window, when the experiment declares one. Written
-            # here because `frame_index` is the only place the two truncations
-            # (the prescan's build range and FlightAnalysis's own trim) have
-            # already been reconciled -- so the window can be expressed against
-            # the rows that actually exist in this file.
-            if perturbation is not None:
-                write_perturbation_datasets(hdf, frame_index, perturbation)
+        # The declaration is stamped whether or not the trigger was found. If it
+        # was not, `frames_trigger_relative=0` is recorded and every state comes
+        # back `unknown` -- the honest answer. Writing nothing at all would make
+        # a movie whose sparse mats went missing indistinguishable from one that
+        # was never part of a perturbation experiment, and the CSV path (which
+        # has no such gate) would then disagree with this file.
+        if perturbation is not None:
+            write_perturbation_datasets(hdf, frame_index, perturbation,
+                                        trigger_relative=have_trigger)
+            write_lighting_datasets(hdf, frame_index, perturbation,
+                                    trigger_relative=have_trigger)
 
         # Which recording this came from. The file is named only after the
         # movie number and frame range, and those repeat across experiments, so
@@ -2415,13 +2559,24 @@ def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_
         if source:
             for key in ("experiment", "movie_dir", "source_movie_dir", "box_h5"):
                 if source.get(key) and key not in hdf:
-                    hdf.create_dataset(key, data=np.bytes_(str(source[key])))
+                    hdf.create_dataset(key, data=_h5_text(str(source[key])))
+
+        # Which sign pitch_angle / pitch_dot carry. Its absence is what marks a file
+        # written under the old nose-up convention, which readers flip on load.
+        hdf.create_dataset(PITCH_CONVENTION_KEY, data=_h5_text(PITCH_CONVENTION))
     print(f"Data saved for {movie} in {movie_hdf5_path}")
     Visualizer.plot_all_body_data(movie_hdf5_path)
+    # The 3D trajectory page, with the landmarks the declaration in the h5 names
+    # (light-off, pulse onset/end) and a title stating both. A failure costs
+    # this one page, not the movie.
+    try:
+        Visualizer.create_movie_plot_from_h5(movie_hdf5_path, FA)
+    except Exception as e:
+        print(f"movie_html.html failed: {e}", flush=True)
     return movie_hdf5_path, FA
 
 
-def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None,
+def export_analysis_csv(FA, csv_path, trigger_offset=None, frame_rate=None,
                         perturbation=None):
     """Write a MATLAB-ready CSV of the per-frame fly state from a FlightAnalysis.
 
@@ -2430,8 +2585,23 @@ def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None,
     Columns:
       - frame                          trigger-relative frame number
       - time_ms                        trigger-relative time (if frame_rate given)
+      - perturbation_*                 present only when the experiment declares
+                                       something about this movie. `_state` is
+                                       per row; the rest are constant per movie
+                                       (each CSV is one movie, so concatenating
+                                       movies keeps the labels with the rows)
+      - frames_from_onset,             per row, relative to the perturbation
+        time_from_onset_ms             onset; empty when the movie is not perturbed
+      - lighting_regime, light_off_frame   constant per movie: constant_light /
+                                       constant_dark / darkening / unknown, and the
+                                       trigger-relative light-off frame (darkening)
+      - light_state                    per row: lit / dark / unknown
+      - frames_from_light_off,         per row, relative to the light-off; empty
+        time_from_light_off_ms         unless the light is switched off in this movie
       - CM_x_mm, CM_y_mm, CM_z_mm      body location (center of mass), lab coords
-      - body_yaw_deg/pitch/roll        body angles
+      - body_yaw_deg/pitch/roll        body angles. pitch is nose-DOWN positive
+                                       (a fly flying nose-up reads negative), the
+                                       sign of the body rate about y_body
       - {left,right}_wing_phi/theta/psi_deg   wing angles
       - gravity_body_x/y/z             the lab "down" direction (unit vector) in
                                        the fly's body axes, which are
@@ -2449,18 +2619,69 @@ def export_analysis_csv(FA, csv_path, trigger_offset=0, frame_rate=None,
     # so array index i is box frame (i - first_analysed_frame); box frame 0 sits
     # at the trigger_offset. Keep the CSV index consistent with the mp4 counter.
     first = int(getattr(FA, "first_analysed_frame", 0) or 0)
-    frame_num = trigger_offset + (np.arange(n) - first)
+    # Without a trigger these are box indices, not trigger-relative numbers, and
+    # nothing may be labelled against them -- see perturbation_frame_labels.
+    trigger_relative = trigger_offset is not None
+    frame_num = (int(trigger_offset) if trigger_relative else 0) + (np.arange(n) - first)
 
     com_mm = com * 1000.0  # meters -> millimeters (lab coordinates)
     data = {"frame": frame_num.astype(int)}
     if frame_rate:
         data["time_ms"] = frame_num * 1000.0 / frame_rate
     # Perturbation state as a word rather than the h5's int8, so the CSV stays
-    # readable in MATLAB without a code table. "unknown" means the onset is
-    # known but the duration was never recorded -- it is not a missing value.
+    # readable in MATLAB without a code table. "unknown" is a real answer (the
+    # duration was never recorded, or the status itself is undeclared), and
+    # "control" means the movie is a declared UNPERTURBED control -- neither is
+    # a missing value. The constant columns repeat the window on every row so a
+    # concatenation of movies still says which window each row belongs to.
     if perturbation is not None:
-        state, _, _ = perturbation_frame_labels(frame_num, perturbation)
+        state, _, _ = perturbation_frame_labels(frame_num, perturbation,
+                                                trigger_relative=trigger_relative)
         data["perturbation_state"] = [PERT_STATE_NAMES[int(s)] for s in state]
+        blank = [""] * n
+        onset = perturbation.get("onset_frame")
+        end_frame = perturbation.get("end_frame")
+        duration = perturbation.get("duration_ms")
+        data["perturbation_status"] = [str(perturbation.get("status", "unknown"))] * n
+        data["perturbation_type"] = [
+            str(perturbation.get("type", "unknown"))
+            if perturbation.get("type_known") else "unknown"] * n
+        data["perturbation_onset_frame"] = ([onset] * n) if onset is not None else blank
+        data["perturbation_end_frame"] = ([end_frame] * n) if end_frame is not None else blank
+        data["perturbation_duration_ms"] = ([duration] * n) if duration is not None else blank
+        data["perturbation_duration_source"] = [
+            str(perturbation.get("duration_source", "n/a"))] * n
+        # Time measured from the perturbation itself -- the axis such an
+        # experiment is actually about, alongside the trigger-relative one.
+        if onset is not None and trigger_relative:
+            from_onset = frame_num - int(onset)
+            data["frames_from_onset"] = from_onset.astype(int)
+            if frame_rate:
+                data["time_from_onset_ms"] = from_onset * 1000.0 / frame_rate
+        else:
+            data["frames_from_onset"] = blank
+            if frame_rate:
+                data["time_from_onset_ms"] = blank
+    # Lighting, the second stimulus axis: the constant regime, a per-row lit/dark
+    # word, and -- when the light is switched off during the movie -- the per-row
+    # time from that switch, the axis a darkening reaction is read on.
+    if perturbation is not None:
+        lstate, _, _ = lighting_frame_labels(frame_num, perturbation,
+                                             trigger_relative=trigger_relative)
+        blank = [""] * n
+        off = perturbation.get("light_off_frame")
+        data["lighting_regime"] = [str(perturbation.get("lighting_regime") or "unknown")] * n
+        data["light_off_frame"] = ([off] * n) if off is not None else blank
+        data["light_state"] = [LIGHT_STATE_NAMES[int(s)] for s in lstate]
+        if off is not None and trigger_relative:
+            from_off = frame_num - int(off)
+            data["frames_from_light_off"] = from_off.astype(int)
+            if frame_rate:
+                data["time_from_light_off_ms"] = from_off * 1000.0 / frame_rate
+        else:
+            data["frames_from_light_off"] = blank
+            if frame_rate:
+                data["time_from_light_off_ms"] = blank
     data["CM_x_mm"] = com_mm[:, 0]
     data["CM_y_mm"] = com_mm[:, 1]
     data["CM_z_mm"] = com_mm[:, 2]

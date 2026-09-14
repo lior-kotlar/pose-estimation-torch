@@ -161,7 +161,9 @@ from verify_calibration import (
     collect_measurements,
     per_cam_errors,
 )
-from utils import (PERTURBATION_FILE, get_trigger_frame_info, load_perturbation)
+from utils import (PERTURBATION_FILE, PERT_DEFAULT_DURATION_MS,
+                   LIGHTING_REGIMES, LIGHT_DEFAULT_RELIGHT_MS,
+                   get_trigger_frame_info, load_perturbation)
 from find_mirror_cam import detect_mirror_cam, print_hypothesis_table
 
 
@@ -954,29 +956,99 @@ def run_perturbation_declaration(input_dir: str, args, dry_run: bool) -> "dict |
         dur = pert.get("duration_ms")
         print(f"  keeping the existing declaration: {path}")
         print(f"    type    : {pert.get('type', 'unspecified')}")
+        print(f"    status  : {pert.get('status', 'perturbed')} (experiment default)")
         print(f"    onset   : trigger frame "
               f"{pert.get('onset_trigger_frame', pert.get('onset_frame', 0))}")
+        src = pert.get("duration_source")
         print(f"    duration: {f'{dur:g} ms' if dur is not None else 'NOT RECORDED'}"
+              + (f" ({src})" if dur is not None and src else "")
               + ("" if dur is not None else " -> frames from the onset on will "
                                             "be labelled 'unknown'"))
+        light = doc.get("lighting") or {}
+        if light:
+            off = light.get("light_off_trigger_frame")
+            print(f"    lighting: {light.get('regime', 'unknown')}"
+                  + (f", light OFF at trigger frame {off}" if off is not None else ""))
+        else:
+            print("    lighting: NOT DECLARED (no 'lighting' block) -> every "
+                  "product will say LIGHTING NOT DECLARED")
+        # A hand-authored file can mark individual movies as controls; that is
+        # exactly the case the CLI cannot express, so surface it here rather
+        # than letting a mixed experiment look uniform at prep time.
+        per_movie = doc.get("movies") or {}
+        if per_movie:
+            counts = {}
+            for entry in per_movie.values():
+                st = str((entry or {}).get("status", pert.get("status", "perturbed")))
+                counts[st] = counts.get(st, 0) + 1
+            summary = ", ".join(f"{n} {st}" for st, n in sorted(counts.items()))
+            print(f"    per-movie: {len(per_movie)} entries -> {summary}")
         print(f"  (pass --perturbation-force to replace it with the CLI values)")
         return doc
 
+    def _movie_list(raw):
+        return [m.strip() for m in str(raw or "").split(",") if m.strip()]
+
+    controls = _movie_list(getattr(args, "perturbation_control_movies", ""))
+    unknowns = _movie_list(getattr(args, "perturbation_unknown_movies", ""))
+    assume = not getattr(args, "no_perturbation_assume_duration", False)
+    assumed_ms = getattr(args, "perturbation_assumed_duration_ms",
+                         PERT_DEFAULT_DURATION_MS)
+    if args.perturbation_duration_ms is not None:
+        duration_source = "recorded"
+    elif assume:
+        duration_source = "assumed"
+    else:
+        duration_source = "unrecorded"
+
     doc = {
         "experiment": os.path.basename(input_dir.rstrip(os.sep)),
+        "schema_version": 3,
         "source": "declared by process_experiment.py --perturbation",
         "perturbation": {
             "type": args.perturbation_type,
+            "status": getattr(args, "perturbation_status", "perturbed"),
             "onset_trigger_frame": args.perturbation_onset_frame,
             "onset_status": ("Trigger-relative: frame 0 is the hardware trigger. "
                              "Exact for every movie -- the build range is "
                              "reconciled against it downstream via frame_index."),
             "duration_ms": args.perturbation_duration_ms,
-            "duration_status": ("recorded" if args.perturbation_duration_ms is not None
-                                else "NOT RECORDED -- frames from the onset onward "
-                                     "are labelled 'unknown' rather than guessed"),
+            "duration_source": duration_source,
+            "assume_duration": assume,
+            "duration_assumed_ms": assumed_ms,
+            "duration_status": (
+                "RECORDED: taken from the experiment log."
+                if args.perturbation_duration_ms is not None else
+                (f"ASSUMED: no duration in the log; {assumed_ms:g} ms applied as "
+                 f"the declared default (duration_assumed_ms). This is the rig's "
+                 f"pre-set, NOT a measurement of this experiment."
+                 if assume else
+                 "NOT RECORDED -- frames from the onset onward are labelled "
+                 "'unknown' rather than guessed")),
         },
     }
+    # The lighting: a second stimulus axis, independent of the pulse.
+    regime = getattr(args, "lighting_regime", "unknown") or "unknown"
+    lighting = {"regime": regime}
+    if regime == "darkening":
+        lighting["light_off_trigger_frame"] = (args.light_off_frame
+                                               if args.light_off_frame is not None else 0)
+        lighting["relight_after_ms"] = args.relight_after_ms
+    lighting["note"] = (getattr(args, "lighting_note", None) or
+                        ("NOT DECLARED on the command line -- every product will "
+                         "say LIGHTING UNKNOWN until it is." if regime == "unknown"
+                         else "declared via --lighting-regime"))
+    doc["lighting"] = lighting
+    # Per-movie exceptions: the one thing the flat CLI block cannot express.
+    per_movie = {}
+    for m in controls:
+        per_movie[m] = {"status": "control",
+                        "evidence": "declared via --perturbation-control-movies"}
+    for m in unknowns:
+        per_movie[m] = {"status": "unknown",
+                        "evidence": "declared via --perturbation-unknown-movies"}
+    if per_movie:
+        doc["movies"] = per_movie
     if dry_run:
         print(f"  would write {path}")
         print(f"    {json.dumps(doc['perturbation'])}")
@@ -989,60 +1061,101 @@ def run_perturbation_declaration(input_dir: str, args, dry_run: bool) -> "dict |
     print(f"    type={args.perturbation_type}  "
           f"onset=trigger frame {args.perturbation_onset_frame}  "
           f"duration={f'{dur:g} ms' if dur is not None else 'NOT RECORDED'}")
+    print(f"    lighting={doc['lighting']['regime']}"
+          + (f"  light off at trigger frame {doc['lighting']['light_off_trigger_frame']}"
+             if 'light_off_trigger_frame' in doc['lighting'] else ""))
     return doc
 
 
 def report_perturbation_coverage(movies: list, dry_run: bool) -> None:
-    """Say, per movie, whether the built range actually contains the onset.
+    """Per-movie status counts, and whether each built range contains the onset.
 
-    The prescan picks its range from fly visibility and knows nothing about the
-    perturbation, so a movie can legitimately start after the onset -- and then
-    no frame in it is labelled 'before'. Surfacing the count here means it is
-    visible before the GPU array runs, instead of being discovered as a hole in
-    the analysis much later."""
+    Two separate things are reported because an experiment can now be MIXED:
+    how many movies are perturbed / control / status-unknown / undeclared, and
+    -- for the perturbed ones -- whether the built range actually holds the
+    onset. The prescan picks its range from fly visibility and knows nothing
+    about the perturbation, so a movie can legitimately start after the onset
+    and then have no pre-perturbation baseline. Surfacing both here means they
+    are visible before the GPU array runs rather than discovered later as a
+    hole in the analysis."""
     if dry_run:
         print("\n(dry-run: would report perturbation coverage)")
         return
     print("\n===== PERTURBATION COVERAGE =====")
-    n_have = n_unknown = 0
+    n_have = n_unreadable = 0
+    n_control = n_status_unknown = n_undeclared = 0
     late, early = [], []
+    onsets = {}                      # onset -> count, so a per-part file reports both
+    regimes = {}                     # lighting regime -> count
     for movie_dir, mn in movies:
         h5 = find_movie_h5(movie_dir)
         if h5 is None:
             continue
         trig_off, frame_rate = get_trigger_frame_info(h5)
         pert = load_perturbation(h5, frame_rate)
-        if pert is None or trig_off is None:
-            n_unknown += 1
+        if pert is None:
+            n_undeclared += 1
+            continue
+        regime = pert.get("lighting_regime", "unknown")
+        if regime == "darkening" and pert.get("light_off_frame") is not None:
+            regime = f"darkening at trigger frame {pert['light_off_frame']}"
+        elif not pert.get("lighting_declared"):
+            regime = "NOT DECLARED"
+        regimes[regime] = regimes.get(regime, 0) + 1
+        if pert["status"] == "control":
+            n_control += 1
+            continue
+        if pert["status"] != "perturbed" or pert["onset_frame"] is None:
+            n_status_unknown += 1
+            continue
+        if trig_off is None:
+            n_unreadable += 1
             continue
         try:
             with h5py.File(h5, "r") as f:
                 n_frames = int(f["cropzone"].shape[0])
         except OSError:
-            n_unknown += 1
+            n_unreadable += 1
             continue
-        last = trig_off + n_frames - 1
         onset = pert["onset_frame"]
+        onsets[onset] = onsets.get(onset, 0) + 1
+        last = trig_off + n_frames - 1
         if trig_off <= onset <= last:
             n_have += 1
         elif trig_off > onset:
             late.append(f"mov{mn}({trig_off}..{last})")
         else:
             early.append(f"mov{mn}({trig_off}..{last})")
-    print(f"  onset (trigger frame {pert['onset_frame']}) inside the built "
-          f"range: {n_have} movie(s)")
+
+    print(f"  declared perturbed : {n_have + len(late) + len(early)} movie(s)")
+    if n_control:
+        print(f"  declared CONTROL   : {n_control} movie(s) (no perturbation)")
+    if n_status_unknown:
+        print(f"  status UNKNOWN     : {n_status_unknown} movie(s)")
+    if n_undeclared:
+        print(f"  no declaration     : {n_undeclared} movie(s)")
+    if onsets:
+        # A per-movie/per-part declaration can carry more than one onset, so
+        # name them all rather than whichever movie happened to come last.
+        where = ", ".join(f"frame {o} ({c} movie(s))"
+                          for o, c in sorted(onsets.items()))
+        print(f"  onset(s) declared  : {where}")
+        print(f"  onset inside the built range: {n_have} movie(s)")
     # The two ways of missing the onset are opposite problems and only one of
     # them costs you a baseline, so they are worth separating.
     if late:
-        print(f"  starts AFTER the onset: {len(late)} movie(s) — no "
+        print(f"  starts AFTER the onset: {len(late)} movie(s) - no "
               f"pre-perturbation frames, so no within-movie baseline:")
         print("    " + ", ".join(late))
     if early:
-        print(f"  ends BEFORE the onset: {len(early)} movie(s) — entirely "
+        print(f"  ends BEFORE the onset: {len(early)} movie(s) - entirely "
               f"pre-perturbation:")
         print("    " + ", ".join(early))
-    if n_unknown:
-        print(f"  could not determine: {n_unknown} movie(s)")
+    if n_unreadable:
+        print(f"  could not determine: {n_unreadable} movie(s)")
+    if regimes:
+        print("  lighting           : " + ", ".join(
+            f"{r} ({c} movie(s))" for r, c in sorted(regimes.items())))
 
 
 def write_good_movies_manifest(input_dir: str, movies: list,
@@ -1409,8 +1522,36 @@ def main() -> None:
                         f"{PERTURBATION_FILE} beside calibration.h5. Predict "
                         "reads it and stamps every analysis h5 / CSV / mp4 "
                         "with the perturbation window.")
-    p.add_argument("--perturbation-type", default="unspecified",
-                   help="what the perturbation was, e.g. 'roll' or 'yaw'")
+    p.add_argument("--perturbation-type", default="unknown",
+                   help="what the perturbation was, e.g. 'roll' or 'yaw'. "
+                        "Left at 'unknown' the products SAY so rather than "
+                        "implying a type that was never recorded.")
+    p.add_argument("--perturbation-status", default="perturbed",
+                   choices=("perturbed", "control", "unknown"),
+                   help="the experiment-level default status (default: "
+                        "perturbed). Per-movie exceptions go in the movies "
+                        "block -- see --perturbation-control-movies.")
+    p.add_argument("--perturbation-control-movies", default="",
+                   help="comma-separated movie dirs that are UNPERTURBED "
+                        "controls, e.g. 'mov16,mov24'. One experiment can hold "
+                        "both perturbed and control movies (a chamber where "
+                        "only some flies carried a magnet); this is how that "
+                        "is declared.")
+    p.add_argument("--perturbation-unknown-movies", default="",
+                   help="comma-separated movie dirs whose perturbation status "
+                        "is NOT KNOWN. Their frames are labelled 'unknown' "
+                        "rather than assumed either way.")
+    p.add_argument("--perturbation-assumed-duration-ms", type=float,
+                   default=PERT_DEFAULT_DURATION_MS,
+                   help="duration applied when a movie is perturbed but the "
+                        f"log recorded no duration (default: "
+                        f"{PERT_DEFAULT_DURATION_MS} ms, the rig's pre-set). "
+                        "It is recorded as duration_source='assumed' and every "
+                        "product carries that word, so it is never silent.")
+    p.add_argument("--no-perturbation-assume-duration", action="store_true",
+                   help="do NOT fall back to the assumed duration; leave an "
+                        "unrecorded duration unrecorded, so frames from the "
+                        "onset on stay 'unknown'.")
     p.add_argument("--perturbation-onset-frame", type=int, default=0,
                    help="trigger-relative frame at which the perturbation "
                         "starts (default: 0, i.e. it fires on the trigger)")
@@ -1418,6 +1559,20 @@ def main() -> None:
                    help="how long the perturbation lasted, in ms. OMIT when "
                         "the log never recorded it: frames from the onset on "
                         "are then labelled 'unknown' rather than guessed.")
+    p.add_argument("--lighting-regime", default="unknown", choices=LIGHTING_REGIMES,
+                   help="the white light during the session: constant_light, "
+                        "constant_dark, or darkening (switched OFF during the "
+                        "recording -- a visual perturbation). Written into "
+                        f"{PERTURBATION_FILE}'s 'lighting' block. Left at "
+                        "'unknown', every product SAYS the lighting is unknown.")
+    p.add_argument("--light-off-frame", type=int, default=None,
+                   help="darkening only: trigger-relative frame at which the "
+                        "light is switched off (default 0, i.e. on the trigger)")
+    p.add_argument("--relight-after-ms", type=float, default=LIGHT_DEFAULT_RELIGHT_MS,
+                   help="darkening only: how long the light stays off (default "
+                        f"{LIGHT_DEFAULT_RELIGHT_MS:g} ms, the rig's Arduino setting)")
+    p.add_argument("--lighting-note", default=None,
+                   help="free text recorded as the lighting block's provenance")
     p.add_argument("--perturbation-force", action="store_true",
                    help=f"overwrite an existing {PERTURBATION_FILE}. Without "
                         "this an existing file is validated and kept, so a "

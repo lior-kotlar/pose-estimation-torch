@@ -78,6 +78,7 @@ echo "  easywand    : $EASYWAND"
 echo "  cam         : $CAM"
 echo "  predict cfg : $PRED_CONFIG"
 echo "  timings     : $TIMINGS_PATH"
+echo "  drop cache  : ${DROP_BOX_CACHE:-0}  (1 = predict tasks delete saved_box_dir on success)"
 echo "==========================================="
 
 # Step 1 — data prep. Per-movie timings get appended to TIMINGS_PATH.
@@ -105,7 +106,17 @@ fi
 N=$(wc -l < "$MANIFEST")
 echo "Manifest $MANIFEST has $N movie(s); submitting predict array."
 
+# Extra sbatch options for the predict array, from the environment, e.g.
+#   PREDICT_SBATCH_ARGS="-p catfish,salmon --gres=gpu:1 --mem=96g --cpus-per-task=12"
+# predict_array.sh's #SBATCH defaults (256g, 32 CPUs, an L40S on salmon) are
+# sized for full 5500-frame movies and can sit behind a deep salmon backlog;
+# command-line options override them. Word-split on purpose.
+read -r -a PREDICT_ARGS <<< "${PREDICT_SBATCH_ARGS:-}"
+if [ ${#PREDICT_ARGS[@]} -gt 0 ]; then
+    echo "  predict sbatch overrides: ${PREDICT_ARGS[*]}"
+fi
 sbatch -J "$RUN_NAME" \
        --array=0-$((N-1))%${ARRAY_CONCURRENCY} \
+       "${PREDICT_ARGS[@]}" \
        sbatch_files/predict_array.sh \
        "$MANIFEST" "$PRED_CONFIG" "$TIMINGS_PATH"
