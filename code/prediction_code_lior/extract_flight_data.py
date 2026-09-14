@@ -8,7 +8,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 import matplotlib.pyplot as plt
 import h5py
-from scipy.interpolate import interp1d
+from scipy.interpolate import CubicSpline
 from scipy.signal import medfilt
 from scipy.interpolate import make_smoothing_spline
 from scipy.signal import medfilt
@@ -79,6 +79,12 @@ PHI_SAVGOL = {"window_length": 21, "polyorder": 4}
 LEFT = 0
 RIGHT = 1
 NUM_TIPS_EACH_SIZE_Y_BODY = 10
+# the frequency at which the spline joining the once-per-wingbeat y_body measurements keeps half
+# the amplitude of a roll wiggle (join_y_body_measurements). the measurements come at the ~219 Hz
+# wingbeat, so nothing above ~110 Hz is there to keep; 90 Hz keeps the push and recovery of a
+# roll perturbation while passing near, rather than exactly through, measurements that scatter
+# by ~0.25 deg
+Y_BODY_ROLLOFF_HZ = 90
 WINGS_JOINTS_INDS = [7, 15]
 WING_TIP_IND = 2
 UPPER_PLANE_POINTS = [0, 1, 2, 6]
@@ -2006,30 +2012,27 @@ class FlightAnalysis:
             points = np.concatenate((left, right), axis=0)
             wing_tips_plane = self.fit_plane(points)[0]
             plane_normal = wing_tips_plane[:-1]
+            # the fitted normal has no sign of its own. the stroke plane tilts ~50 deg forward of
+            # x_body (get_stroke_planes assumes 45), so point the normal forward: normal x x_body
+            # is then the fly's left whichever wing the pose calls left. taking the sign from the
+            # left wing's span instead turned y_body 180 deg wherever the wings were labelled the
+            # wrong way round (12 of 2431 measurements over 112 movies, one run lasting 80 ms)
+            if np.dot(plane_normal, self.x_body[ind]) < 0:
+                plane_normal = -plane_normal
             y_body = np.cross(plane_normal, self.x_body[ind])
             y_body = y_body / np.linalg.norm(y_body)
-            left_span = self.left_wing_span[ind]
-            if np.dot(y_body, left_span) < 0:
-                y_body = - y_body
             y_bodies.append(y_body)
             # self.plot_plane_and_points(ind, wing_tips_plane, points, y_body)
             pass
         y_bodies = np.array(y_bodies)
         all_y_bodies = np.zeros_like(self.x_body)
         first_y_body_frame = np.min(idx4StrkPln)
-        end = np.max(idx4StrkPln)
+        # end is exclusive and one past the last measurement, so the last one is inside the window
+        # rather than just outside it, and every [first_y_body_frame:end] slice downstream holds it
+        end = np.max(idx4StrkPln) + 1
         x = np.arange(first_y_body_frame, end)
-        kind = 'linear' if len(idx4StrkPln) == 2 else 'quadratic'
         assert len(idx4StrkPln) >= 2, "there must be more then 2 indices for the y body calculation"
-        f1 = interp1d(idx4StrkPln, y_bodies[:, 0], kind=kind)
-        f2 = interp1d(idx4StrkPln, y_bodies[:, 1], kind=kind)
-        f3 = interp1d(idx4StrkPln, y_bodies[:, 2], kind=kind)
-        Ybody_inter = np.vstack((f1(x), f2(x), f3(x))).T
-
-        window_length = min(73 * 2, len(Ybody_inter))
-        Ybody_inter = FlightAnalysis.savgol_smoothing(Ybody_inter[:, np.newaxis, :], lam=1, polyorder=1,
-                                                      window_length=window_length, median_kernel=1)
-        Ybody_inter = np.squeeze(Ybody_inter)
+        Ybody_inter = FlightAnalysis.join_y_body_measurements(idx4StrkPln, y_bodies, x)
         Ybody_inter = normalize(Ybody_inter, axis=1, norm='l2')
         all_y_bodies[first_y_body_frame:end, :] = Ybody_inter
         # make sure that the all_y_bodies are (1) unit vectors and (2) perpendicular to x_body
@@ -2044,6 +2047,30 @@ class FlightAnalysis:
         # first_y_body_frame = 0
         # end = self.num_frames - 1
         return y_bodies_corrected, first_y_body_frame, end
+
+    @staticmethod
+    def join_y_body_measurements(frames_measured, y_measured, frames):
+        """y_body on every frame of `frames`, joined from its measurements at `frames_measured`.
+
+        y_body is measured once per wingbeat (see choose_span), so everything in between is a
+        drawing choice. A smoothing spline passes near each measurement -- within the ~0.25 deg
+        they scatter by -- instead of forcing through all of them, which overshoots between
+        measurements (by ~3 deg at the bottom of a fast roll). It keeps half the amplitude of a
+        roll wiggle at Y_BODY_ROLLOFF_HZ. The quadratic interp1d + 146-frame savgol this
+        replaces missed the measurements by up to 5 deg, flattened the first and last wingbeat
+        into straight lines (savgol's 'interp' edges) and shifted y_body half a frame (even
+        window). make_smoothing_spline needs 5 points, so fewer measurements are joined by a
+        plain cubic (a straight line through 2).
+        """
+        if len(frames_measured) < 5:
+            return CubicSpline(frames_measured, y_measured, axis=0)(frames)
+        spacing = np.median(np.diff(frames_measured))
+        # per frame the fit term weighs ~1/spacing and the curvature penalty ~lam * w^4, so a
+        # wiggle at angular frequency w keeps half its amplitude where the two balance
+        w = 2 * np.pi * Y_BODY_ROLLOFF_HZ / SAMPLING_RATE
+        lam = 1.0 / (spacing * w ** 4)
+        return np.column_stack([make_smoothing_spline(frames_measured, y_measured[:, j], lam=lam)(frames)
+                                for j in range(3)])
 
     def choose_span(self):
         dotspanAx_wing1 = self.row_wize_dot(self.right_wing_span, self.x_body)

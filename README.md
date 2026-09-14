@@ -331,6 +331,18 @@ predict_output/<run_name>/<mov_name>/
 `<run_name>` is the `-J` job name, so all movies of one experiment share a
 parent directory.
 
+Body roll -- `roll_angle` and `roll_dot` in the h5, `body_roll_deg` in the CSV --
+is measured only once per wingbeat (about every 73 frames): when both wings are
+spread sideways, the plane of the wing tips gives the fly's left-right axis
+`y_body`. Every other frame comes from a smoothing spline through those
+measurements (`join_y_body_measurements`), and frames before the first or after
+the last measurement are NaN. So the roll rate `p` (`omega_body[:, 0]`) and
+above all the roll acceleration `omega_body_dot[:, 0]` are only partly
+measured: about half of the roll acceleration's size depends on how the
+measurements are joined, and nothing shorter than a wingbeat or two is
+resolved. Don't read a peak roll acceleration during a perturbation pulse as a
+measured value.
+
 ---
 
 ## 7. Training

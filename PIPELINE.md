@@ -273,6 +273,18 @@ parent). Per-movie/per-step timings accumulate in the experiment's
 `pipeline_timings.csv` (`predict`, `plot`, `viewer`, `total` rows joined on
 `mov<N>`).
 
+Body roll -- `roll_angle` and `roll_dot` in the h5, `body_roll_deg` in the CSV --
+is measured only once per wingbeat (about every 73 frames): when both wings are
+spread sideways, the plane of the wing tips gives the fly's left-right axis
+`y_body`. Every other frame comes from a smoothing spline through those
+measurements (`join_y_body_measurements`), and frames before the first or after
+the last measurement are NaN. So the roll rate `p` (`omega_body[:, 0]`) and
+above all the roll acceleration `omega_body_dot[:, 0]` are only partly
+measured: about half of the roll acceleration's size depends on how the
+measurements are joined, and nothing shorter than a wingbeat or two is
+resolved. Don't read a peak roll acceleration during a perturbation pulse as a
+measured value.
+
 ---
 
 ## 4. Quick sanity checks & standalone tools
@@ -302,6 +314,13 @@ These power the pipeline but are runnable on their own:
 
 # 3D check of the gravity ("down") vector: body triad + gravity every k frames
 .env/bin/python code/plot_gravity_body.py <dir> -k 100
+
+# Re-run the ensemble step for movies predicted before the pose models' wing labels were
+# aligned (Predictor2D.harmonize_wing_labels). CPU only, from the saved per-model candidates;
+# installs the new 3D points only where nothing got worse, then re-analyses. --dry-run lists
+# which movies would change at all.
+.env/bin/python code/realign_ensemble.py --list <manifest> --dry-run
+sbatch --array=1-$(wc -l < <manifest>) sbatch_files/realign_ensemble_array.sh <manifest>
 
 # Interactive viewer: the fly flying through the lab frame, scrubbable, beside
 # two panels of analysis signals (--rows for more) -- time series, or one wing's
