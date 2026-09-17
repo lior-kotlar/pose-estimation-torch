@@ -2,9 +2,9 @@
 # pipeline.sh
 #
 # End-to-end orchestrator for one freshly-imported experiment:
-#   1. run process_experiment.py here in this CPU job (clean, prescan, flip,
-#      build, verify, write manifest, append per-step timings to
-#      <input_dir>/pipeline_timings.csv).
+#   1. run process_experiment.py here in this CPU job (raw movies, clean,
+#      prescan, flip, build, verify, write manifest, append per-step timings
+#      to <input_dir>/pipeline_timings.csv).
 #   2. if a non-empty manifest is produced, submit predict_array.sh as a
 #      separate sbatch job, sized exactly to the manifest, named after this
 #      job (so the array's per-task output directory and timing rows all
@@ -33,7 +33,7 @@
 #SBATCH -p glacier
 #SBATCH --mem=64g
 #SBATCH --cpus-per-task=4
-#SBATCH --time=06:00:00
+#SBATCH --time=12:00:00
 #SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 #SBATCH --mail-type=FAIL
 

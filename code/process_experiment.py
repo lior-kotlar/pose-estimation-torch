@@ -4,6 +4,13 @@ process_experiment.py
 
 End-to-end wrapper around the pose-estimation data-prep pipeline. Drives:
 
+    0. RAW MOVIE — give every mov<N>/ holding a *_sparse.mat its raw movie,
+       <movie>_raw_fr30_skip1.mp4 beside the mats: the camera views tiled,
+       every frame (matlab/+VideoEditing/JoinSparses.m). Runs before anything
+       else and on every movie, including ones with the wrong number of mats
+       or that a later step drops. A movie that already has one is left
+       alone; a failure is reported and the run goes on. MATLAB's output is
+       captured to `<movie_dir>/raw_movie.log`.
     1. CLEAN — delete extraneous files left over from Roni's hull-reconstruction
        project: *.csv, desktop.ini, hull_op/ and Segmentation/ folders.
     2. PRESCAN — scan source *_sparse.mat files; flag movies where the fly is
@@ -63,6 +70,7 @@ Common options:
     --no-verify             skip the verification step (it runs by default)
     --verify-only           skip clean / prescan / flip / build; just verify
                             existing h5 + calibration files
+    --skip-raw-movies       don't build the raw movies that are missing
     --skip-clean            skip the cleanup step
     --skip-prescan          skip the source-mat fly-visibility prescan
     --prescan-only          run only the prescan, then exit
@@ -326,6 +334,121 @@ def detect_num_cams(movies: list, override: "int | None" = None) -> int:
               f"*_sparse.mat found per movie dir")
         return override
     return detected
+
+
+# ---------------------------------------------------------------------------
+# Raw movie step
+# ---------------------------------------------------------------------------
+JOIN_SPARSES_DIR = os.path.join(REPO_ROOT, "matlab")
+# JoinSparses names the movie <movie>_raw_fr<fps>_skip<skip>.mp4 and renames
+# it into place only once complete, so any match is a whole movie.
+RAW_MOVIE_GLOB = "*_raw_fr*_skip*.mp4"
+# Budget for one raw movie. A 5500-frame movie measured ~6.5 min (30 s loading
+# the mats, 3 min drawing, 3 min in ffmpeg, two movies sharing four CPUs), so
+# this is ~9x: a slow node is never killed, a hang does not eat the walltime.
+RAW_MOVIE_TIMEOUT = 3600
+RAW_MOVIE_LOG = "raw_movie.log"
+
+
+def find_raw_movie(movie_dir: str) -> "str | None":
+    """The movie's raw mp4 (see RAW_MOVIE_GLOB), or None if it has none."""
+    found = sorted(glob.glob(os.path.join(movie_dir, RAW_MOVIE_GLOB)))
+    return found[0] if found else None
+
+
+def is_movie_dir(d: str) -> bool:
+    """A directory named mov<N> holding at least one *_sparse.mat. Any count
+    qualifies: a movie missing a camera's export still gets a raw movie."""
+    return (os.path.isdir(d) and parse_movie_num(d) is not None
+            and count_sparse_mats(d) > 0)
+
+
+def _natural_key(path: str) -> list:
+    """Sort mov2 before mov10."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", path)]
+
+
+def find_movie_dirs(root: str, recursive: bool = False) -> list:
+    """Movie dirs at root: root itself if it is one, else its mov<N> children.
+    With recursive, every movie dir anywhere below root instead."""
+    root = os.path.abspath(root)
+    if is_movie_dir(root):
+        return [root]
+    if not recursive:
+        subs = (os.path.join(root, n) for n in os.listdir(root))
+        return sorted((d for d in subs if is_movie_dir(d)), key=_natural_key)
+    found = []
+    for dirpath, dirnames, _ in os.walk(root):
+        if is_movie_dir(dirpath):
+            found.append(dirpath)
+            dirnames[:] = []            # a movie dir holds no movies
+        else:
+            # hidden dirs are staging areas such as .build_tmp
+            dirnames[:] = [n for n in dirnames if not n.startswith(".")]
+    return sorted(found, key=_natural_key)
+
+
+def make_raw_movie(movie_dir: str, dry_run: bool) -> int:
+    """Build one movie's raw mp4 with JoinSparses. MATLAB's output goes to
+    <movie_dir>/raw_movie.log. Returns MATLAB's exit code."""
+    cmd = (f"addpath('{JOIN_SPARSES_DIR}'); "
+           f"VideoEditing.JoinSparses('{os.path.abspath(movie_dir)}');")
+    return matlab_batch(cmd, dry_run,
+                        log_path=None if dry_run else os.path.join(
+                            movie_dir, RAW_MOVIE_LOG),
+                        timeout=RAW_MOVIE_TIMEOUT)
+
+
+def run_raw_movies(movie_dirs: list, dry_run: bool,
+                   timings: "list | None" = None) -> list:
+    """Give every movie dir a raw movie, building only the missing ones.
+
+    process_experiment runs this before any other step, on every movie dir it
+    is handed -- including ones a later step drops -- so every movie that
+    enters the pipeline leaves with a raw movie. A failure is reported and
+    never stops the run. Returns the movie dirs left without one.
+
+    Each build's (movie, step, started, ended) is appended to `timings` rather
+    than written to the ledger here: CLEAN, which runs after this, deletes
+    every *.csv in the experiment dir, the ledger included."""
+    print("\n===== RAW MOVIE =====")
+    n_have = n_built = n_todo = 0
+    failed = []
+    for movie_dir in movie_dirs:
+        existing = find_raw_movie(movie_dir)
+        if existing:
+            print(f"  {movie_dir}: has {os.path.basename(existing)}")
+            n_have += 1
+            continue
+        print(f"\n-- {movie_dir}: no raw movie, "
+              f"{'would build' if dry_run else 'building'}")
+        if dry_run:
+            n_todo += 1
+            continue
+        t0 = time.time()
+        rc = make_raw_movie(movie_dir, dry_run)
+        t1 = time.time()
+        made = find_raw_movie(movie_dir)
+        if rc == 0 and made:
+            print(f"   saved: {made} ({t1 - t0:.0f} s)")
+            if timings is not None:
+                timings.append((f"mov{parse_movie_num(movie_dir)}",
+                                "raw_movie", t0, t1))
+            n_built += 1
+        else:
+            if rc == 0:
+                print("   MATLAB exited 0 but no raw movie appeared")
+            failed.append(movie_dir)
+    if dry_run:
+        print(f"\nRaw movies: {n_have} already there, {n_todo} would be built.")
+        return []
+    print(f"\nRaw movies: {n_have} already there, {n_built} built, "
+          f"{len(failed)} failed.")
+    if failed:
+        print("Failed: " + ", ".join(failed))
+        print(f"  (see {RAW_MOVIE_LOG} in each movie dir; nothing else "
+              f"depends on the raw movie, so the run goes on)")
+    return failed
 
 
 # ---------------------------------------------------------------------------
@@ -1459,6 +1582,10 @@ def main() -> None:
                    help="override the camera count (normally detected from "
                         "the number of *_sparse.mat per movie dir; the old "
                         "lab rig had 3, the current one has 4)")
+    p.add_argument("--skip-raw-movies", action="store_true",
+                   help="don't give movies without one a raw movie (the "
+                        "camera views tiled into one mp4 beside the mats, "
+                        "otherwise built before any other step)")
     p.add_argument("--skip-clean", action="store_true")
     p.add_argument("--skip-prescan", action="store_true",
                    help="skip the pre-build sparse-mat scan that filters out "
@@ -1600,6 +1727,16 @@ def main() -> None:
         print(f"  argv:      {' '.join(sys.argv)}")
         print(f"================================================================")
 
+        # First, before detect_mode drops movies without 3-4 mats and the
+        # camera-count check can abort the run, so every movie handed to the
+        # pipeline gets its raw movie whatever happens to it afterwards.
+        raw_timings = []
+        if args.skip_raw_movies:
+            print("\n===== RAW MOVIE =====\n  skipped (--skip-raw-movies)")
+        else:
+            run_raw_movies(find_movie_dirs(input_dir), args.dry_run,
+                           timings=raw_timings)
+
         mode, movies = detect_mode(input_dir, args.dry_run)
         # Single-movie mode may have renamed the input dir to canonical 'mov<N>';
         # follow it so clean / verify / report all target the right path.
@@ -1614,6 +1751,8 @@ def main() -> None:
         print(f"timings ledger: {timings_path}")
 
         if args.verify_only:
+            for row in raw_timings:
+                record_timing(timings_path, *row)
             run_verify(input_dir, mode, movies, args.verify_threshold,
                        args.dry_run, timings_path=timings_path,
                        min_intersection=args.verify_min_intersection,
@@ -1621,6 +1760,10 @@ def main() -> None:
         else:
             if not args.skip_clean:
                 run_clean(input_dir, mode, movies, args.dry_run)
+            # CLEAN deletes every *.csv here, the ledger included, so the
+            # raw-movie rows go in only now.
+            for row in raw_timings:
+                record_timing(timings_path, *row)
 
             # Prescan runs before FLIP so we don't waste time flipping cams
             # of movies we won't process. It also computes the per-movie build

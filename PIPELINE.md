@@ -7,8 +7,8 @@ cluster.
 
 There are two layers:
 
-1. **Prep** — clean, prescan, mirror-flip, build h5s, verify calibration, and
-   write a manifest of good movies. CPU-only.
+1. **Prep** — give every movie a raw mp4, clean, prescan, mirror-flip, build
+   h5s, verify calibration, and write a manifest of good movies. CPU-only.
 2. **Predict** — one GPU job-array task per good movie: 2D detection,
    2D→3D triangulation, smoothing, an mp4, and wing-angle plots.
 
@@ -89,9 +89,9 @@ sbatch -J 2023_mov101to110 sbatch_files/pipeline.sh \
 
 What happens:
 
-1. The CPU prep job runs `process_experiment.py` (clean → prescan → mirror
-   check → flip → build → verify → manifest), appending per-step timings to
-   `<input_dir>/pipeline_timings.csv`.
+1. The CPU prep job runs `process_experiment.py` (raw movies → clean →
+   prescan → mirror check → flip → build → verify → manifest), appending
+   per-step timings to `<input_dir>/pipeline_timings.csv`.
 2. If `manifests/good_movies_<experiment_name>.txt` ends up non-empty, the job
    submits `predict_array.sh` as a **separate** GPU array job, sized to the
    manifest and named after `-J` so every task lands under one run directory.
@@ -114,7 +114,9 @@ Two environment variables tune the predict array without editing any script
 Prep itself needs little memory (peak ~1.8 GB) but can run long: builds are
 serial across experiments (concurrent prep jobs stall each other on MATLAB), so
 chain experiments with `--dependency=afterany:<previous job>` and raise
-`--time` for large ones — `pipeline.sh` defaults to 6 h.
+`--time` for large ones — `pipeline.sh` defaults to 12 h. The first prep of an
+experiment also builds every movie's raw movie, ~6 min a movie; later runs find
+them and skip the step.
 
 > The `<experiment_name>` you pass to `-J` should match the input dir's basename
 > (e.g. `101to110`) so the manifest the prep step writes
@@ -154,6 +156,7 @@ Useful flags (see `--help` for the full list):
 | `--cam auto` | let the mirror check pick the camera to flip |
 | `--no-mirror-check` | skip the pre-flip verification (removes the guard) |
 | `--skip-clean / --skip-flip / --skip-build` | skip individual stages |
+| `--skip-raw-movies` | don't build the raw movies that are missing (built by default, before every other stage) |
 | `--perturbation` | declare this a perturbation experiment (see below) |
 | `--perturbation-type` | e.g. `roll`, `yaw` |
 | `--perturbation-onset-frame N` | trigger-relative onset (default 0) |
@@ -161,6 +164,8 @@ Useful flags (see `--help` for the full list):
 | `--dry-run` | print what would happen, change nothing |
 
 Outputs of prep:
+- one `<movie>_raw_fr30_skip1.mp4` per movie dir, beside its mats (the raw
+  movie, built only where there was none; MATLAB's output in `raw_movie.log`),
 - one `mov_<n>_<start>_<end>_ds_*tc_*tj.h5` per movie (the dataset h5),
 - one `<movie_dir>/prescan_cam_validity.npz` per movie (which cams saw the
   whole fly at each built frame),
@@ -454,6 +459,14 @@ These power the pipeline but are runnable on their own:
 # Flip the mirror cam's sparse mat in place (single or batch)
 .env/bin/python code/flip_sparse_cam_mat.py <movies_dir> --cam cam1 --dry-run
 
+# Raw movies: every mov<N>/ under a folder (sub-folders included) without a
+# <movie>_raw_fr30_skip1.mp4 gets one -- the step prep runs first. A big tree
+# goes on a CPU job array: each task takes its own share, so tasks never overlap, and
+# re-submitting only fills in what is still missing (~6 min a movie).
+.env/bin/python code/make_raw_movies.py <folder> --dry-run
+sbatch -J raw_<name> --array=0-19 --gres=gpu:0 --mem=16g --mail-type=FAIL \
+    sbatch_files/sbatch_configurable.sh code/make_raw_movies.py <folder>
+
 # Wing-angle + body angular acceleration plots from an analysis h5 (or a dir of them).
 # The x-axis is trigger-relative, or zeroed on the perturbation onset when the
 # movie declares one (--origin trigger keeps the mp4 counter's numbering).
@@ -483,7 +496,8 @@ sbatch --array=1-$(wc -l < <manifest>) sbatch_files/realign_ensemble_array.sh <m
 
 MATLAB build/calibration scripts (driven by `code/build_experiment.sh`, but
 overridable from the CLI) live in `matlab/` and addpath into the vendored
-`micro-flight-lab-master/` for `HullReconstruction`.
+`micro-flight-lab-master/` for `HullReconstruction`. The raw-movie renderer is
+`matlab/+VideoEditing/JoinSparses.m`.
 
 ---
 

@@ -37,7 +37,7 @@ for mov=[71]
     
     fileNames={[parhOfSparses,movdir,movie{1}];[parhOfSparses,movdir,movie{2}];[parhOfSparses,movdir,movie{3}];[parhOfSparses,movdir,movie{4}]};
     
-    VideoEditing.Join4Sparses(fileNames,30,25,'skip',1)
+    VideoEditing.JoinSparses(fileNames,30,25,'skip',1)
     catch
         continue
     end

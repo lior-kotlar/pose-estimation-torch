@@ -33,7 +33,7 @@ for mov=[6]
         end
         
         fileNames={[parhOfSparses,movdir,movie{1}];[parhOfSparses,movdir,movie{2}];[parhOfSparses,movdir,movie{3}]};
-        VideoEditing.Join3Sparses(fileNames,30,25)
+        VideoEditing.JoinSparses(fileNames,30,25)
     catch
         continue
     end

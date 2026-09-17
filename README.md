@@ -38,8 +38,9 @@ Turning raw footage into 3D flight data has three stages:
    (per camera)          (prep / MATLAB build)                 (predict / GPU)
 ```
 
-1. **Prepare** — clean, scan, mirror-flip, and build each movie into a single
-   `.h5`, plus one shared `calibration.h5` from the camera calibration.
+1. **Prepare** — give each movie a raw mp4, then clean, scan, mirror-flip, and
+   build each movie into a single `.h5`, plus one shared `calibration.h5` from
+   the camera calibration.
    → [Section 5](#5-preparing-new-movies-for-prediction)
 2. **Predict** — an **ensemble** of trained 2D-landmark CNNs runs on each movie;
    the 2D points are triangulated into 3D, smoothed, rendered to an mp4, and
@@ -59,7 +60,7 @@ directly except for quick tests.
 |------|-----------|
 | `code/training_code/` | Training: `train.py`, `Network.py`, `Preprocessor.py`, `Datasets.py`, `Losses.py`, `Callbacks.py`, `constants.py` |
 | `code/prediction_code_lior/` | Prediction: `predict.py`, `Predictor.py`, `Triangulator.py`, `From_2D_to_3D.py`, `extract_flight_data.py`, `Visualizer.py` |
-| `code/process_experiment.py` | One-command movie prep (clean → prescan → flip → build → verify → manifest) |
+| `code/process_experiment.py` | One-command movie prep (raw movie → clean → prescan → flip → build → verify → manifest) |
 | `code/build_experiment.sh` | Drives the MATLAB scripts that build `.h5` movies + `calibration.h5` |
 | `code/*.py` (misc) | Standalone tools — see [Section 8](#8-standalone--utility-tools) |
 | `train_configurations/*.json` | Training configs (hyperparameters, model type, data path) |
@@ -67,7 +68,7 @@ directly except for quick tests.
 | `prediction_models/<name>/` | The prediction ensemble: one folder per model (`best_model.pt` + `model.json`), auto-discovered |
 | `code/register_prediction_model.py` | Register (graduate) a trained model into `prediction_models/` |
 | `sbatch_files/*.sh` | SLURM job scripts (train, predict, pipeline) |
-| `matlab/` | MATLAB scripts for building `.h5` movies, calibration, and datasets |
+| `matlab/` | MATLAB scripts for building `.h5` movies, calibration, datasets, and raw movies (`+VideoEditing/JoinSparses.m`) |
 | `micro-flight-lab-master/` | Vendored lab MATLAB utilities (Hull reconstruction, Cine→sparse, …) |
 | `train_output/`, `predict_output/` | Run outputs (gitignored) |
 | `logs/` | SLURM stdout/stderr (`%x_%J.out/.err`, gitignored) |
@@ -124,10 +125,12 @@ Override the GPU/partition at submit time when needed, e.g.
 
 ### 3.3 MATLAB
 
-The **build** step of movie prep calls MATLAB (`matlab -batch ...`) to convert
-sparse `.mat` movies into `.h5` and to build `calibration.h5`. Make sure
-`matlab` is on your `PATH` (or set `MATLAB_BIN`). Everything *after* the build
-step is pure Python.
+The **raw movie** and **build** steps of movie prep call MATLAB (`matlab -batch
+...`): the first renders each movie's raw mp4, the second converts sparse `.mat`
+movies into `.h5` and builds `calibration.h5`. Make sure `matlab` is on your
+`PATH` (or set `MATLAB_BIN`), and `ffmpeg` too: MATLAB on Linux cannot write
+mp4, so the raw movie is encoded with ffmpeg. Everything *after* the build step
+is pure Python.
 
 ---
 
@@ -230,7 +233,9 @@ sbatch --gres=gpu:0 -J prep_101to110 sbatch_files/sbatch_configurable.sh \
     --easywand <easywand.mat> --cam <cam> [flags]
 ```
 
-What it does, in order: **clean** (remove leftover project files) → **prescan**
+What it does, in order: **raw movie** (every movie without one gets a
+`<movie>_raw_fr30_skip1.mp4` beside its mats: the camera views tiled, every
+frame, built even for movies a later step drops) → **clean** (remove leftover project files) → **prescan**
 (drop movies where the fly isn't visible in all 4 cams long enough) → **flip**
 the mirror cam → **build** the `.h5` movies + `calibration.h5` (MATLAB) →
 **verify** (reprojection-error sanity check) → write
@@ -245,6 +250,7 @@ Useful flags (`--help` for all):
 | `--verify-only` / `--no-verify` | run only / skip the reprojection check |
 | `--verify-threshold PX` | flag movies whose reprojection error exceeds PX (default 15) |
 | `--skip-clean` / `--skip-flip` / `--skip-build` | skip individual stages |
+| `--skip-raw-movies` | don't build the raw movies that are missing |
 | `--dry-run` | print what would happen, change nothing |
 
 **Always review** `<input_dir>/process_report.txt` (prescan + verify transcript)
@@ -474,6 +480,18 @@ These power the pipeline but are runnable on their own:
 
 # Build h5 movies + calibration.h5 directly via MATLAB (used by prep):
 code/build_experiment.sh <input_dir> <easywand.mat> [--max-frames N]
+
+# Raw movies: each mov<N>/'s sparse mats (1-4 cams) tiled into one mp4 beside
+# them, <movie>_raw_fr30_skip1.mp4, every frame, with the trigger-relative frame
+# number and time on screen. Prep builds them first thing; this fills in every
+# movie dir under a folder (sub-folders included) that lacks one.
+.env/bin/python code/make_raw_movies.py <folder> [--dry-run]
+# a big tree on a CPU job array; each task takes its own share (~6 min a movie):
+sbatch -J raw_<name> --array=0-19 --gres=gpu:0 --mem=16g --mail-type=FAIL \
+    sbatch_files/sbatch_configurable.sh code/make_raw_movies.py <folder>
+# one movie straight from MATLAB; after the folder: output fps, quality, then
+# 'skip' (every Nth frame, default 1) and 'outDir' (default: the movie folder)
+matlab -batch "addpath('matlab'); VideoEditing.JoinSparses('<movie_dir>',30,90,'skip',1)"
 ```
 
 Other analysis helpers live in `code/` (`data_analysis.py`, `comparison.py`,
