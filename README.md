@@ -497,6 +497,16 @@ matlab -batch "addpath('matlab'); VideoEditing.JoinSparses('<movie_dir>',30,90,'
 Other analysis helpers live in `code/` (`data_analysis.py`, `comparison.py`,
 `collect_analysis_h5.py`, `pipeline_timing.py`).
 
+**Collecting the analysis h5 files.** `code/collect_analysis_h5.py <src> collected_h5` gathers
+every `*_analysis_smoothed.h5` into one folder per experiment, named from each movie's own
+provenance (`collected_h5/Tsory/ex210825_dark_yaw_t0/`, `collected_h5/roni_dark/2023_08_06_40ms/`),
+skipping `bad_signal`/`bad_wings` and every `superseded_*` archive; a changed file replaces the
+old one, which moves to `superseded_<time>/`. `--flat` restores the single-folder layout.
+
+**Re-analysing predictions kept on a PC.** Predicted movies stored off the cluster are
+re-analysed where they are, then collected and uploaded to `collected_h5` automatically:
+see [LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md), written for lab members new to the repo.
+
 ---
 
 ## 9. Tips & troubleshooting

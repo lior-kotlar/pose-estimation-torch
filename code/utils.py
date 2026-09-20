@@ -1050,7 +1050,7 @@ def load_perturbation(movie_path, frame_rate=None):
     if path is None:
         return None
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             doc = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         print(f"could not read {path}: {e}; treating the experiment as "

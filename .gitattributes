@@ -1,0 +1,2 @@
+# Windows batch files must keep CRLF line ends; never let git convert them
+*.bat -text

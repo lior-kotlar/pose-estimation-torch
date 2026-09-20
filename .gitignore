@@ -209,6 +209,12 @@ __marimo__/
 .vscode/
 train_output/debug_outputs/
 predict_output/
+collected_h5/
+# written by code/local_reanalysis.py when run from a checkout
+local_reanalysis_settings.json
+declarations_cache/
+reports/
+BUNDLE_COMMIT
 inference_datasets/
 training_datasets/
 logs/

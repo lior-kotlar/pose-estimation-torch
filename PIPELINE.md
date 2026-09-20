@@ -372,6 +372,12 @@ N=$(wc -l < manifests/reanalyse_X.txt)
 sbatch -J reanalyse_X --array=0-$((N-1))%40 sbatch_files/reanalyse_array.sh manifests/reanalyse_X.txt
 ```
 
+A whole experiment also runs as one job on one node: `--jobs N` re-analyses N movies at once,
+`--only-stale` skips movies whose products the current code and declaration already made (so a
+re-run resumes), and `--dry-run` is a preflight that writes nothing. Movies kept on a PC are
+re-analysed there, collected and uploaded to `collected_h5` with no cluster job at all; see
+[LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md).
+
 ### 2b. Predict only (movies already built)
 
 ```bash

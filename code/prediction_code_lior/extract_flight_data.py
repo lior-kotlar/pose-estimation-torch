@@ -1846,17 +1846,15 @@ class FlightAnalysis:
         x_body, y_body, z_body = (x_body[start_frame:end_frame],
                                   y_body[start_frame:end_frame],
                                   z_body[start_frame:end_frame])
+        Rs = np.stack([x_body, y_body, z_body], axis=-1)
         AC = np.zeros(T)
         AC[0] = 1
         for df in range(1, T):
-            xb, yb, zb = x_body[:-df], y_body[:-df], z_body[:-df]
-            Rs = np.stack([xb, yb, zb], axis=-1)
-
-            xb_pair, yb_pair, zb_pair = x_body[df:], y_body[df:], z_body[df:]
-            Rs_pair = np.stack([xb_pair, yb_pair, zb_pair], axis=-1)
-
-            angels_radiance = np.array(
-                [FlightAnalysis.get_rotation_axis_angle(Rs[i], Rs_pair[i]) for i in range(Rs.shape[0])])
+            # get_rotation_axis_angle for every frame pair at this lag in one batched call. it
+            # was a per-pair Python loop, O(frames^2) calls, and three quarters of a movie's
+            # analysis time; the same matmul -> trace -> arccos gives bit-identical values
+            R = np.matmul(Rs[df:], np.swapaxes(Rs[:-df], 1, 2))
+            angels_radiance = np.arccos((np.trace(R, axis1=1, axis2=2) - 1) / 2)
             cosines = np.cos(angels_radiance)
             AC[df] = np.mean(cosines)
         return AC

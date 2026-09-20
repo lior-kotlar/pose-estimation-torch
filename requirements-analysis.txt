@@ -1,0 +1,25 @@
+# What code/reanalyse_movies.py and code/collect_analysis_h5.py need, and nothing
+# for training or prediction -- for re-analysing predicted movies on a machine
+# other than the cluster (see LOCAL_REANALYSIS.md). Python 3.11, like the
+# cluster's .env.
+#
+# Pinned to the versions in requirements.txt so the analysis computes the same
+# numbers wherever it runs; pip resolves their own dependencies.
+#
+# torch is here only because utils.py imports it (and training_code.Losses) at
+# module level; the analysis never calls it. On Windows the PyPI wheel is the
+# CPU build. On Linux, install it from the CPU index first so pip does not pull
+# the CUDA libraries:
+#   pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+h5py==3.14.0
+matplotlib==3.10.6
+moviepy==2.2.1
+numpy==2.2.6
+opencv-python==4.12.0.88
+pandas==2.3.3
+plotly==6.3.1
+scikit-image==0.25.2
+scikit-learn==1.7.2
+scipy==1.16.1
+sympy==1.14.0
+torch==2.8.0

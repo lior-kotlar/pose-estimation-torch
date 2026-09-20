@@ -1610,7 +1610,9 @@ def render(h5_path, out_path, step, trail, cdn, rows):
             # never rescanned.
             .replace("@@PAYLOAD@@", json.dumps(payload, allow_nan=False)))
 
-    with open(out_path, "w") as f:
+    # utf-8, as the page's <meta charset> declares: the inlined plotly.js carries CJK calendar
+    # names, which the locale encoding cannot hold on Windows
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     return out_path
 
