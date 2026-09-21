@@ -26,9 +26,14 @@ result only where nothing got worse, brings the new 3D points back, and re-analy
 It needs an account that may write to the cluster, so only the pipeline's owner can run it.
 
 Everything it talks to the cluster about goes through ssh to code/local_reanalysis_server.py in
-the cluster's copy of the project, one connection per step. Movies of experiments the cluster
-does not know are fine: they keep the declaration their old h5 recorded, and are collected under
-the experiment their own records name, or local_only/<folder> when they name none.
+the cluster's copy of the project, one connection per step. None of it runs on the login gateway:
+every command is handed to slurm with srun, which runs it on a compute node (see on_node and the
+srun_flags setting), and only the login itself, and the one line that adds this PC's ssh key
+during setup, happen on the gateway.
+
+Movies of experiments the cluster does not know are fine: they keep the declaration their old h5
+recorded, and are collected under the experiment their own records name, or local_only/<folder>
+when they name none.
 """
 import argparse
 import datetime as dt
@@ -73,7 +78,13 @@ DEFAULT_SETTINGS = {
     'collected_h5': '',
     # 0: half the processor threads, one movie each
     'jobs': 0,
+    # Nothing this PC asks for runs on the login gateway: every command is handed to slurm,
+    # which places it on a compute node. Emptying this runs them on the login host instead.
+    'srun_flags': '--ntasks=1 --cpus-per-task=1 --mem=4g --time=2:00:00 --gres=gpu:0 '
+                  '--chdir=/tmp --job-name=pose_pc',
 }
+# slurm is not always on a login shell's PATH; this is where moriah keeps it
+SLURM_BIN = '/vol/slurm/moriah/bindir/bin'
 SERVER_HELPER = 'code/local_reanalysis_server.py'
 UPLOAD_LEDGER = '.uploaded.json'
 # realignment: what a movie's ensemble is made of, and what re-running it leaves behind
@@ -152,8 +163,9 @@ def destination_writable(settings):
     command = (f'd={dest}; while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname "$d"); done; '
                'if [ -w "$d" ]; then echo WRITABLE; else echo READONLY; fi')
     try:
-        proc = remote(settings, command, stdout=subprocess.PIPE)
-        out, _ = proc.communicate(timeout=120)
+        proc = remote(settings, on_node(settings, command, attempts=3),
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        out, _ = proc.communicate(timeout=600)
     except (OSError, subprocess.SubprocessError, Problem):
         return None
     if proc.returncode != 0:
@@ -163,6 +175,39 @@ def destination_writable(settings):
 
 def collected_root(settings):
     return settings['collected_h5'] or os.path.join(HOME, 'collected_h5')
+
+
+def on_node(settings, command, attempts=1):
+    """`command`, wrapped so that slurm runs it on a compute node.
+
+    The lab's login gateway is for logging in, not for working, so everything this PC asks the
+    cluster to do -- reading the declarations, checking a file in, tarring up the code, running
+    the helper -- is handed to srun, which queues it and runs it on whichever node is free. srun
+    passes stdin and stdout straight through, so the tar streams work as they did; its own
+    progress messages go to stderr, where they cannot get into the data.
+
+    A node sometimes comes up without the lab filesystem mounted (the automount expires under
+    load), which would fail a command for no reason of its own. So the node waits for the project
+    to appear before starting, and a command that neither reads from this PC nor streams its
+    answer back may be given to slurm again, which usually lands it somewhere else."""
+    flags = (settings.get('srun_flags') or '').strip()
+    if not flags:
+        return command
+    project = shlex.quote(settings['server_project'])
+    wait = (f'P={project}; n=0; while [ ! -d "$P" ] && [ $n -lt 30 ]; do ls -d "$P" >/dev/null 2>&1; '
+            'sleep 2; n=$((n+1)); done; '
+            'if [ ! -d "$P" ]; then echo "$(hostname) cannot see $P -- either the lab '
+            'filesystem is not mounted there, or the server_project setting is wrong" >&2; '
+            'exit 75; fi; ')
+    launcher = ('if command -v srun >/dev/null 2>&1; then _srun=srun; '
+                f'else _srun={SLURM_BIN}/srun; fi; ')
+    step = f'"$_srun" {flags} /bin/sh -c {shlex.quote(wait + command)}'
+    if attempts > 1:
+        # only the unmounted node is worth another node; anything else is the command's own
+        # answer and is passed back as it is
+        return launcher + (f'for _try in $(seq {attempts}); do {step}; _rc=$?; '
+                           '[ $_rc -ne 75 ] && exit $_rc; done; exit $_rc')
+    return launcher + step
 
 
 def remote(settings, command, batch=False, **popen_kwargs):
@@ -180,9 +225,10 @@ def remote(settings, command, batch=False, **popen_kwargs):
                       "Settings > System > Optional features, then try again")
 
 
-def helper_command(settings, *args):
+def helper_command(settings, *args, attempts=1):
     helper = posixpath.join(settings['server_project'], SERVER_HELPER)
-    return ' '.join(['python3', shlex.quote(helper)] + [shlex.quote(a) for a in args])
+    return on_node(settings, ' '.join(['python3', shlex.quote(helper)]
+                                      + [shlex.quote(a) for a in args]), attempts=attempts)
 
 
 def stage(number, total, text):
@@ -230,6 +276,9 @@ def setup(args):
             public = f.read().strip()
         print("adding it to your server account -- type your SERVER password if asked "
               "(nothing shows while you type)")
+        # the one thing that does not go to a compute node: it sets up the login itself, and it
+        # runs before there is a key to log in with. Two shell builtins on the account's own
+        # ~/.ssh, no work
         command = ("umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
                    f"grep -qxF {shlex.quote(public)} ~/.ssh/authorized_keys || "
                    f"echo {shlex.quote(public)} >> ~/.ssh/authorized_keys")
@@ -237,11 +286,18 @@ def setup(args):
             raise Problem("could not add the key; check the username and password and run setup.bat again")
 
     print("\nchecking the connection and the server's copy of the project ...", flush=True)
-    check = remote(settings, f"test -f {shlex.quote(posixpath.join(settings['server_project'], SERVER_HELPER))}"
-                             " && python3 -c 'print(\"server ok\")'")
-    if check.wait() != 0:
-        raise Problem(f"connected, but {SERVER_HELPER} was not found under {settings['server_project']} "
-                      "or the server has no python3")
+    print("(the work runs on a cluster node, so this waits for slurm to give it one)", flush=True)
+    check = remote(settings, on_node(
+        settings, f"test -f {shlex.quote(posixpath.join(settings['server_project'], SERVER_HELPER))}"
+                  " && python3 -c \"import socket; print('server ok on', socket.gethostname())\""),
+        stdout=subprocess.PIPE)
+    answer, _ = check.communicate()
+    answer = answer.decode('utf-8', errors='replace').strip()
+    if check.returncode != 0 or 'server ok' not in answer:
+        raise Problem(f"connected, but the check did not come back. Either {SERVER_HELPER} is not "
+                      f"under {settings['server_project']}, or the server has no python3, or "
+                      f"slurm could not be reached to run it on a node ({answer or 'no answer'})")
+    print(answer)
     writable = destination_writable(settings)
     settings['upload'] = writable is not False
     save_settings(settings)
@@ -273,7 +329,7 @@ def update(args):
     staging = os.path.join(HOME, '.update_new')
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging)
-    proc = remote(settings, command, stdout=subprocess.PIPE)
+    proc = remote(settings, on_node(settings, command), stdout=subprocess.PIPE)
     with tarfile.open(fileobj=proc.stdout, mode='r|') as tar:
         for member in tar:
             if not safe_member(member.name):
@@ -343,8 +399,9 @@ def server_commit(settings):
     command = (f"cd {shlex.quote(settings['server_project'])} && "
                "git -c 'safe.directory=*' rev-parse --short HEAD")
     try:
-        proc = remote(settings, command, stdout=subprocess.PIPE)
-        out, _ = proc.communicate(timeout=120)
+        proc = remote(settings, on_node(settings, command, attempts=3),
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        out, _ = proc.communicate(timeout=600)
     except (OSError, subprocess.SubprocessError, Problem):
         return ''
     return out.decode('utf-8', errors='replace').strip() if proc.returncode == 0 else ''
@@ -829,20 +886,34 @@ def upload_members(settings, state):
 
 
 def server_answer(proc, what):
-    """The one JSON line a helper verb prints, or a Problem naming what went wrong."""
-    output = proc.stdout.read().decode('utf-8', errors='replace').strip()
-    returncode = proc.wait()
+    """The one JSON line a helper verb prints, or a Problem naming what went wrong.
+
+    When its errors were captured as well -- they are for the short questions, so that slurm's
+    queueing messages stay out of the window -- they go into the Problem, since that is where
+    'could not reach slurm' would appear."""
+    if proc.stderr is not None:
+        out, errors = proc.communicate()
+        output = out.decode('utf-8', errors='replace').strip()
+        errors = errors.decode('utf-8', errors='replace').strip()
+    else:
+        output = proc.stdout.read().decode('utf-8', errors='replace').strip()
+        proc.wait()
+        errors = ''
     try:
         answer = json.loads(output.splitlines()[-1])
     except (IndexError, ValueError):
-        answer = {'ok': False, 'error': output or f'no answer from the server (exit {returncode})'}
+        answer = {'ok': False,
+                  'error': ' '.join(part for part in (output, errors) if part)
+                           or f'no answer from the server (exit {proc.returncode})'}
     if not answer.get('ok'):
         raise Problem(f"{what}: {answer.get('error')}")
     return answer
 
 
 def helper_json(settings, *args, what='the server could not do that'):
-    proc = remote(settings, helper_command(settings, *args), stdout=subprocess.PIPE)
+    # these verbs read nothing from this PC and answer in one line, so slurm may be asked again
+    proc = remote(settings, helper_command(settings, *args, attempts=3), stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE)
     return server_answer(proc, what)
 
 
@@ -1205,8 +1276,9 @@ def main():
                                 help='offer again the movies an earlier round was refused')
     realign_parser.add_argument('--at-once', type=int, default=20,
                                 help='how many movies the cluster works on at a time (default 20)')
-    realign_parser.add_argument('--poll-seconds', type=int, default=120,
-                                help='how often to ask the cluster how it is going (default 120)')
+    realign_parser.add_argument('--poll-seconds', type=int, default=300,
+                                help='how often to ask the cluster how it is going (default 300; '
+                                     'each question is itself a small job on a node)')
     realign_parser.add_argument('--restart', action='store_true',
                                 help='start a new round instead of continuing the last unfinished one')
     realign_parser.add_argument('--keep-on-server', action='store_true',

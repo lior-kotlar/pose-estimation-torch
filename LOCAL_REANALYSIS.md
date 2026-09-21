@@ -44,13 +44,18 @@ Open **Command Prompt** (Start menu → type `cmd`). Paste these four lines, rep
 
 ```bat
 mkdir C:\pose-reanalysis
-ssh YOUR_USERNAME@moriah-gw-01.cs.huji.ac.il "cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch && git -c 'safe.directory=*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md" > C:\pose-reanalysis\download.tar
+ssh YOUR_USERNAME@moriah-gw-01.cs.huji.ac.il "srun --ntasks=1 --mem=2g --time=0:10:00 --gres=gpu:0 --chdir=/tmp --job-name=pose_setup git -C /cs/labs/tsevi/lior.kotlar/pose-estimation-torch -c safe.directory='*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md" > C:\pose-reanalysis\download.tar
 tar -xf C:\pose-reanalysis\download.tar -C C:\pose-reanalysis
 del C:\pose-reanalysis\download.tar
 ```
 
 The first time you connect, ssh asks `Are you sure you want to continue connecting`: type
 `yes`. Then type your server password. Nothing shows while you type; that's normal.
+
+`srun` in there is deliberate: `moriah-gw-01` is only the way in, and nothing may run on it, so
+every command is handed to the cluster's scheduler and runs on a compute node. You may see
+`srun: job 123456 queued and waiting for resources` for a moment; that is the wait for a free
+node, and the download carries on by itself.
 
 Afterwards `C:\pose-reanalysis` contains `code`, `local_reanalysis`, `LOCAL_REANALYSIS.md` and
 `requirements-analysis.txt`.
@@ -341,6 +346,9 @@ So you never have to pull anything by hand. Two things follow from it:
 | A realign round says `LEFT ALONE, BLOCKED: ...` | Re-combining that movie would have made something worse, so it was not touched. Nothing to undo. |
 | A realign round stops midway (window closed, connection lost) | Run `realign.bat` on the same folder again: it continues the round, and never repeats work already done. |
 | `the cluster would not start the realignment` | The cluster refused the job (usually a full queue or a full disk). Nothing on the PC changed; try again later. |
+| A step sits at `queued and waiting for resources` | Normal: the command is waiting for a free compute node, because nothing may run on the gateway. It continues by itself. |
+| `the lab filesystem is not mounted on <node>` | That node came up without `/cs/labs/tsevi`. The tool already waited and tried again; run the same command once more. |
+| `connected, but the check did not come back` | Either the project path is wrong, or `srun` is not available where you log in. Check the `server_project` setting, and that `ssh <server> srun --version` answers. |
 
 To stop a run, close the window or press Ctrl+C. Run it again later to continue.
 
@@ -367,6 +375,15 @@ round is deleted from the cluster when the files are safely home; `--keep-on-ser
 there. Its state lives in `C:\pose-reanalysis\realign_jobs\<round>.json`, which is what lets a
 round be picked up again.
 
+**Nothing runs on the gateway.** `moriah-gw-01` is a login gateway, not a workplace, so the tool
+never does anything there: every command it sends — fetching the declarations, checking a file,
+receiving an upload, downloading the code, running the repair helper — is wrapped in `srun`, and
+slurm runs it on whichever compute node is free. The heavy realignment itself is a separate array
+job on top of that. This is why a step can pause with `queued and waiting for resources`, and why
+the short questions a repair round asks are spaced a few minutes apart: each one is a small job of
+its own. If a node comes up without the lab filesystem mounted, the command waits up to a minute
+for it and the short questions are simply handed to slurm again.
+
 **Settings.** They live in `C:\pose-reanalysis\local_reanalysis_settings.json`:
 
 | setting | meaning |
@@ -378,6 +395,7 @@ round be picked up again.
 | `upload` | whether this PC publishes to the server at all, and so whether it may repair movies on the cluster. Setup sets it to `false` for an account that cannot write `upload_to` |
 | `collected_h5` | where the PC keeps collected files (empty = `C:\pose-reanalysis\collected_h5`) |
 | `jobs` | movies at once (0 = half the processor threads; each movie needs about 1.5 GB of memory) |
+| `srun_flags` | what the cluster's scheduler is asked for when it runs a command for this PC. Emptying it would run commands on the login gateway instead, which the lab does not allow |
 
 **The same steps on the cluster.**
 

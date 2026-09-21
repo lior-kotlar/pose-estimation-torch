@@ -2,8 +2,9 @@
 
 local_reanalysis.py (on a PC) talks to the cluster only by running this script over ssh and
 piping data through it, so the whole exchange is one connection per step and needs nothing on
-the cluster beyond this file and a python3. Standard library only, on purpose: the login node
-runs it with whatever python3 it has, not the project's .env.
+the cluster beyond this file and a python3. Standard library only, on purpose: it runs with
+whatever python3 the node has, not the project's .env. It never runs on the login gateway --
+the PC hands every call to srun, so this script's work happens on a compute node.
 
     python3 local_reanalysis_server.py declarations
         stdin : a JSON list of perturbation.json paths the PC's movies may need
