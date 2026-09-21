@@ -90,6 +90,7 @@ It ends with a summary like:
 === finished in 1.2 min ===
 re-analysed      : done 8
 report           : C:\pose-reanalysis\reports\reanalyse_report_20260917_130727.csv
+log of this run  : C:\pose-reanalysis\reports\run_20260917_130649.log
 collected on PC  : C:\pose-reanalysis\collected_h5
 on the server    : moriah-gw-01.cs.huji.ac.il:/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/collected_h5
 ```
@@ -125,6 +126,9 @@ touched.
   before and after.
 - **`check`:** filled in when something moved that shouldn't have (yaw or pitch), or more wing
   frames became invalid. Look at those movies' plots against the `superseded_…` versions.
+
+Next to it, `run_<time>.log` holds everything the run printed, including each movie's messages.
+If anything looked wrong, that file says what happened, even after the window is closed.
 
 ---
 
@@ -164,11 +168,24 @@ collected_h5\
 
 ## Keeping the tool up to date
 
-Double-click **`C:\pose-reanalysis\local_reanalysis\update.bat`**. It downloads the latest code
-from the server, installs new packages if the list changed, and keeps your settings. Do this
-whenever you're told the analysis code has changed.
+**This happens by itself.** Every run first asks the server whether the code has changed. If it
+has, the run says so, updates itself (installing new packages if the list changed, keeping your
+settings), and then starts with the new code:
 
-After an update, running `reanalyse.bat` again redoes every movie, because the code changed.
+```
+the server has newer code (a1b2c3d -> e4f5g6h); updating before the run
+code updated to commit e4f5g6h
+
+starting the run with the updated code
+```
+
+So you never have to pull anything by hand. Two things follow from it:
+
+- After the code changes, the next run **redoes every movie**, because what the products contain
+  is decided by the code that made them. That is the point of the check: it stops you from
+  re-analysing with an old copy and having to do it again later.
+- `local_reanalysis\update.bat` still exists if you want to update without running anything, and
+  `reanalyse.bat <folder> --no-update` runs with the copy you have.
 
 ---
 
@@ -181,6 +198,7 @@ After an update, running `reanalyse.bat` again redoes every movie, because the c
 | It asks for the server password every time | Run `setup.bat` again and answer `y` to logging in without a password. |
 | `STOPPED: could not download the declarations` | The server couldn't be reached. Nothing was changed. Check your internet or VPN and run again. |
 | `STOPPED: the upload was cut off` / `did not accept the upload` | The analysis and the local collection are kept. Run again; only what's missing is sent. |
+| A figure or page is missing for a movie | Its message is in `C:\pose-reanalysis\reports\run_<time>.log`; one figure failing never stops the rest. |
 | A movie `FAILED` with **"does not record where the camera trigger is"** | Its previous analysis is too old to place frame 0 at the camera trigger, so it is skipped rather than numbered wrongly. Ask Lior. |
 | Any other `FAILED` movie | The message above it and the `error` column of the report say why. The other movies are unaffected. |
 | `no predicted movies ... under` | That folder has no movie folders with `points_3D_smoothed_ensemble_best_method.npy` in them. Check the path. |

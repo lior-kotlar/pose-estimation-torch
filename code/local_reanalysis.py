@@ -63,10 +63,34 @@ DEFAULT_SETTINGS = {
 }
 SERVER_HELPER = 'code/local_reanalysis_server.py'
 UPLOAD_LEDGER = '.uploaded.json'
+# Set for the re-run that follows an automatic update, so it cannot update again in a loop.
+UPDATED_FLAG = 'POSE_REANALYSIS_JUST_UPDATED'
 
 
 class Problem(Exception):
     """Something the user has to fix; printed without a traceback."""
+
+
+class Tee:
+    """Write everything printed to the console to a log file as well.
+
+    A run's per-movie messages are the only record of a movie that failed, or of a figure that
+    was skipped, and the console window is usually closed long before anyone asks."""
+
+    def __init__(self, stream, handle):
+        self.stream, self.handle = stream, handle
+
+    def write(self, text):
+        self.stream.write(text)
+        self.handle.write(text)
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+        self.handle.flush()
+
+    def isatty(self):
+        return self.stream.isatty()
 
 
 # -- settings and the ssh connection -------------------------------------------------------------
@@ -247,6 +271,46 @@ def update(args):
 
 # -- run -----------------------------------------------------------------------------------------
 
+def bundle_commit():
+    """The cluster commit this copy of the code was downloaded at, or '' when unknown."""
+    try:
+        with open(BUNDLE_COMMIT, encoding='utf-8') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def server_commit(settings):
+    """The commit the cluster's project is at, or '' when it cannot be asked."""
+    command = (f"cd {shlex.quote(settings['server_project'])} && "
+               "git -c 'safe.directory=*' rev-parse --short HEAD")
+    try:
+        proc = remote(settings, command, stdout=subprocess.PIPE)
+        out, _ = proc.communicate(timeout=120)
+    except (OSError, subprocess.SubprocessError, Problem):
+        return ''
+    return out.decode('utf-8', errors='replace').strip() if proc.returncode == 0 else ''
+
+
+def update_if_outdated(args, settings):
+    """Update to the cluster's committed code, then redo the run with it.
+
+    The analysis code decides what the products contain, so re-analysing with a copy older than
+    the cluster's only earns the movies another re-analysis later. Returns the exit code of the
+    re-run, or None when this copy is already current."""
+    if args.no_update or os.environ.get(UPDATED_FLAG):
+        return None
+    here, there = bundle_commit(), server_commit(settings)
+    if not there or there == here:
+        return None
+    print(f"the server has newer code ({here or 'unknown'} -> {there}); updating before the run",
+          flush=True)
+    update(args)
+    print("\nstarting the run with the updated code", flush=True)
+    return subprocess.run([sys.executable, '-X', 'utf8'] + sys.argv,
+                          env={**os.environ, UPDATED_FLAG: '1'}).returncode
+
+
 def declaration_candidates(settings, box_paths):
     """The perturbation.json paths load_perturbation would try for these source movies."""
     wanted = set()
@@ -415,6 +479,23 @@ def count(items):
 
 
 def run(args):
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    log_path = os.path.join(REPORTS_DIR, f"run_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    with open(log_path, 'w', encoding='utf-8') as handle:
+        out, err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = Tee(out, handle), Tee(err, handle)
+        try:
+            return run_steps(args, log_path)
+        except Problem as e:
+            # inside the tee, so the log says why the run stopped
+            print(f"\nSTOPPED: {e}", flush=True)
+            print(f"log of this run  : {log_path}", flush=True)
+            return 1
+        finally:
+            sys.stdout, sys.stderr = out, err
+
+
+def run_steps(args, log_path):
     started = time.time()
     settings = load_settings()
     folders = list(args.folders)
@@ -431,6 +512,11 @@ def run(args):
         raise Problem("no folder given")
     upload_step = not args.no_upload
     total = 6 if upload_step else 5
+
+    # before anything is imported or re-analysed, so the run uses the cluster's current code
+    updated = update_if_outdated(args, settings)
+    if updated is not None:
+        return updated
 
     # heavy imports only now, so setup/update and a wrong folder answer quickly
     stage(1, total, "finding predicted movies")
@@ -475,7 +561,6 @@ def run(args):
               'movie_dir': d, 'status': 'current'} for d in current]
     for row in rows:
         row['experiment'] = groups[row['movie_dir']]
-    os.makedirs(REPORTS_DIR, exist_ok=True)
     report = rm.write_report(rows, os.path.join(REPORTS_DIR, f'reanalyse_report_{stamp}.csv'))
     failed_any = rm.print_run_summary(rows)
 
@@ -504,6 +589,7 @@ def run(args):
     print(f"\n=== finished in {minutes:.1f} min ===")
     print(f"re-analysed      : {count(r.get('status') for r in rows)}")
     print(f"report           : {report}")
+    print(f"log of this run  : {log_path}")
     print(f"collected on PC  : {collected_root(settings)}")
     if upload_step:
         print(f"on the server    : {settings['server_host']}:{upload_destination(settings)}")
@@ -522,6 +608,8 @@ def main():
                             help='one experiment folder, or a folder of experiments (asked if omitted)')
     run_parser.add_argument('--no-upload', action='store_true',
                             help='re-analyse and collect on this PC only')
+    run_parser.add_argument('--no-update', action='store_true',
+                            help='run with this copy of the code even if the server has newer')
     sub.add_parser('update', help='download the latest committed code from the server')
     args = parser.parse_args()
     handlers = {'setup': setup, 'run': run, 'update': update}
