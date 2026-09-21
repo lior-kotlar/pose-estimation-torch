@@ -149,20 +149,33 @@ def recorded_experiment(movie_dir):
     return None
 
 
+def bad_folder(movie_dir):
+    """'bad_signal' / 'bad_wings' when the movie sits in one, else ''."""
+    for part in reversed(os.path.dirname(os.path.abspath(movie_dir)).split(os.sep)):
+        if part in DEFAULT_EXCLUDE_DIRS:
+            return part
+    return ""
+
+
 def experiment_key(movie_dir, root=None):
     """Where a movie's h5 goes under the collection: its recorded experiment, else
     local_only/<the experiment folder holding it>.
 
     That folder is the movie folder's parent, stepping out of the subfolders a lab workflow
     sorts movies into inside an experiment (fixed/, bad_signal/, ...). Deliberately not
-    relative to the folder a run was pointed at, which may sit any number of levels higher."""
+    relative to the folder a run was pointed at, which may sit any number of levels higher.
+
+    A movie from a bad_signal/bad_wings folder -- collected only when they are explicitly
+    included -- keeps that folder as the last part of its key, so a known-bad movie never
+    sits among the files an experiment hands on."""
     found = recorded_experiment(movie_dir)
-    if found:
-        return found
-    folder = os.path.dirname(os.path.abspath(movie_dir))
-    while os.path.basename(folder) in WORKFLOW_DIRS and os.path.dirname(folder) != folder:
-        folder = os.path.dirname(folder)
-    return f"{LOCAL_ONLY}/{os.path.basename(folder) or 'unnamed'}"
+    if not found:
+        folder = os.path.dirname(os.path.abspath(movie_dir))
+        while os.path.basename(folder) in WORKFLOW_DIRS and os.path.dirname(folder) != folder:
+            folder = os.path.dirname(folder)
+        found = f"{LOCAL_ONLY}/{os.path.basename(folder) or 'unnamed'}"
+    bad = bad_folder(movie_dir)
+    return f"{found}/{bad}" if bad else found
 
 
 def sha256(path):
@@ -244,8 +257,9 @@ def main():
                    help=f"directory name to skip (repeatable). "
                         f"Default: {' '.join(sorted(DEFAULT_EXCLUDE_DIRS))}")
     p.add_argument("--include-bad", action="store_true",
-                   help="disable all exclusions and collect everything (DANGER: "
-                        "pulls in bad_wings/bad_signal too)")
+                   help="disable all exclusions and collect everything: bad_wings/bad_signal "
+                        "movies too, each under its experiment's <bad folder>/ subfolder so it "
+                        "is never mistaken for one of the experiment's usable movies")
     args = p.parse_args()
 
     if not os.path.isdir(args.src_dir):

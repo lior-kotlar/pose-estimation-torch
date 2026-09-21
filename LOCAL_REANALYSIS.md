@@ -95,6 +95,18 @@ collected on PC  : C:\pose-reanalysis\collected_h5
 on the server    : moriah-gw-01.cs.huji.ac.il:/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/collected_h5
 ```
 
+### Movies in `bad_signal` and `bad_wings` folders
+
+They **are** re-analysed like every other movie: their h5, plots, viewer and pages are rebuilt
+in place. What they are left out of is the collecting and uploading, so a known-bad movie never
+reaches the server among an experiment's usable files. The run says how many were left out.
+
+To include them, drag the folder onto **`reanalyse_including_bad.bat`** instead (or add
+`--include-bad`). They are then collected and uploaded under their experiment's own
+`bad_signal\` or `bad_wings\` subfolder — for example
+`collected_h5\Tsory\ex210825_dark_yaw_t0\bad_signal\` — so copying an experiment's files
+onward still never picks them up by accident.
+
 **Running it again is always safe.** Movies already made by the current code are skipped in
 0 seconds, and only files the server doesn't have yet are uploaded. So if the PC sleeps, the
 window is closed, or the connection drops, **just run the same thing again** and it continues
@@ -158,8 +170,9 @@ collected_h5\
   their experiment.
 - **`local_only\<name>`** holds movies that record no experiment at all. `<name>` is the folder
   the movie folder sits in.
-- **Movies in `bad_signal` or `bad_wings` folders** are re-analysed but never collected or
-  uploaded.
+- **Movies in `bad_signal` or `bad_wings` folders** are re-analysed but not collected, unless
+  you ask for them (see above); then they sit in a `bad_signal\` / `bad_wings\` subfolder of
+  their experiment.
 - **Movies that failed** are not collected, so an old h5 is never uploaded as if it were new.
 - **When an h5 on the server is replaced**, the old one moves into `superseded_<time>\` next to
   it.

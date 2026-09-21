@@ -565,15 +565,19 @@ def run_steps(args, log_path):
     failed_any = rm.print_run_summary(rows)
 
     stage(5, total, "collecting the analysis h5 files")
-    excluded = collector.DEFAULT_EXCLUDE_DIRS
+    excluded = () if args.include_bad else collector.DEFAULT_EXCLUDE_DIRS
     ready = [r['movie_dir'] for r in rows if r.get('status') in ('done', 'current')]
-    bad = [d for d in ready if is_bad(d, movie_root[d], excluded)]
+    bad = [d for d in ready if excluded and is_bad(d, movie_root[d], excluded)]
     ready = [d for d in ready if d not in bad]
     collected = collect_movies(settings, ready, movie_root, groups, collector)
     print(f"{len(collected)} file(s) into {collected_root(settings)}: "
           f"{count(r['status'] for r in collected) or 'none'}")
     if bad:
         print(f"not collected, being in {'/'.join(sorted(excluded))} folders: {len(bad)} movie(s)")
+    if args.include_bad:
+        from_bad = sum(1 for r in collected if collector.bad_folder(os.path.dirname(r['src'])))
+        print(f"included {from_bad} movie(s) from bad_signal/bad_wings folders, each under its "
+              f"experiment's own subfolder")
     not_ready = [r for r in rows if r.get('status') not in ('done', 'current')]
     if not_ready:
         print(f"not collected, because they failed: {len(not_ready)} movie(s) (listed above)")
@@ -610,6 +614,11 @@ def main():
                             help='re-analyse and collect on this PC only')
     run_parser.add_argument('--no-update', action='store_true',
                             help='run with this copy of the code even if the server has newer')
+    run_parser.add_argument('--include-bad', action='store_true',
+                            help='also collect and upload movies from bad_signal/bad_wings '
+                                 'folders (they are always re-analysed; by default they are '
+                                 'not collected). Each goes under its experiment\'s <bad '
+                                 'folder>/ subfolder, never among its usable movies')
     sub.add_parser('update', help='download the latest committed code from the server')
     args = parser.parse_args()
     handlers = {'setup': setup, 'run': run, 'update': update}
