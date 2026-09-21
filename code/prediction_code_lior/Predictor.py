@@ -33,6 +33,7 @@ from utils import (tf_format_find_peaks, torch_find_peaks, PredictConfig,
 from constants import *
 import sys
 from From_2D_to_3D import From2Dto3D
+import wing_labels
 
 # sys.path.append(r'C:\Users\amita\PycharmProjects\pythonProject\vision\train_nn_project\2D to 3D\predict_2D_pytorch')
 from SparseBox import SparseBox
@@ -45,9 +46,11 @@ RIGHT = 1
 
 
 # how much better (metres) a candidate must fit the other models with its two wings exchanged before
-# Predictor2D.harmonize_wing_labels exchanges them. Real label swaps win by ~5 mm; frames where the
-# wings sit close together and the call is a coin toss win by under 1 mm, and are left alone
-WING_LABEL_SWAP_MIN_MARGIN = 0.001
+# harmonize_wing_labels exchanges them. Real label swaps win by ~5 mm; frames where the wings sit
+# close together and the call is a coin toss win by under 1 mm, and are left alone. The alignment
+# itself lives in wing_labels.py, which needs numpy alone, so the tools that re-run or only ask
+# about a movie's ensemble do not have to import a pose estimator
+WING_LABEL_SWAP_MIN_MARGIN = wing_labels.WING_LABEL_SWAP_MIN_MARGIN
 
 
 class Predictor2D:
@@ -1430,58 +1433,11 @@ class Predictor2D:
 
     @staticmethod
     def harmonize_wing_labels(all_points_list, min_margin=WING_LABEL_SWAP_MIN_MARGIN, n_iter=3):
-        """Make every candidate agree on which wing is left before the ensemble mixes them.
+        """Align every candidate's wing labels; see wing_labels.harmonize_wing_labels.
 
-        A candidate is one model's 3D reconstruction from one camera pair. Some models come out with
-        the two wings' labels the other way round from the rest, for a whole movie or part of it, and
-        the per-group selection below then took the median of a swapped candidate's 'left' wing (the
-        fly's right one) together with the others' left wing -- landing both wings, and both hinges, on
-        one physical wing. Frame by frame, each candidate's two wing centres are compared with the
-        median over all candidates, and its left and right points (wing and hinge) are exchanged when
-        it fits that median better the other way round by more than min_margin (metres). When nothing
-        needs exchanging the input list itself is returned, so a movie whose models already agree is
-        combined exactly as before. Returns (list, number of exchanged (frame, candidate) pairs).
-        """
-        num_joints = all_points_list[0].shape[1]
-        points_per_wing = (num_joints - 2) // 2
-        left = list(range(0, points_per_wing))
-        right = list(range(points_per_wing, 2 * points_per_wing))
-        wing_left, wing_right = left[:-1], right[:-1]      # the decision uses the wing points, not the hinge
-        sizes = [points.shape[2] for points in all_points_list]
-        stacked = np.concatenate(all_points_list, axis=2)   # (frames, joints, candidates, 3)
-        swapped = np.zeros((stacked.shape[0], stacked.shape[2]), dtype=bool)
-        work = None
-        for _ in range(n_iter):
-            source = stacked if work is None else work
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=RuntimeWarning)   # all-NaN candidates
-                centre_left = np.nanmean(source[:, wing_left], axis=1)
-                centre_right = np.nanmean(source[:, wing_right], axis=1)
-                median_left = np.nanmedian(centre_left, axis=1, keepdims=True)
-                median_right = np.nanmedian(centre_right, axis=1, keepdims=True)
-            keep = (np.linalg.norm(centre_left - median_left, axis=-1)
-                    + np.linalg.norm(centre_right - median_right, axis=-1))
-            exchange = (np.linalg.norm(centre_left - median_right, axis=-1)
-                        + np.linalg.norm(centre_right - median_left, axis=-1))
-            flip = (keep - exchange) > min_margin
-            if not flip.any():
-                break
-            if work is None:
-                work = stacked.copy()
-            frames, candidates = np.nonzero(flip)
-            chosen = work[frames, :, candidates]
-            exchanged = chosen.copy()
-            exchanged[:, left] = chosen[:, right]
-            exchanged[:, right] = chosen[:, left]
-            work[frames, :, candidates] = exchanged
-            swapped ^= flip
-        if work is None:
-            return all_points_list, 0
-        aligned, start = [], 0
-        for size in sizes:
-            aligned.append(work[:, :, start:start + size])
-            start += size
-        return aligned, int(swapped.sum())
+        Kept here so the call sites that reach it through Predictor2D keep working."""
+        return wing_labels.harmonize_wing_labels(all_points_list, min_margin=min_margin,
+                                                 n_iter=n_iter)
 
     @staticmethod
     def find_3D_points_optimize_neighbors(all_points_list, max_models=None):

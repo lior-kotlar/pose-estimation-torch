@@ -505,7 +505,10 @@ old one, which moves to `superseded_<time>/`. `--flat` restores the single-folde
 
 **Re-analysing predictions kept on a PC.** Predicted movies stored off the cluster are
 re-analysed where they are, then collected and uploaded to `collected_h5` automatically:
-see [LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md), written for lab members new to the repo.
+see [LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md), written for lab members new to the repo. The one
+fault re-analysing cannot repair -- an ensemble that mixed the two wings into one, in movies
+predicted before `wing_labels.harmonize_wing_labels` -- is repaired from there too, by uploading
+only those movies' ensemble members and re-running `code/realign_ensemble.py` on the cluster.
 
 ---
 

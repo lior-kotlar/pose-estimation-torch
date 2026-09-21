@@ -32,9 +32,10 @@ machine made them. A movie whose trigger cannot be found is refused rather than 
 box frame 0 (--allow-no-trigger overrides).
 
 Staleness. Every re-analysed movie is stamped -- in its h5 and in source.json -- with a
-fingerprint of the analysis code and of the declaration it used. --only-stale skips a movie
-whose stamp still matches, so re-running the same command resumes an interrupted run and brings
-a whole tree up to date without redoing what already is.
+fingerprint of the analysis code, of the declaration it used and of the 3D points it read.
+--only-stale skips a movie whose stamp still matches, so re-running the same command resumes an
+interrupted run and brings a whole tree up to date without redoing what already is. New points
+(code/realign_ensemble.py installs some) make a movie stale like a code change does.
 
 Usage:
     .env/bin/python code/reanalyse_movies.py <dir> [<dir> ...] [--jobs N] [--only-stale]
@@ -92,6 +93,8 @@ PROVENANCE_KEYS = ("experiment", "movie_dir", "source_movie_dir", "box_h5")
 REPROJECTED_NAME = 'points_ensemble_smoothed_reprojected.npy'
 MP4_NAME = 'movie 2D and 3D.mp4'
 SOURCE_JSON = 'source.json'
+# code/realign_ensemble.py leaves this behind in a movie whose ensemble it re-ran
+REALIGN_MARKER = '.realigned_ensemble.json'
 
 # The sources that decide what the analysis products contain. An edit to any of them makes
 # every movie stale for --only-stale. Deliberately broad: redoing a movie costs seconds, and
@@ -188,6 +191,32 @@ def code_fingerprint():
             text = f.read().replace(b'\r\n', b'\n')
         digest.update(rel.encode() + b'\0' + text + b'\0')
     return digest.hexdigest()[:16]
+
+
+def points_fingerprint(movie_dir):
+    """A short hash of the 3D points the analysis reads, or '' when they are not there.
+
+    The points are an input, not code, so nothing above notices when they change. They do change:
+    code/realign_ensemble.py re-runs a movie's ensemble and installs new ones. Stamping this makes
+    such a movie stale by itself, and lets a shipped h5 name the points it was made from."""
+    path = os.path.join(movie_dir, POINTS_NAME)
+    digest = hashlib.sha256()
+    try:
+        with open(path, 'rb') as f:
+            for block in iter(lambda: f.read(1 << 20), b''):
+                digest.update(block)
+    except OSError:
+        return ''
+    return digest.hexdigest()[:16]
+
+
+def realigned_at(movie_dir):
+    """When code/realign_ensemble.py last installed a new ensemble here, or '' if it never did."""
+    try:
+        with open(os.path.join(movie_dir, REALIGN_MARKER), encoding='utf-8') as f:
+            return str(json.load(f).get('realigned_at') or '')
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ''
 
 
 def declaration_fingerprint(perturbation):
@@ -573,12 +602,15 @@ def read_analysis_stamp(movie_dir):
 
 
 def is_current(movie_dir, code_fp, decl_fp):
-    """True when this code and this declaration already made every product on disk.
+    """True when this code, this declaration and these points already made every product on disk.
 
     The stamp is written only after the last product, so an interrupted movie never matches;
-    a product removed by hand afterwards makes the movie stale again too."""
+    a product removed by hand afterwards makes the movie stale again too, and so do new 3D
+    points -- a stamp from before points_fingerprint existed records none and never matches."""
     stamp = read_analysis_stamp(movie_dir)
     if stamp.get('code_fingerprint') != code_fp or stamp.get('declaration_fingerprint') != decl_fp:
+        return False
+    if stamp.get('points_fingerprint') != points_fingerprint(movie_dir):
         return False
     names = os.listdir(movie_dir)
     return (any(f.endswith('_analysis_smoothed.h5') for f in names)
@@ -711,6 +743,7 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
 
     code_fp = code_fp or code_fingerprint()
     decl_fp = declaration_fingerprint(perturbation)
+    points_fp, realigned = points_fingerprint(movie_dir), realigned_at(movie_dir)
     if only_stale and is_current(movie_dir, code_fp, decl_fp):
         print("  current: already made by this code and this declaration, skipped", flush=True)
         return {**row, 'status': 'current'}
@@ -726,8 +759,12 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
                                           trigger_offset=trigger_offset,
                                           frame_rate=frame_rate, source=ctx['source'],
                                           perturbation=perturbation)
-    stamp_h5(h5_path, {'analysis_code_fingerprint': code_fp, 'analysis_git_commit': commit,
-                       'analysed_at': analysed_at}, path_maps)
+    stamps = {'analysis_code_fingerprint': code_fp, 'analysis_git_commit': commit,
+              'analysed_at': analysed_at, 'points_fingerprint': points_fp}
+    if realigned:
+        # so a shipped h5 says its points came from a re-run ensemble, not the predicted one
+        stamps['ensemble_realigned_at'] = realigned
+    stamp_h5(h5_path, stamps, path_maps)
     export_analysis_csv(analysis, h5_path.replace('.h5', '.csv'), trigger_offset, frame_rate,
                         perturbation=perturbation)
     plot_movie_figures(h5_path, units="frames")
@@ -759,6 +796,7 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
 
     # last, so only a movie whose every product was written counts as current
     stamp_analysis(movie_dir, {'code_fingerprint': code_fp, 'declaration_fingerprint': decl_fp,
+                               'points_fingerprint': points_fp, 'ensemble_realigned_at': realigned,
                                'git_commit': commit, 'analysed_at': analysed_at,
                                'host': socket.gethostname(), 'declaration': ctx['declaration'],
                                'trigger': ctx['trigger']})

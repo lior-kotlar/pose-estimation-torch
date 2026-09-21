@@ -214,6 +214,7 @@ collected_h5/
 local_reanalysis_settings.json
 declarations_cache/
 reports/
+realign_jobs/
 BUNDLE_COMMIT
 inference_datasets/
 training_datasets/

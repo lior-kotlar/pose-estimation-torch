@@ -3,9 +3,10 @@
 The plain-language guide is LOCAL_REANALYSIS.md; this is the program behind the three
 double-click files in local_reanalysis/:
 
-    python code/local_reanalysis.py setup             once per PC: server username, ssh key, check
-    python code/local_reanalysis.py run [FOLDER ...]   re-analyse, collect, upload
-    python code/local_reanalysis.py update            download the latest committed code
+    python code/local_reanalysis.py setup                 once per PC: server username, ssh key
+    python code/local_reanalysis.py run [FOLDER ...]      re-analyse, collect, upload
+    python code/local_reanalysis.py realign [FOLDER ...]  re-run wrong-handed ensembles, then run
+    python code/local_reanalysis.py update                download the latest committed code
 
 A run takes one or more folders -- a single experiment, or a folder holding many -- and:
 
@@ -17,6 +18,13 @@ A run takes one or more folders -- a single experiment, or a folder holding many
   6. uploads whatever the cluster does not have yet; the cluster checks every file's checksum
      before installing it, and keeps the version it replaces in superseded_<time>/
 
+realign is for the defect underneath the analysis, which re-analysing cannot fix: in some movies
+an ensemble member labelled the two wings the other way round, and the ensemble mixed them into
+one physical wing. It asks each movie whether that happened, sends only the ensemble members of
+the ones where it did (10-20 MB a movie), has the cluster re-run their ensembles and keep the
+result only where nothing got worse, brings the new 3D points back, and re-analyses them here.
+It needs an account that may write to the cluster, so only the pipeline's owner can run it.
+
 Everything it talks to the cluster about goes through ssh to code/local_reanalysis_server.py in
 the cluster's copy of the project, one connection per step. Movies of experiments the cluster
 does not know are fine: they keep the declaration their old h5 recorded, and are collected under
@@ -24,6 +32,7 @@ the experiment their own records name, or local_only/<folder> when they name non
 """
 import argparse
 import datetime as dt
+import glob
 import hashlib
 import io
 import json
@@ -67,6 +76,17 @@ DEFAULT_SETTINGS = {
 }
 SERVER_HELPER = 'code/local_reanalysis_server.py'
 UPLOAD_LEDGER = '.uploaded.json'
+# realignment: what a movie's ensemble is made of, and what re-running it leaves behind
+REALIGN_JOBS_DIR = os.path.join(HOME, 'realign_jobs')
+REALIGN_MARKER = '.realigned_ensemble.json'
+BLOCKED_REPORT = '.realign_staging/BLOCKED.json'
+# left in a movie the cluster refused to change, so later rounds do not re-run it for nothing
+BLOCKED_MARKER = '.realign_blocked.json'
+POINTS_ALL = 'points_3D_all.npy'
+POINTS_SMOOTHED = 'points_3D_smoothed_ensemble_best_method.npy'
+OLD_POINTS = (POINTS_SMOOTHED, 'points_3D_ensemble_best_method.npy')
+MEMBER_CONFIGS = ('specific_configuration.json', 'configuration.json')
+README_GLOB = ('README_mov*.txt',)
 # Set for the re-run that follows an automatic update, so it cannot update again in a loop.
 UPDATED_FLAG = 'POSE_REANALYSIS_JUST_UPDATED'
 
@@ -645,6 +665,518 @@ def run_steps(args, log_path):
     return 1 if failed_any or not_ready else 0
 
 
+# -- realignment: one round of the cluster's ensemble re-run, driven from here -------------------
+
+def ensemble_members(movie_dir):
+    """The member folders of a movie that hold 3D candidates, in the ensemble's own order.
+
+    Archived and hidden folders are passed over, so an earlier realignment's superseded_ensemble_*
+    or .realign_staging can never be taken for a member."""
+    return sorted(os.path.join(movie_dir, name) for name in os.listdir(movie_dir)
+                  if not (name.startswith('superseded_') or name.startswith('.'))
+                  and os.path.isfile(os.path.join(movie_dir, name, POINTS_ALL)))
+
+
+def already_realigned(movie_dir):
+    return os.path.isfile(os.path.join(movie_dir, REALIGN_MARKER))
+
+
+def screen_movies(movie_dirs, retry_blocked=False):
+    """Which movies' ensembles would change if they were re-run, and by how much.
+
+    Reads each movie's members and asks wing_labels.harmonize_wing_labels whether any candidate
+    has its wings the other way round. Numpy alone, so it needs no pose estimator on this PC.
+
+    A movie already realigned is passed over, and so is one a round has already tried and been
+    refused: re-running it would cost the same half hour and be refused again."""
+    from wing_labels import harmonize_wing_labels
+    import numpy as np
+
+    flagged, skipped, unreadable, blocked = [], 0, [], 0
+    for number, movie_dir in enumerate(movie_dirs, 1):
+        if number % 25 == 0 or number == len(movie_dirs):
+            print(f"  checked {number}/{len(movie_dirs)}", flush=True)
+        if already_realigned(movie_dir):
+            skipped += 1
+            continue
+        if not retry_blocked and os.path.isfile(os.path.join(movie_dir, BLOCKED_MARKER)):
+            blocked += 1
+            continue
+        members = ensemble_members(movie_dir)
+        if len(members) < 2:
+            skipped += 1
+            continue
+        try:
+            points = [np.load(os.path.join(d, POINTS_ALL)) for d in members]
+            _, exchanged = harmonize_wing_labels(points)
+        except (OSError, ValueError) as e:
+            unreadable.append((movie_dir, f'{type(e).__name__}: {e}'))
+            continue
+        if exchanged:
+            flagged.append({'movie_dir': movie_dir, 'exchanged_pairs': int(exchanged),
+                            'members': len(members)})
+    return flagged, skipped, unreadable, blocked
+
+
+def job_state_path(job):
+    return os.path.join(REALIGN_JOBS_DIR, f'{job}.json')
+
+
+def save_job_state(state):
+    os.makedirs(REALIGN_JOBS_DIR, exist_ok=True)
+    path = job_state_path(state['job'])
+    staged = path + '.partial'
+    with open(staged, 'w', encoding='utf-8') as f:
+        json.dump(state, f, indent=1)
+    os.replace(staged, path)
+
+
+def unfinished_job(folders):
+    """The newest round over these same folders that has not been finished off yet."""
+    if not os.path.isdir(REALIGN_JOBS_DIR):
+        return None
+    for name in sorted(os.listdir(REALIGN_JOBS_DIR), reverse=True):
+        if not name.endswith('.json'):
+            continue
+        try:
+            with open(os.path.join(REALIGN_JOBS_DIR, name), encoding='utf-8') as f:
+                state = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not state.get('finished') and state.get('folders') == folders:
+            return state
+    return None
+
+
+def new_job_state(folders, movies):
+    # the round is named after this PC, so several PCs' rounds never share a folder on the cluster
+    pc = os.environ.get('COMPUTERNAME') or os.environ.get('HOSTNAME') or 'pc'
+    name = ''.join(c if c.isalnum() else '_' for c in pc)[:24]
+    job = f"{name or 'pc'}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    return {'job': job, 'created': dt.datetime.now().isoformat(timespec='seconds'),
+            'folders': folders, 'movies': movies, 'uploaded': False, 'job_id': '',
+            'installed': {}, 'finished': False}
+
+
+def movie_keys(flagged, groups):
+    """A short name per movie for the job tree: <experiment>/<movie>, kept unique."""
+    keys, used = {}, set()
+    for entry in sorted(flagged, key=lambda e: e['movie_dir']):
+        movie_dir = entry['movie_dir']
+        base = f"{groups[movie_dir]}/{os.path.basename(movie_dir)}"
+        key, number = base, 1
+        while key in used:
+            number += 1
+            key = f"{base}_{number}"
+        used.add(key)
+        keys[key] = movie_dir
+    return keys
+
+
+def realign_inputs(movie_dir):
+    """The files the cluster needs to re-run this movie's ensemble, relative to the movie.
+
+    Each model's 3D candidates and the config that names it, plus the movie's current ensemble
+    points, which are the 'before' side of the comparison the cluster makes. Nothing else: not
+    the source movie, not the analysis h5, not the video."""
+    names = []
+    for member in ensemble_members(movie_dir):
+        base = os.path.basename(member)
+        names.append(f'{base}/{POINTS_ALL}')
+        for config in MEMBER_CONFIGS:
+            if os.path.isfile(os.path.join(member, config)):
+                names.append(f'{base}/{config}')
+    names += [name for name in OLD_POINTS if os.path.isfile(os.path.join(movie_dir, name))]
+    for pattern in README_GLOB:
+        for path in sorted(glob.glob(os.path.join(glob.escape(movie_dir), pattern))):
+            names.append(os.path.basename(path))
+    return names
+
+
+def upload_members(settings, state):
+    """Send every flagged movie's ensemble members to its folder of the job on the cluster."""
+    destination = posixpath.join(settings['server_project'], 'realign_jobs', state['job'], 'inputs')
+    pending = {}
+    for key, movie_dir in sorted(state['movies'].items()):
+        for name in realign_inputs(movie_dir):
+            source = os.path.join(movie_dir, *name.split('/'))
+            pending[f'{key}/{name}'] = (source, sha256(source))
+    size = sum(os.path.getsize(source) for source, _ in pending.values())
+    print(f"sending {len(pending)} file(s), {size / 1e6:.0f} MB, to "
+          f"{settings['server_host']}:{destination}", flush=True)
+    proc = remote(settings, helper_command(settings, 'receive', '--dest', destination),
+                  stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=proc.stdin, mode='w|') as tar:
+            manifest = json.dumps({'files': {rel: digest
+                                             for rel, (_, digest) in pending.items()}}).encode('utf-8')
+            info = tarfile.TarInfo('MANIFEST.json')
+            info.size = len(manifest)
+            info.mtime = int(time.time())
+            tar.addfile(info, io.BytesIO(manifest))
+            for number, rel in enumerate(sorted(pending), 1):
+                tar.add(pending[rel][0], arcname=rel, recursive=False)
+                if number % 50 == 0 or number == len(pending):
+                    print(f"  sent {number}/{len(pending)}", flush=True)
+        proc.stdin.close()
+    except (BrokenPipeError, OSError) as e:
+        output = proc.stdout.read().decode('utf-8', errors='replace')
+        proc.wait()
+        raise Problem(f"the upload was cut off ({e}). {output.strip()} -- nothing on this PC was "
+                      "touched; run the same command again to start over")
+    answer = server_answer(proc, 'the server did not accept the ensemble members')
+    print(f"the server has every file: {count(answer['results'].values())}")
+
+
+def server_answer(proc, what):
+    """The one JSON line a helper verb prints, or a Problem naming what went wrong."""
+    output = proc.stdout.read().decode('utf-8', errors='replace').strip()
+    returncode = proc.wait()
+    try:
+        answer = json.loads(output.splitlines()[-1])
+    except (IndexError, ValueError):
+        answer = {'ok': False, 'error': output or f'no answer from the server (exit {returncode})'}
+    if not answer.get('ok'):
+        raise Problem(f"{what}: {answer.get('error')}")
+    return answer
+
+
+def helper_json(settings, *args, what='the server could not do that'):
+    proc = remote(settings, helper_command(settings, *args), stdout=subprocess.PIPE)
+    return server_answer(proc, what)
+
+
+def wait_for_job(settings, state, poll_seconds):
+    """Watch the array job until every movie has been realigned, blocked or given up on."""
+    job = state['job']
+    started, last, shown, warned, settled = time.time(), None, 0, False, False
+    while True:
+        answer = helper_json(settings, 'realign-status', '--job', job,
+                             what='the server could not say how the realignment is going')
+        states = answer.get('states') or {}
+        tally = count(states.values()) or 'none'
+        pending = [k for k, v in states.items() if v == 'pending']
+        queued = answer.get('slurm')
+        minutes = (time.time() - started) / 60
+        queue = (', slurm: ' + ', '.join(f'{state} {number}'
+                                         for state, number in sorted(queued.items()))
+                 if queued else '')
+        # a line whenever anything moves -- a movie finishing, or the queue letting one start --
+        # and a heartbeat now and then, so a long wait never looks like a hung window
+        if (tally, queue) != last or minutes - shown >= 10:
+            print(f"  [{minutes:5.1f} min] {tally}{queue}", flush=True)
+            last, shown = (tally, queue), minutes
+        if not pending:
+            return states
+        if answer.get('working') is False:
+            # slurm drops a task from its books the moment it ends, which can be before its last
+            # file is there to be seen; give the results one more poll before giving up on them
+            if not settled:
+                settled = True
+                time.sleep(min(poll_seconds, 30))
+                continue
+            print(f"\n{len(pending)} movie(s) finished without a result. The cluster keeps each "
+                  f"task's messages in logs/realign_{job}_*.out", flush=True)
+            for key in pending[:10]:
+                print(f"  no result: {key}")
+            return states
+        settled = False
+        if answer.get('working') is None and not warned:
+            print("  (the cluster's queue could not be asked; watching for the results "
+                  "themselves instead. Close the window if this never moves)", flush=True)
+            warned = True
+        time.sleep(poll_seconds)
+
+
+def safe_key(relpath, movies):
+    """True when a downloaded name belongs to a movie of this round and stays inside it."""
+    parts = relpath.split('/')
+    if not relpath or relpath.startswith('/') or '..' in parts or not all(parts):
+        return False
+    return any(relpath.startswith(key + '/') for key in movies)
+
+
+def fetch_results(settings, state):
+    """Download the new ensembles into this PC's staging folder; returns the files' relative paths."""
+    staging = os.path.join(REALIGN_JOBS_DIR, state['job'], 'incoming')
+    if os.path.isdir(staging):
+        shutil.rmtree(staging)
+    os.makedirs(staging)
+    proc = remote(settings, helper_command(settings, 'realign-fetch', '--job', state['job']),
+                  stdout=subprocess.PIPE)
+    manifest, received = None, []
+    try:
+        with tarfile.open(fileobj=proc.stdout, mode='r|gz') as tar:
+            for member in tar:
+                if member.name == 'MANIFEST.json':
+                    manifest = json.loads(tar.extractfile(member).read().decode('utf-8'))['files']
+                    continue
+                if not member.isfile() or manifest is None or member.name not in manifest:
+                    continue
+                if not safe_key(member.name, state['movies']):
+                    raise Problem(f"the server offered a file this PC did not ask for "
+                                  f"({member.name!r}); nothing was touched")
+                target = os.path.join(staging, *member.name.split('/'))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with tar.extractfile(member) as source, open(target, 'wb') as out:
+                    shutil.copyfileobj(source, out)
+                received.append(member.name)
+    except tarfile.TarError as e:
+        proc.wait()
+        raise Problem(f"the download was cut off ({e}); nothing on this PC was touched. Run the "
+                      "same command again to retry it")
+    if proc.wait() != 0 or manifest is None:
+        raise Problem("the server did not send the realigned files; nothing on this PC was "
+                      "touched. Run the same command again to retry it")
+    for rel, digest in manifest.items():
+        path = os.path.join(staging, *rel.split('/'))
+        if not os.path.isfile(path):
+            raise Problem(f"{rel} is missing from the download; nothing on this PC was touched")
+        if sha256(path) != digest:
+            raise Problem(f"{rel} arrived damaged; nothing on this PC was touched. Run the same "
+                          "command again to download it afresh")
+    print(f"{len(received)} file(s) downloaded and checked")
+    return staging, sorted(manifest)
+
+
+def install_results(state, staging, relpaths):
+    """Put each movie's new ensemble in place, keeping the one it replaces beside it.
+
+    Each movie is recorded as soon as it is done, so a round taken up again installs only what
+    it had not installed yet, instead of archiving a movie's files a second time."""
+    import numpy as np
+
+    by_movie = {}
+    for rel in relpaths:
+        for key in state['movies']:
+            if rel.startswith(key + '/'):
+                by_movie.setdefault(key, []).append(rel[len(key) + 1:])
+                break
+    stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+    installed = dict(state.get('installed') or {})
+    for key in sorted(by_movie):
+        if installed.get(key):
+            print(f"  {key}: already done earlier in this round")
+            continue
+        movie_dir = state['movies'][key]
+        names = by_movie[key]
+        source = os.path.join(staging, *key.split('/'))
+        if REALIGN_MARKER not in names:
+            report = os.path.join(source, *BLOCKED_REPORT.split('/'))
+            record, reason = {}, 'blocked'
+            if os.path.isfile(report):
+                with open(report, encoding='utf-8') as f:
+                    record = json.load(f)
+                reason = record.get('status', 'blocked')
+            print(f"  {key}: LEFT ALONE, {reason}")
+            # remembered here, so a later round does not spend another half hour being refused
+            record.update(movie=movie_dir, blocked_in=state['job'],
+                          blocked_at=dt.datetime.now().isoformat(timespec='seconds'))
+            with open(os.path.join(movie_dir, BLOCKED_MARKER), 'w', encoding='utf-8') as f:
+                json.dump(record, f, indent=1)
+            installed[key] = 'blocked'
+            state['installed'] = installed
+            save_job_state(state)
+            continue
+
+        new_points = os.path.join(source, POINTS_SMOOTHED)
+        old_points = os.path.join(movie_dir, POINTS_SMOOTHED)
+        if os.path.isfile(new_points) and os.path.isfile(old_points):
+            if np.load(new_points).shape != np.load(old_points).shape:
+                print(f"  {key}: LEFT ALONE, the new points have a different shape from this "
+                      f"movie's own; nothing was replaced")
+                installed[key] = 'mismatch'
+                state['installed'] = installed
+                save_job_state(state)
+                continue
+
+        archive = os.path.join(movie_dir, f'superseded_ensemble_{stamp}')
+        os.makedirs(archive, exist_ok=True)
+        moved = []
+        # the marker last, so an interrupted install leaves a movie that is redone, not one that
+        # looks finished
+        for name in sorted(n for n in names if n != REALIGN_MARKER):
+            target = os.path.join(movie_dir, *name.split('/'))
+            top = name.split('/')[0]
+            existing = os.path.join(movie_dir, top)
+            if os.path.exists(existing) and top not in moved:
+                shutil.move(existing, os.path.join(archive, top))
+                moved.append(top)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.move(os.path.join(source, *name.split('/')), target)
+        marker = json.load(open(os.path.join(source, REALIGN_MARKER), encoding='utf-8'))
+        marker.update(movie=movie_dir, installed_from=state['job'],
+                      installed_at=dt.datetime.now().isoformat(timespec='seconds'))
+        with open(os.path.join(movie_dir, REALIGN_MARKER), 'w', encoding='utf-8') as f:
+            json.dump(marker, f, indent=1)
+        if os.path.isfile(os.path.join(movie_dir, BLOCKED_MARKER)):
+            os.remove(os.path.join(movie_dir, BLOCKED_MARKER))
+        collapse = marker.get('collapse_pct') or []
+        change = (f", frames with both wings on one wing {collapse[0]:.1f}% -> {collapse[1]:.1f}%"
+                  if len(collapse) == 2 else '')
+        print(f"  {key}: new ensemble in place{change}; what it replaced is in "
+              f"{os.path.basename(archive)}/")
+        installed[key] = 'realigned'
+        state['installed'] = installed
+        save_job_state(state)
+    return installed
+
+
+def realign(args):
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    log_path = os.path.join(REPORTS_DIR, f"realign_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    with open(log_path, 'w', encoding='utf-8') as handle:
+        out, err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = Tee(out, handle), Tee(err, handle)
+        try:
+            return realign_steps(args, log_path)
+        except Problem as e:
+            print(f"\nSTOPPED: {e}", flush=True)
+            print(f"log of this round: {log_path}", flush=True)
+            return 1
+        finally:
+            sys.stdout, sys.stderr = out, err
+
+
+def realign_steps(args, log_path):
+    started = time.time()
+    settings = load_settings()
+    # the check itself reads nothing but this PC's own disk, so anyone may run it; repairing a
+    # movie computes on the cluster and writes there, which only the pipeline's owner may do
+    check_only = args.check_only or not may_upload(settings)
+    folders = list(args.folders)
+    if not folders:
+        answer = ask("Folder to realign (one experiment, or a folder of experiments)")
+        folders = [answer] if answer else []
+    roots = []
+    for folder in folders:
+        folder = os.path.abspath(folder.strip().strip('"'))
+        if not os.path.isdir(folder):
+            raise Problem(f"not a folder: {folder}")
+        roots.append(folder)
+    if not roots:
+        raise Problem("no folder given")
+
+    updated = update_if_outdated(args, settings)
+    if updated is not None:
+        return updated
+
+    total = 1 if check_only else (6 if args.no_reanalyse else 7)
+    state = None if (args.restart or check_only) else unfinished_job(roots)
+    if state:
+        print(f"\ncontinuing the round started {state['created']} ({len(state['movies'])} movie(s), "
+              f"job {state['job']})")
+
+    if state is None:
+        stage(1, total, "checking which movies' ensembles would change")
+        import collect_analysis_h5 as collector
+        import reanalyse_movies as rm
+        movie_root = {}
+        for root in roots:
+            for movie_dir in rm.find_movie_dirs(root):
+                movie_root.setdefault(movie_dir, root)
+        movie_dirs = sorted(movie_root)
+        if not movie_dirs:
+            raise Problem(f"no predicted movies (folders with {rm.POINTS_NAME}) under: "
+                          f"{', '.join(roots)}")
+        print(f"{len(movie_dirs)} movie(s) to check; this reads each one's ensemble members")
+        flagged, skipped, unreadable, blocked = screen_movies(movie_dirs, args.retry_blocked)
+        for movie_dir, problem in unreadable:
+            print(f"  could not read {os.path.basename(movie_dir)}: {problem}")
+        unchanged = len(movie_dirs) - len(flagged) - len(unreadable) - blocked
+        print(f"\n{len(flagged)} movie(s) would change, {unchanged} would come out exactly as "
+              f"they are ({skipped} of them already realigned or without members to compare)")
+        if blocked:
+            print(f"{blocked} more were tried in an earlier round and refused, so they are left "
+                  f"out; --retry-blocked offers them again")
+        for entry in sorted(flagged, key=lambda e: -e['exchanged_pairs'])[:10]:
+            print(f"  {os.path.basename(entry['movie_dir']):<34} "
+                  f"{entry['exchanged_pairs']} (frame, candidate) pair(s) the other way round")
+        if len(flagged) > 10:
+            print(f"  ... and {len(flagged) - 10} more")
+        if not flagged:
+            print("\nNothing to realign: " + ("the only movies that would change were tried "
+                                               "before and refused" if blocked else
+                                               "every movie's ensemble already has its wings "
+                                               "the same way round") + ".")
+            return 0
+        if check_only:
+            if args.check_only:
+                print("\nThis was the check only. Run it without --check-only to repair them.")
+            else:
+                print("\nRepairing these movies runs on the lab cluster, and this account may "
+                      "not write there, so only the pipeline's owner can do it. Send the list "
+                      "above to Lior. Nothing has left this PC, and nothing here was changed.")
+            return 0
+        groups = {e['movie_dir']: collector.experiment_key(e['movie_dir'], movie_root[e['movie_dir']])
+                  for e in flagged}
+        state = new_job_state(roots, movie_keys(flagged, groups))
+        save_job_state(state)
+
+    if not state['uploaded']:
+        stage(2, total, f"sending {len(state['movies'])} movie(s) to the cluster")
+        upload_members(settings, state)
+        state['uploaded'] = True
+        save_job_state(state)
+    else:
+        stage(2, total, "the cluster already has these movies")
+
+    if not state['job_id']:
+        stage(3, total, "asking the cluster to re-run their ensembles")
+        answer = helper_json(settings, 'realign-submit', '--job', state['job'],
+                             '--throttle', str(args.at_once),
+                             what='the cluster would not start the realignment')
+        state['job_id'] = str(answer['job_id'])
+        save_job_state(state)
+        print(f"slurm job {state['job_id']}, {answer['movies']} task(s), "
+              f"at most {args.at_once} at a time")
+    else:
+        stage(3, total, f"the cluster is already running this round (slurm job {state['job_id']})")
+
+    stage(4, total, "waiting for the cluster")
+    print("Each movie takes about half an hour, longer for a long one. You can close this "
+          "window and run the same command later to pick it up again.")
+    wait_for_job(settings, state, args.poll_seconds)
+
+    stage(5, total, "downloading the new ensembles and putting them in place")
+    staging, relpaths = fetch_results(settings, state)
+    installed = install_results(state, staging, relpaths)
+    state['installed'] = installed
+    save_job_state(state)
+    shutil.rmtree(staging, ignore_errors=True)
+    realigned = [k for k, v in installed.items() if v == 'realigned']
+    print(f"\n{len(realigned)} movie(s) realigned, {len(installed) - len(realigned)} left alone")
+
+    stage(6, total, "clearing the round off the cluster")
+    if args.keep_on_server:
+        print(f"kept, as asked: {settings['server_project']}/realign_jobs/{state['job']}")
+    else:
+        helper_json(settings, 'realign-clean', '--job', state['job'],
+                    what='the cluster could not delete this round')
+        print("the uploaded members and their results are gone from the cluster; this PC keeps "
+              "both the new files and the ones they replaced")
+    state['finished'] = True
+    save_job_state(state)
+
+    minutes = (time.time() - started) / 60
+    print(f"\n=== realignment finished in {minutes:.1f} min ===")
+    print(f"log of this round: {log_path}")
+    if not realigned:
+        print("No movie changed, so there is nothing to re-analyse.")
+        return 0
+    if args.no_reanalyse:
+        print("\nThe realigned movies now need re-analysing: run reanalyse.bat over the same "
+              "folder when you are ready.")
+        return 0
+
+    stage(7, total, "re-analysing the realigned movies, and collecting them")
+    print("A realigned movie counts as stale, so this redoes exactly those, plus any other "
+          "movie whose products are out of date.\n")
+    nested = argparse.Namespace(folders=[str(r) for r in roots], no_upload=args.no_upload,
+                                no_update=True, include_bad=args.include_bad)
+    return run_steps(nested, log_path)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -662,9 +1194,34 @@ def main():
                                  'folders (they are always re-analysed; by default they are '
                                  'not collected). Each goes under its experiment\'s <bad '
                                  'folder>/ subfolder, never among its usable movies')
+    realign_parser = sub.add_parser(
+        'realign', help="re-run the ensemble of movies whose wings are labelled inconsistently, "
+                        "on the cluster, then re-analyse them here")
+    realign_parser.add_argument('folders', nargs='*',
+                                help='one experiment folder, or a folder of experiments (asked if omitted)')
+    realign_parser.add_argument('--check-only', action='store_true',
+                                help='only say which movies would change; touch nothing')
+    realign_parser.add_argument('--retry-blocked', action='store_true',
+                                help='offer again the movies an earlier round was refused')
+    realign_parser.add_argument('--at-once', type=int, default=20,
+                                help='how many movies the cluster works on at a time (default 20)')
+    realign_parser.add_argument('--poll-seconds', type=int, default=120,
+                                help='how often to ask the cluster how it is going (default 120)')
+    realign_parser.add_argument('--restart', action='store_true',
+                                help='start a new round instead of continuing the last unfinished one')
+    realign_parser.add_argument('--keep-on-server', action='store_true',
+                                help='leave the uploaded members and results on the cluster')
+    realign_parser.add_argument('--no-reanalyse', action='store_true',
+                                help='install the new ensembles but do not re-analyse them yet')
+    realign_parser.add_argument('--no-upload', action='store_true',
+                                help='re-analyse and collect on this PC only')
+    realign_parser.add_argument('--no-update', action='store_true',
+                                help='run with this copy of the code even if the server has newer')
+    realign_parser.add_argument('--include-bad', action='store_true',
+                                help='also collect movies from bad_signal/bad_wings folders')
     sub.add_parser('update', help='download the latest committed code from the server')
     args = parser.parse_args()
-    handlers = {'setup': setup, 'run': run, 'update': update}
+    handlers = {'setup': setup, 'run': run, 'update': update, 'realign': realign}
     if args.command not in handlers:
         parser.print_help()
         return 2

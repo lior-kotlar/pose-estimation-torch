@@ -376,7 +376,8 @@ A whole experiment also runs as one job on one node: `--jobs N` re-analyses N mo
 `--only-stale` skips movies whose products the current code and declaration already made (so a
 re-run resumes), and `--dry-run` is a preflight that writes nothing. Movies kept on a PC are
 re-analysed there, collected and uploaded to `collected_h5` with no cluster job at all; see
-[LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md).
+[LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md). Their ensembles can be re-run from there too, on the
+cluster, with `local_reanalysis/realign.bat` (below).
 
 ### 2b. Predict only (movies already built)
 
@@ -482,11 +483,15 @@ sbatch -J raw_<name> --array=0-19 --gres=gpu:0 --mem=16g --mail-type=FAIL \
 .env/bin/python code/plot_gravity_body.py <dir> -k 100
 
 # Re-run the ensemble step for movies predicted before the pose models' wing labels were
-# aligned (Predictor2D.harmonize_wing_labels). CPU only, from the saved per-model candidates;
+# aligned (wing_labels.harmonize_wing_labels). CPU only, from the saved per-model candidates;
 # installs the new 3D points only where nothing got worse, then re-analyses. --dry-run lists
-# which movies would change at all.
+# which movies would change at all. Any further argument is passed on to realign_ensemble.py.
 .env/bin/python code/realign_ensemble.py --list <manifest> --dry-run
 sbatch --array=1-$(wc -l < <manifest>) sbatch_files/realign_ensemble_array.sh <manifest>
+# Movies kept on a PC take the same route without anyone touching the cluster by hand: their
+# owner runs local_reanalysis/realign.bat, which uploads only the ensemble members of the
+# movies that would change, submits this same array job, brings the new points back and
+# re-analyses them there (LOCAL_REANALYSIS.md).
 
 # Interactive viewer: the fly flying through the lab frame, scrubbable, beside
 # two panels of analysis signals (--rows for more) -- time series, or one wing's
