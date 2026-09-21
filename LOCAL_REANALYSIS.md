@@ -59,9 +59,21 @@ Double-click **`C:\pose-reanalysis\local_reanalysis\setup.bat`**. It:
 3. asks for your **server username** (Enter keeps the suggested server address),
 4. asks whether to log in **without a password** from now on. Answer `y`, then type your server
    password one last time,
-5. checks that it can reach the server.
+5. checks that it can reach the server, and whether this account may publish results to it.
 
 It ends with `Setup finished.` Press any key to close the window.
+
+**Only the pipeline's owner uploads.** If your account cannot write the upload folder on the
+server, setup says so and turns uploading off for this PC:
+
+```
+This account cannot write to /cs/labs/tsevi/lior.kotlar/pose-estimation-torch/collected_h5,
+so this PC will re-analyse and collect movies for itself only -- nothing is uploaded.
+```
+
+Everything else works exactly the same: your movies are re-analysed in place and collected into
+`C:\pose-reanalysis\collected_h5`, and a run then has five steps instead of six. To hand
+results over, give the owner that folder (or the movie folders themselves).
 
 ---
 
@@ -82,7 +94,7 @@ A window opens and works through six steps:
 | 3 checking every movie | shows, per movie, whether its trigger and declaration were found and whether it needs redoing |
 | 4 re-analysing | redoes the movies that need it, several at a time (about 10–20 s per movie) |
 | 5 collecting | copies each movie's analysis h5 into `C:\pose-reanalysis\collected_h5` |
-| 6 uploading | sends new or changed h5 files to the server, which checks every file before keeping it |
+| 6 uploading | sends new or changed h5 files to the server, which checks every file before keeping it (skipped when this PC may not upload) |
 
 It ends with a summary like:
 
@@ -240,7 +252,8 @@ with a cluster-made one, allow a small tolerance rather than exact equality.
 | `server_user` | your username on the server |
 | `server_host` | the server address |
 | `server_project` | the lab's copy of the project (code and declarations) |
-| `upload_to` | where uploads go (empty = `<server_project>/collected_h5`). Lab members without write access to it should set a folder of their own |
+| `upload_to` | where uploads go (empty = `<server_project>/collected_h5`) |
+| `upload` | whether this PC publishes to the server at all. Setup sets it to `false` for an account that cannot write `upload_to` |
 | `collected_h5` | where the PC keeps collected files (empty = `C:\pose-reanalysis\collected_h5`) |
 | `jobs` | movies at once (0 = half the processor threads; each movie needs about 1.5 GB of memory) |
 

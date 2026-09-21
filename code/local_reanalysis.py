@@ -56,6 +56,10 @@ DEFAULT_SETTINGS = {
     'server_project': '/cs/labs/tsevi/lior.kotlar/pose-estimation-torch',
     # empty: <server_project>/collected_h5
     'upload_to': '',
+    # whether this PC may publish to the cluster. setup turns it off for anyone who cannot
+    # write to the destination: only the pipeline's owner uploads, everyone else keeps their
+    # re-analysed movies on their own machine.
+    'upload': True,
     # empty: collected_h5 next to the code on this PC
     'collected_h5': '',
     # 0: half the processor threads, one movie each
@@ -112,6 +116,29 @@ def save_settings(settings):
 
 def upload_destination(settings):
     return settings['upload_to'] or posixpath.join(settings['server_project'], 'collected_h5')
+
+
+def may_upload(settings):
+    """True when this PC is allowed to publish to the cluster."""
+    return bool(settings.get('upload', True))
+
+
+def destination_writable(settings):
+    """Whether this account can write the upload destination on the cluster.
+
+    Tests the nearest folder of it that exists, since the destination itself is created on the
+    first upload."""
+    dest = shlex.quote(upload_destination(settings))
+    command = (f'd={dest}; while [ ! -e "$d" ] && [ "$d" != "/" ]; do d=$(dirname "$d"); done; '
+               'if [ -w "$d" ]; then echo WRITABLE; else echo READONLY; fi')
+    try:
+        proc = remote(settings, command, stdout=subprocess.PIPE)
+        out, _ = proc.communicate(timeout=120)
+    except (OSError, subprocess.SubprocessError, Problem):
+        return None
+    if proc.returncode != 0:
+        return None
+    return out.decode('utf-8', errors='replace').strip().endswith('WRITABLE')
 
 
 def collected_root(settings):
@@ -195,6 +222,17 @@ def setup(args):
     if check.wait() != 0:
         raise Problem(f"connected, but {SERVER_HELPER} was not found under {settings['server_project']} "
                       "or the server has no python3")
+    writable = destination_writable(settings)
+    settings['upload'] = writable is not False
+    save_settings(settings)
+    if writable is False:
+        print(f"\nThis account cannot write to {upload_destination(settings)},\n"
+              f"so this PC will re-analyse and collect movies for itself only -- nothing is "
+              f"uploaded.\nThe results stay in {collected_root(settings)} and in each movie's "
+              f"own folder.")
+    elif writable is None:
+        print("\ncould not tell whether the upload folder is writable; uploads are left on")
+
     print(f"\nSetup finished. To re-analyse, run local_reanalysis\\reanalyse.bat (see LOCAL_REANALYSIS.md).")
     return 0
 
@@ -456,7 +494,10 @@ def upload(settings):
         answer = {'ok': False, 'error': output or f'no answer from the server (exit {returncode})'}
     if not answer.get('ok'):
         raise Problem(f"the server did not accept the upload: {answer.get('error')}. The analysis "
-                      "and the local collection are kept; run again to retry the upload")
+                      "and the local collection are kept; run again to retry the upload. If it "
+                      "says the folder cannot be written, this account may not be allowed to "
+                      "publish to the cluster -- run setup.bat again, which turns uploading off "
+                      "for such an account")
     for rel in answer['results']:
         confirmed[rel] = pending[rel]
     save_ledger(ledger_path, ledger)
@@ -510,7 +551,7 @@ def run_steps(args, log_path):
         roots.append(folder)
     if not roots:
         raise Problem("no folder given")
-    upload_step = not args.no_upload
+    upload_step = may_upload(settings) and not args.no_upload
     total = 6 if upload_step else 5
 
     # before anything is imported or re-analysed, so the run uses the cluster's current code
@@ -597,6 +638,8 @@ def run_steps(args, log_path):
     print(f"collected on PC  : {collected_root(settings)}")
     if upload_step:
         print(f"on the server    : {settings['server_host']}:{upload_destination(settings)}")
+    elif not may_upload(settings):
+        print("uploads are off for this PC; the collected files stay here")
     if not_ready:
         print("\nSome movies FAILED -- see the messages above and the report.")
     return 1 if failed_any or not_ready else 0
