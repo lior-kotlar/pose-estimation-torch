@@ -60,8 +60,9 @@ POINTS_ALL = "points_3D_all.npy"   # one per ensemble member: the only real inpu
 REALIGN_MARKER = ".realigned_ensemble.json"
 BLOCKED = os.path.join(".realign_staging", "BLOCKED.json")
 ARRAY_SCRIPT = os.path.join("sbatch_files", "realign_ensemble_array.sh")
-# slurm is not always on a login shell's PATH; this is where moriah keeps it
+# slurm is not always on a shell's PATH, nor its config in the environment; moriah keeps both here
 SLURM_BIN = "/vol/slurm/moriah/bindir/bin"
+SLURM_CONF = "/vol/slurm/moriah/slurm.conf"
 JOB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -219,8 +220,12 @@ def slurm(*command):
     if not os.path.isfile(program):
         raise ValueError("%s was not found on the server, so the job could not be handled here "
                          "(looked on the PATH and in %s)" % (name, SLURM_BIN))
-    done = subprocess.run([program] + list(command[1:]), cwd=PROJECT, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, universal_newlines=True)
+    environment = dict(os.environ)
+    if not environment.get("SLURM_CONF") and os.path.isfile(SLURM_CONF):
+        environment["SLURM_CONF"] = SLURM_CONF     # without it slurm cannot find the cluster
+    done = subprocess.run([program] + list(command[1:]), cwd=PROJECT, env=environment,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          universal_newlines=True)
     if done.returncode != 0:
         raise ValueError("%s failed: %s" % (name, done.stdout.strip()))
     return done.stdout

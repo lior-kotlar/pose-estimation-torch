@@ -44,7 +44,7 @@ Open **Command Prompt** (Start menu → type `cmd`). Paste these four lines, rep
 
 ```bat
 mkdir C:\pose-reanalysis
-ssh YOUR_USERNAME@moriah-gw-01.cs.huji.ac.il "srun --ntasks=1 --mem=2g --time=0:10:00 --gres=gpu:0 --chdir=/tmp --job-name=pose_setup git -C /cs/labs/tsevi/lior.kotlar/pose-estimation-torch -c safe.directory='*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md" > C:\pose-reanalysis\download.tar
+ssh YOUR_USERNAME@moriah-gw-01.cs.huji.ac.il "SLURM_CONF=/vol/slurm/moriah/slurm.conf /vol/slurm/moriah/bindir/bin/srun --ntasks=1 --mem=2g --time=0:10:00 --gres=gpu:0 --chdir=/tmp --job-name=pose_setup git -C /cs/labs/tsevi/lior.kotlar/pose-estimation-torch -c safe.directory='*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md" > C:\pose-reanalysis\download.tar
 tar -xf C:\pose-reanalysis\download.tar -C C:\pose-reanalysis
 del C:\pose-reanalysis\download.tar
 ```
@@ -53,7 +53,9 @@ The first time you connect, ssh asks `Are you sure you want to continue connecti
 `yes`. Then type your server password. Nothing shows while you type; that's normal.
 
 `srun` in there is deliberate: `moriah-gw-01` is only the way in, and nothing may run on it, so
-every command is handed to the cluster's scheduler and runs on a compute node. You may see
+every command is handed to the cluster's scheduler and runs on a compute node. The scheduler is
+named in full, with its configuration file, because the shell you land in on the gateway has
+neither on hand. You may see
 `srun: job 123456 queued and waiting for resources` for a moment; that is the wait for a free
 node, and the download carries on by itself.
 
@@ -348,7 +350,8 @@ So you never have to pull anything by hand. Two things follow from it:
 | `the cluster would not start the realignment` | The cluster refused the job (usually a full queue or a full disk). Nothing on the PC changed; try again later. |
 | A step sits at `queued and waiting for resources` | Normal: the command is waiting for a free compute node, because nothing may run on the gateway. It continues by itself. |
 | `the lab filesystem is not mounted on <node>` | That node came up without `/cs/labs/tsevi`. The tool already waited and tried again; run the same command once more. |
-| `connected, but the check did not come back` | Either the project path is wrong, or `srun` is not available where you log in. Check the `server_project` setting, and that `ssh <server> srun --version` answers. |
+| `connected, but the check did not come back` | Either the project path is wrong, or the scheduler cannot be reached from where you log in. Check the `server_project` setting, and that this answers: `ssh <server> "SLURM_CONF=/vol/slurm/moriah/slurm.conf /vol/slurm/moriah/bindir/bin/srun --version"`. |
+| `srun: fatal: Could not establish a configuration source` | The shell you landed in has no `SLURM_CONF`. The tool sets it itself; if you are typing a command by hand, put `SLURM_CONF=/vol/slurm/moriah/slurm.conf` in front of `srun`. |
 
 To stop a run, close the window or press Ctrl+C. Run it again later to continue.
 

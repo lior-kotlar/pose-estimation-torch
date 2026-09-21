@@ -83,8 +83,10 @@ DEFAULT_SETTINGS = {
     'srun_flags': '--ntasks=1 --cpus-per-task=1 --mem=4g --time=2:00:00 --gres=gpu:0 '
                   '--chdir=/tmp --job-name=pose_pc',
 }
-# slurm is not always on a login shell's PATH; this is where moriah keeps it
+# A login shell on the gateway has neither slurm on its PATH nor SLURM_CONF in its environment,
+# so srun there cannot even find the cluster. Both are named here.
 SLURM_BIN = '/vol/slurm/moriah/bindir/bin'
+SLURM_CONF = '/vol/slurm/moriah/slurm.conf'
 SERVER_HELPER = 'code/local_reanalysis_server.py'
 UPLOAD_LEDGER = '.uploaded.json'
 # realignment: what a movie's ensemble is made of, and what re-running it leaves behind
@@ -184,7 +186,8 @@ def on_node(settings, command, attempts=1):
     cluster to do -- reading the declarations, checking a file in, tarring up the code, running
     the helper -- is handed to srun, which queues it and runs it on whichever node is free. srun
     passes stdin and stdout straight through, so the tar streams work as they did; its own
-    progress messages go to stderr, where they cannot get into the data.
+    progress messages go to stderr, where they cannot get into the data. The gateway's shell has
+    neither srun on its PATH nor SLURM_CONF set, so both are named before it is called.
 
     A node sometimes comes up without the lab filesystem mounted (the automount expires under
     load), which would fail a command for no reason of its own. So the node waits for the project
@@ -199,7 +202,9 @@ def on_node(settings, command, attempts=1):
             'if [ ! -d "$P" ]; then echo "$(hostname) cannot see $P -- either the lab '
             'filesystem is not mounted there, or the server_project setting is wrong" >&2; '
             'exit 75; fi; ')
-    launcher = ('if command -v srun >/dev/null 2>&1; then _srun=srun; '
+    launcher = (f'if [ -z "$SLURM_CONF" ] && [ -f {SLURM_CONF} ]; then SLURM_CONF={SLURM_CONF}; '
+                'export SLURM_CONF; fi; '
+                'if command -v srun >/dev/null 2>&1; then _srun=srun; '
                 f'else _srun={SLURM_BIN}/srun; fi; ')
     step = f'"$_srun" {flags} /bin/sh -c {shlex.quote(wait + command)}'
     if attempts > 1:
