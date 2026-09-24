@@ -4,16 +4,22 @@ Use this when movies were **already predicted** (they have 3D points), the predi
 are on a disk at your PC, and you want their flight data rebuilt with the current code, without
 uploading the movies or predicting again.
 
-For every movie, the tool rewrites the analysis h5, the CSV, the wing/body plots, the flight
-viewer and the two plotly pages, right inside the movie's folder. It then gathers all the
-`*_analysis_smoothed.h5` files and uploads them to the lab server.
+You do the setup once. After that, everything is one thing: **drag a folder onto
+`reanalyse.bat`**. It looks at every movie in that folder, works out which of three jobs each one
+still needs, and does only those:
 
-You do the setup once. After that, a run is: **drag a folder onto `reanalyse.bat`**.
+| | what it fixes | where it runs |
+|---|---|---|
+| **realign** | one of the pose models labelled the two wings the other way round, so the ensemble mixed them into one physical wing | the lab cluster |
+| **re-analyse** | the analysis h5, CSV, plots, flight viewer and plotly pages are older than the code, the declaration or the 3D points | your PC |
+| **render** | the overlay mp4 was made from points the movie no longer has | the lab cluster |
 
-There is one fault re-analysing cannot repair, because it is in the 3D points themselves: in some
-older movies the two wings were labelled the other way round in one of the models, and ended up
-on top of each other. `realign.bat` finds those movies and repairs them; see
-[Repairing wings labelled the wrong way round](#repairing-wings-labelled-the-wrong-way-round).
+A movie that needs nothing is skipped in no time. An experiment that only needs its videos redone
+never waits for anything else. And the three are connected the way you would expect — repairing an
+ensemble changes the 3D points, which makes the analysis out of date, which makes the video out of
+date — so asking for one can pull in the others, in that order.
+
+Before doing anything it prints what it found, so you always see the size of the job first.
 
 ---
 
@@ -23,6 +29,9 @@ on top of each other. `realign.bat` finds those movies and repairs them; see
 - The predicted movie folders on a disk. The folder you give can be one experiment, or a folder
   holding many experiments, at any depth.
 - An account on the lab server (`moriah-gw-01.cs.huji.ac.il`).
+- **Only for rebuilding videos:** the source datasets those movies were built from — the folder
+  holding each experiment's box h5 files and its `calibration.h5`. Setup asks where it is. Without
+  it everything else still works, and the movies whose video cannot be rebuilt are named.
 
 ---
 
@@ -60,7 +69,9 @@ neither on hand. You may see
 node, and the download carries on by itself.
 
 Afterwards `C:\pose-reanalysis` contains `code`, `local_reanalysis`, `LOCAL_REANALYSIS.md` and
-`requirements-analysis.txt`.
+`requirements-analysis.txt`. In `local_reanalysis` you will find the files you double-click or drag
+folders onto: `setup.bat`, `reanalyse.bat` (the everyday one), `check.bat`, `realign.bat`,
+`render.bat`, `reanalyse_including_bad.bat` and `update.bat`.
 
 ### 3. Run the setup
 
@@ -69,9 +80,12 @@ Double-click **`C:\pose-reanalysis\local_reanalysis\setup.bat`**. It:
 1. creates a private Python environment in `C:\pose-reanalysis\venv`,
 2. installs the packages it needs (about 1 GB, a few minutes),
 3. asks for your **server username** (Enter keeps the suggested server address),
-4. asks whether to log in **without a password** from now on. Answer `y`, then type your server
+4. asks where you keep your **source datasets** — the folder holding each experiment's movies as
+   they came off the rig. Only rebuilding a video needs it; leave it empty if you do not have them
+   on this PC, and everything else still works,
+5. asks whether to log in **without a password** from now on. Answer `y`, then type your server
    password one last time,
-5. checks that it can reach the server, and whether this account may publish results to it.
+6. checks that it can reach the server, and whether this account may publish results to it.
 
 It ends with `Setup finished.` Press any key to close the window.
 
@@ -83,13 +97,14 @@ This account cannot write to /cs/labs/tsevi/lior.kotlar/pose-estimation-torch/co
 so this PC will re-analyse and collect movies for itself only -- nothing is uploaded.
 ```
 
-Everything else works exactly the same: your movies are re-analysed in place and collected into
-`C:\pose-reanalysis\collected_h5`, and a run then has five steps instead of six. To hand
-results over, give the owner that folder (or the movie folders themselves).
+Such a PC still re-analyses its movies in place and collects them into
+`C:\pose-reanalysis\collected_h5`; what it cannot do is the two stages that run on the cluster.
+`check.bat` still tells you which movies need them — send that list on. To hand results over, give
+the owner the collected folder (or the movie folders themselves).
 
 ---
 
-## Re-analysing movies
+## Running it
 
 **Drag the folder** onto `C:\pose-reanalysis\local_reanalysis\reanalyse.bat`.
 Or double-click `reanalyse.bat` and paste the folder's path when asked.
@@ -97,27 +112,42 @@ Or double-click `reanalyse.bat` and paste the folder's path when asked.
 Tip: right-click `reanalyse.bat` → *Send to* → *Desktop (create shortcut)*. You can then drop
 folders on the desktop icon.
 
-A window opens and works through six steps:
+It always starts by working out what each movie needs, and shows you before it does anything:
 
-| step | what happens |
+```
+=== working out what each movie needs ===
+248 movie(s) in 9 experiment(s)
+9 declaration file(s) found on the server
+analysis code 5c8540b2fff20855 (commit c870bb1)
+
+experiment                       movies  realign  re-analyse  render  nothing
+Tsory/ex201224_dark_roll_t0_7ms       8        0           0       8        0
+Tsory/ex210825_dark_yaw_t0          206       31         206     206        0
+roni_dark/2023_08_07_10ms             3        0           0       0        3
+
+to do   : realign 31, reanalyse 206, render 217
+skipping: 25 movie(s) already up to date
+```
+
+Then it does the stages that have work in them, in that order, asking again after each one — so
+nothing is done twice and nothing is done for a movie that turned out not to need it.
+
+| stage | how long |
 |---|---|
-| 1 finding predicted movies | lists the experiments and how many movies each has |
-| 2 downloading declarations | fetches each experiment's `perturbation.json` (pulse and lighting) from the server |
-| 3 checking every movie | shows, per movie, whether its trigger and declaration were found and whether it needs redoing |
-| 4 re-analysing | redoes the movies that need it, several at a time (about 10–20 s per movie) |
-| 5 collecting | copies each movie's analysis h5 into `C:\pose-reanalysis\collected_h5` |
-| 6 uploading | sends new or changed h5 files to the server, which checks every file before keeping it (skipped when this PC may not upload) |
+| realigning, on the cluster | about half an hour a movie, many at once |
+| re-analysing, here | 10–20 seconds a movie |
+| rendering, on the cluster | about 20 minutes per thousand frames, many at once |
+| collecting and uploading | seconds |
 
-It ends with a summary like:
+**To see the list without doing anything, use `check.bat`.** It is safe to run at any time, on any
+PC: it reads your own disk, changes nothing, and uploads nothing.
 
-```
-=== finished in 1.2 min ===
-re-analysed      : done 8
-report           : C:\pose-reanalysis\reports\reanalyse_report_20260917_130727.csv
-log of this run  : C:\pose-reanalysis\reports\run_20260917_130649.log
-collected on PC  : C:\pose-reanalysis\collected_h5
-on the server    : moriah-gw-01.cs.huji.ac.il:/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/collected_h5
-```
+**To do just one stage**, use `realign.bat` or `render.bat`. The everyday command is
+`reanalyse.bat`, which does whichever of them a movie needs.
+
+**Closing the window is always safe.** A cluster stage is written down as it goes, so running the
+same command again picks the round up where it stopped rather than starting it over. Movies
+already done are skipped in no time.
 
 ### Movies in `bad_signal` and `bad_wings` folders
 
@@ -136,21 +166,6 @@ onward still never picks them up by accident.
 window is closed, or the connection drops, **just run the same thing again** and it continues
 where it stopped.
 
-### What changes in each movie folder
-
-| file | |
-|---|---|
-| `<movie>_analysis_smoothed.h5` | the flight data (the file the downstream analysis uses) |
-| `<movie>_analysis_smoothed.csv` | the same per-frame data as a table |
-| `<movie>_analysis_smoothed_flight_viewer.html` | interactive viewer; open it in a browser |
-| `wing_angles.png`, `body_angular_acceleration.png` | the plots |
-| `All body data.html`, `movie_html.html` | plotly pages |
-| `source.json` | where the movie came from, and which code analysed it |
-| `superseded_<date>_<time>\` | **the previous versions of all of the above**; nothing is deleted |
-
-The predictions themselves (3D points, model outputs) and `movie 2D and 3D.mp4` are never
-touched.
-
 ### The report
 
 `C:\pose-reanalysis\reports\reanalyse_report_<time>.csv` has one row per movie:
@@ -168,108 +183,82 @@ If anything looked wrong, that file says what happened, even after the window is
 
 ---
 
-## Repairing wings labelled the wrong way round
+## The two jobs that run on the cluster
 
-### What this is for, and why re-analysing cannot do it
+Both need more than your PC has, so `reanalyse.bat` sends what they need, has the cluster do the
+work, and brings the result back into the movie's own folder. Both are written down as they go, so
+closing the window costs nothing.
 
-Every movie is predicted by several models at once, and their answers are combined into one set
-of 3D points — the **ensemble**. In some movies one model labelled the fly's two wings the other
-way round from the rest. The combining step then averaged that model's "left wing" with the
-others' left wing, and the result put **both wings, and both hinges, on one physical wing** for
-part of the movie. The wing angles of such a movie are unusable, and its body angles can be
-affected too.
+### Repairing wings labelled the wrong way round
+
+Every movie is predicted by several models at once, and their answers are combined into one set of
+3D points — the **ensemble**. In some movies one model labelled the fly's two wings the other way
+round from the rest. The combining step then averaged that model's "left wing" with the others'
+left wing, and the result put **both wings, and both hinges, on one physical wing** for part of the
+movie. The wing angles of such a movie are unusable.
 
 Predictions made after 14 September 2026 already have this fixed. Older ones do not, and
 **re-analysing cannot repair them**: the damage sits in the 3D points, which the analysis only
-reads. The only cure is to combine the models again, with the labels aligned first.
+reads. The only cure is to combine the models again, with the labels aligned first — about half an
+hour of computing a movie, which is why it runs on the cluster and only for the movies that need
+it (about one in six of the ones checked so far).
 
-That is what `realign.bat` does. It is a separate job because it is expensive — about half an
-hour of computing per movie, against about 15 seconds for a re-analysis — so it runs on the lab
-cluster rather than on your PC, and only for the movies that actually need it (about one in six
-of the ones checked so far).
+Only the ensemble members travel, about 18 MB a movie. Nothing else is needed: not the source
+movie, not the calibration, not the video.
 
-> **Only the pipeline's owner can repair movies this way**, because the repair computes on the
-> cluster and writes there. On any other PC, `realign.bat` still does the checking step — which
-> reads nothing but your own disk — tells you which of your movies are affected, and stops
-> without changing anything. Send that list to Lior.
-
-### How to use it
-
-**Drag the folder** onto `C:\pose-reanalysis\local_reanalysis\realign.bat` — the same folder you
-would give `reanalyse.bat`, one experiment or a folder of many. Then leave it running.
-
-| step | what happens | how long |
-|---|---|---|
-| 1 checking | reads every movie's model files and reports how many would change. Nothing leaves the PC | a few seconds per movie |
-| 2 sending | uploads only the flagged movies' model files, 10–20 MB each, by length | a minute or two |
-| 3 starting | asks the cluster to re-combine them, 20 movies at a time | seconds |
-| 4 waiting | the cluster works; the window prints how many are done as they finish | **about 30 min a movie, 20 at a time** |
-| 5 downloading | brings the new points back, checks every file, and puts them in place | a minute |
-| 6 clearing | deletes the round from the cluster; your PC keeps both the new files and the old | seconds |
-| 7 re-analysing | re-analyses the repaired movies (and any other movie in the folder that is out of date), collects and uploads them, exactly like `reanalyse.bat` | 15 s per movie |
-
-If nothing needs repairing, it says so after step 1 and stops:
-
-```
-0 movie(s) would change, 112 would come out exactly as they are
-
-Nothing to realign. Every movie's ensemble already has its wings the same way round.
-```
-
-**You can close the window at any time.** Run the same command again and it picks the round up
-where it left off — it does not upload or re-run anything twice. A round that is still on the
-cluster is continued, not started again.
-
-### A movie is changed only when nothing got worse
+#### A movie is changed only when nothing got worse
 
 Re-combining is not automatically better, so every movie is judged before anything is replaced.
-The cluster compares the old and the new points on four things:
+The cluster compares the old and the new points on four things: how many frames have both wings on
+one wing, how many wing stroke angles come out impossible, how much each wing's shape wobbles from
+frame to frame, and the body's pitch and yaw, which should not move at all.
 
-- how many frames have both wings on one wing,
-- how many wing stroke angles come out impossible,
-- how much each wing's shape wobbles from frame to frame,
-- the body's pitch and yaw, which should not move at all.
-
-If any of those got worse, **the movie is left exactly as it was** and the round says why:
+If any of those got worse, **the movie is left exactly as it was** and the run says why:
 
 ```
   Tsory\ex210103_dark_yaw_t0_mixed\mov_21: LEFT ALONE, BLOCKED: more out-of-range phi
 ```
 
-Such a movie is not re-analysed either, because nothing about it changed. The refusal is
-remembered in the movie's folder (`.realign_blocked.json`, which also holds the numbers behind
-it), so later rounds leave it out instead of spending another half hour being refused again.
-`--retry-blocked` offers those movies once more. Send its name to Lior if you want it looked at.
+The refusal is remembered in the movie's folder (`.realign_blocked.json`, which also holds the
+numbers behind it), so later runs leave it out instead of spending another half hour being refused
+again. `--retry-blocked` offers those movies once more. Such a movie is not re-analysed or
+re-rendered either, because nothing about it changed.
 
-### What changes in a repaired movie's folder
+### Rebuilding the overlay video
 
-| file | |
+`movie 2D and 3D.mp4` is drawn from the 3D points reprojected onto the camera images. When the
+points change — a repair, or an analysis that decides left from right differently — the video no
+longer matches the h5 beside it, and after a repair it can be showing both wings collapsed onto one
+while the data says otherwise.
+
+Rendering needs the **camera images**, which are in the box h5 your movies were built from. That is
+the one thing a movie folder does not contain, so this is the only stage that needs your datasets
+folder (setup asks for it once). The renderer reads one time-channel per camera out of nine, so
+only those are sent: about 60 MB a movie instead of 185 MB. The finished mp4 comes back and the old
+one is kept beside it.
+
+A movie whose box h5 cannot be found is reported and skipped; nothing about it is changed:
+
+```
+cannot render 9 movie(s): their source box h5 was not found (--dataset-root says where to look)
+```
+
+**Videos made before this existed cannot be judged.** Nothing in an older movie folder records what
+its video was made from, so those are listed as unsure and left alone rather than redone blindly —
+ten hours of cluster time for videos that are mostly fine. `render.bat <folder> --render-unknown`
+redoes them anyway. From now on each video carries a `video.json` saying exactly which points it
+came from, so the question answers itself.
+
+### What changes in a movie's folder
+
+| file | when |
 |---|---|
-| `points_3D_smoothed_ensemble_best_method.npy` | **the 3D points**, re-combined. This is what the analysis reads |
-| `points_3D_ensemble_best_method.npy` | the same before smoothing |
-| `all_models_combinations.npy`, `all_frames_scores.json`, `ensemble_model_selection_summary.*`, `model_index_legend.json`, `model_selection_visualizations\` | which models were chosen for which frame |
-| `.realigned_ensemble.json` | the record: how many labels were exchanged, and the before/after numbers |
-| `superseded_ensemble_<date>_<time>\` | **the previous versions of all of the above**; nothing is deleted |
-
-A movie that was refused gets only `.realign_blocked.json` and is otherwise untouched.
-
-Then step 7 rewrites the analysis h5, CSV, plots and viewer from the new points, exactly as a
-normal run does, and the versions it replaces go into a `superseded_<date>_<time>\` folder as
-usual. The movie's analysis h5 records that its points came from a repaired ensemble.
+| `points_3D_smoothed_ensemble_best_method.npy` and the model-selection files | a repair |
+| `<movie>_analysis_smoothed.h5`, `.csv`, `wing_angles.png`, `body_angular_acceleration.png`, the flight viewer, the plotly pages, `source.json` | a re-analysis |
+| `movie 2D and 3D.mp4`, `points_ensemble_smoothed_reprojected.npy`, `video.json` | a render |
+| `superseded_<date>_<time>\` and `superseded_ensemble_<date>_<time>\` | **the previous version of everything above**; nothing is ever deleted |
 
 The predictions of each individual model are never touched — only the combination of them.
-
-### Just asking, without repairing anything
-
-Add `--check-only` to stop after step 1:
-
-```
-realign.bat <folder> --check-only
-```
-
-It lists the movies whose ensembles would change and touches nothing: no upload, no cluster, no
-change on your PC. On a PC that may not publish to the cluster, that is what `realign.bat` does
-anyway.
 
 ---
 
@@ -323,9 +312,13 @@ starting the run with the updated code
 
 So you never have to pull anything by hand. Two things follow from it:
 
-- After the code changes, the next run **redoes every movie**, because what the products contain
-  is decided by the code that made them. That is the point of the check: it stops you from
-  re-analysing with an old copy and having to do it again later.
+- When the **analysis** code changes, the next run re-analyses every movie, because what the
+  products contain is decided by the code that made them. That is the point of the check: it stops
+  you from re-analysing with an old copy and having to do it again later. A change that does not
+  touch the analysis costs nothing — the survey still reports those movies as up to date.
+- Videos are **not** redone by a code change on its own. A video is only out of date when the
+  points it was drawn from have moved, which is a question the survey answers from the movie's own
+  files.
 - `local_reanalysis\update.bat` still exists if you want to update without running anything, and
   `reanalyse.bat <folder> --no-update` runs with the copy you have.
 
@@ -344,12 +337,15 @@ So you never have to pull anything by hand. Two things follow from it:
 | A movie `FAILED` with **"does not record where the camera trigger is"** | Its previous analysis is too old to place frame 0 at the camera trigger, so it is skipped rather than numbered wrongly. Ask Lior. |
 | Any other `FAILED` movie | The message above it and the `error` column of the report say why. The other movies are unaffected. |
 | `no predicted movies ... under` | That folder has no movie folders with `points_3D_smoothed_ensemble_best_method.npy` in them. Check the path. |
-| `realign.bat` says **only the pipeline's owner** can repair | Expected on any PC but Lior's. The list of affected movies it printed is the useful part; send it on. |
-| A realign round says `LEFT ALONE, BLOCKED: ...` | Re-combining that movie would have made something worse, so it was not touched. Nothing to undo. |
-| A realign round stops midway (window closed, connection lost) | Run `realign.bat` on the same folder again: it continues the round, and never repeats work already done. |
-| `the cluster would not start the realignment` | The cluster refused the job (usually a full queue or a full disk). Nothing on the PC changed; try again later. |
+| It says **only the pipeline's owner** can do a stage | Expected on any PC but Lior's: realigning and rendering both compute on the cluster. The list of affected movies it printed is the useful part; send it on. Re-analysing and collecting still run. |
+| A movie says `LEFT ALONE, BLOCKED: ...` | Re-combining that movie would have made something worse, so it was not touched, and it is not re-analysed or re-rendered either. Nothing to undo. |
+| A cluster stage stops midway (window closed, connection lost) | Run the same command on the same folder again: it picks the round up where it stopped and never repeats work already done. |
+| `the cluster would not start this round` | The cluster refused the job (usually a full queue or a full disk). Nothing on the PC changed; try again later. |
 | A step sits at `queued and waiting for resources` | Normal: the command is waiting for a free compute node, because nothing may run on the gateway. It continues by itself. |
 | `the lab filesystem is not mounted on <node>` | That node came up without `/cs/labs/tsevi`. The tool already waited and tried again; run the same command once more. |
+| `cannot render N movie(s): their source box h5 was not found` | Point `dataset_root` at the folder holding your experiments' source data (run `setup.bat` again, or edit the settings file). Everything else still runs. |
+| `unsure about the video of N movie(s)` | Those videos predate the stamp that says what a video was made from, so nothing on disk can judge them. They are left alone; `render.bat <folder> --render-unknown` redoes them. |
+| A stage you expected does not run | `check.bat` prints why: a movie only appears under a stage when its fingerprints say it is out of date. |
 | `connected, but the check did not come back` | Either the project path is wrong, or the scheduler cannot be reached from where you log in. Check the `server_project` setting, and that this answers: `ssh <server> "SLURM_CONF=/vol/slurm/moriah/slurm.conf /vol/slurm/moriah/bindir/bin/srun --version"`. |
 | `srun: fatal: Could not establish a configuration source` | The shell you landed in has no `SLURM_CONF`. The tool sets it itself; if you are typing a command by hand, put `SLURM_CONF=/vol/slurm/moriah/slurm.conf` in front of `srun`. |
 
@@ -369,6 +365,19 @@ cluster, apart from floating-point noise between Windows and Linux: wing and bod
 to about 0.00000001°, angular acceleration to about 0.002 °/s² on values of around
 100,000 °/s². Frame numbers, labels and invalid frames are identical. To compare a PC-made h5
 with a cluster-made one, allow a small tolerance rather than exact equality.
+
+**What a render sends and gets back.** The box h5 holds the camera images as nine channels per
+frame — three per camera, of which the renderer reads one. Only those are sent, which turns 185 MB
+a movie into about 60 MB, together with `calibration.h5`, `prescan_cam_validity.npz` and the
+movie's own analysis h5. The cluster reprojects the h5's own 3D points onto the images and encodes
+the mp4, which comes back at 40–125 MB depending on the movie's length. Nothing about the round
+depends on where the movie's data lived when it was predicted: the member config the cluster reads
+is written fresh, naming the copies that were just uploaded.
+
+**How a video's age is known.** Each render leaves a `video.json` beside the mp4 recording the
+fingerprint of the 3D points it was drawn from. A later run compares that with the fingerprint in
+the analysis h5, so it can tell whether a video is still right **without the box h5 and without
+asking the cluster**. That is what lets a run skip rendering a movie whose points never moved.
 
 **What a realign round sends and gets back.** Per flagged movie it uploads each model's
 `points_3D_all.npy` and its small config, plus the two current ensemble point files for the
@@ -398,6 +407,7 @@ for it and the short questions are simply handed to slurm again.
 | `upload` | whether this PC publishes to the server at all, and so whether it may repair movies on the cluster. Setup sets it to `false` for an account that cannot write `upload_to` |
 | `collected_h5` | where the PC keeps collected files (empty = `C:\pose-reanalysis\collected_h5`) |
 | `jobs` | movies at once (0 = half the processor threads; each movie needs about 1.5 GB of memory) |
+| `dataset_root` | the folder holding each experiment's source data — the box h5 files and `calibration.h5`. Only rendering needs it; empty means the tool tries only the paths recorded when the movie was predicted |
 | `srun_flags` | what the cluster's scheduler is asked for when it runs a command for this PC. Emptying it would run commands on the login gateway instead, which the lab does not allow |
 
 **The same steps on the cluster.**
@@ -413,7 +423,8 @@ upload (through `code/local_reanalysis_server.py` on the server). The repair ste
 
 ```bash
 .env/bin/python code/realign_ensemble.py --list <manifest> --dry-run
-sbatch --array=1-$(wc -l < <manifest>) sbatch_files/realign_ensemble_array.sh <manifest>
+sbatch --array=1-$(wc -l < <manifest>) sbatch_files/round_array.sh <manifest> \
+    code/realign_ensemble.py --no-reanalyse
 ```
 
 **Using the collected files downstream.** The upload stops at `collected_h5`. Copying files into

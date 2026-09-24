@@ -376,8 +376,9 @@ A whole experiment also runs as one job on one node: `--jobs N` re-analyses N mo
 `--only-stale` skips movies whose products the current code and declaration already made (so a
 re-run resumes), and `--dry-run` is a preflight that writes nothing. Movies kept on a PC are
 re-analysed there, collected and uploaded to `collected_h5` with no cluster job at all; see
-[LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md). Their ensembles can be re-run from there too, on the
-cluster, with `local_reanalysis/realign.bat` (below).
+[LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md). The two jobs that do need the cluster -- re-running an
+ensemble, and rendering an overlay video -- are driven from the same command, which sends only what
+each one needs and brings the result back into the movie's folder.
 
 ### 2b. Predict only (movies already built)
 
@@ -485,13 +486,16 @@ sbatch -J raw_<name> --array=0-19 --gres=gpu:0 --mem=16g --mail-type=FAIL \
 # Re-run the ensemble step for movies predicted before the pose models' wing labels were
 # aligned (wing_labels.harmonize_wing_labels). CPU only, from the saved per-model candidates;
 # installs the new 3D points only where nothing got worse, then re-analyses. --dry-run lists
-# which movies would change at all. Any further argument is passed on to realign_ensemble.py.
+# which movies would change at all.
 .env/bin/python code/realign_ensemble.py --list <manifest> --dry-run
-sbatch --array=1-$(wc -l < <manifest>) sbatch_files/realign_ensemble_array.sh <manifest>
-# Movies kept on a PC take the same route without anyone touching the cluster by hand: their
-# owner runs local_reanalysis/realign.bat, which uploads only the ensemble members of the
-# movies that would change, submits this same array job, brings the new points back and
-# re-analyses them there (LOCAL_REANALYSIS.md).
+sbatch --array=1-$(wc -l < <manifest>) sbatch_files/round_array.sh <manifest> \
+    code/realign_ensemble.py --no-reanalyse
+# round_array.sh takes the entry point as an argument, so the same script also renders videos:
+#   ... sbatch_files/round_array.sh <manifest> code/reanalyse_movies.py --only-video
+# Movies kept on a PC take both routes without anyone touching the cluster by hand: their owner
+# runs local_reanalysis/reanalyse.bat, which works out what each movie needs, uploads only what
+# that stage requires, submits these same array jobs and brings the results back
+# (LOCAL_REANALYSIS.md).
 
 # Interactive viewer: the fly flying through the lab frame, scrubbable, beside
 # two panels of analysis signals (--rows for more) -- time series, or one wing's

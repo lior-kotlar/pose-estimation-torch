@@ -25,10 +25,14 @@ The remaining verbs run one round of code/realign_ensemble.py for a PC, over the
 members it uploaded (with receive --dest <realign_jobs/JOB>/inputs). They all take --job, a
 plain name that can only ever be a single folder under realign_jobs/:
 
-    realign-submit --job JOB [--throttle N]   submit the array job; stdout: one JSON line
-    realign-status --job JOB                  per-movie state, and what slurm says
-    realign-fetch  --job JOB                  stdout: a gzipped tar of the movies that finished
-    realign-clean  --job JOB                  delete the job folder once its results are home
+    round-submit --job JOB --kind KIND [--throttle N]  submit the array job; one JSON line
+    round-status --job JOB --kind KIND                per-movie state, and what slurm says
+    round-fetch  --job JOB --kind KIND                stdout: a gzipped tar of what finished
+    round-clean  --job JOB                            delete the job folder once it is home
+
+KIND is 'realign' (re-run a movie's ensemble from its members) or 'video' (reproject and render
+the overlay mp4 from an analysis h5 and a box). Each decides what runs on the node, what it asks
+slurm for, and what a finished movie hands back.
 
 submit and clean touch only a job folder the caller owns; every path they build is checked to
 stay inside realign_jobs/JOB. Nothing here re-analyses anything: the PC does that, with the
@@ -57,9 +61,30 @@ INPUTS = "inputs"                  # where the PC uploads each movie's ensemble 
 MOVIE_MANIFEST = "movies.txt"      # one movie dir per line, the array job's task list
 JOB_RECORD = "job.json"
 POINTS_ALL = "points_3D_all.npy"   # one per ensemble member: the only real input
+ANALYSIS_SUFFIX = "_analysis_smoothed.h5"
+MP4 = "movie 2D and 3D.mp4"
+REPROJECTED = "points_ensemble_smoothed_reprojected.npy"
+VIDEO_STAMP = "video.json"
 REALIGN_MARKER = ".realigned_ensemble.json"
 BLOCKED = os.path.join(".realign_staging", "BLOCKED.json")
-ARRAY_SCRIPT = os.path.join("sbatch_files", "realign_ensemble_array.sh")
+ARRAY_SCRIPT = os.path.join("sbatch_files", "round_array.sh")
+# What each kind of round runs on a node, what it asks slurm for, and what a finished movie
+# yields. The entry point is an argument to the array script, so one script serves both.
+KINDS = {
+    "realign": {
+        "script": os.path.join("code", "realign_ensemble.py"),
+        "args": ["--no-reanalyse"],
+        # measured: a realignment peaks around 2 GB and takes well under an hour, so the old
+        # 32g/8h ask was keeping tasks behind higher-priority work for nothing
+        "sbatch": ["--cpus-per-task=16", "--mem=16g", "--time=05:00:00", "--partition=glacier"],
+    },
+    "video": {
+        "script": os.path.join("code", "reanalyse_movies.py"),
+        "args": ["--only-video", "--force-mp4", "--perturbation-source", "h5"],
+        # rendering is one long single-threaded encode, not a parallel search
+        "sbatch": ["--cpus-per-task=2", "--mem=8g", "--time=04:00:00", "--partition=glacier"],
+    },
+}
 # slurm is not always on a shell's PATH, nor its config in the environment; moriah keeps both here
 SLURM_BIN = "/vol/slurm/moriah/bindir/bin"
 SLURM_CONF = "/vol/slurm/moriah/slurm.conf"
@@ -200,14 +225,25 @@ def owned_job(job):
     return path
 
 
-def job_movies(inputs):
-    """Every uploaded movie folder: one holding at least two members with 3D candidates."""
+def is_realign_movie(dirpath, dirnames, filenames):
+    """A movie to realign: two or more members with 3D candidates."""
+    members = [d for d in dirnames if os.path.isfile(os.path.join(dirpath, d, POINTS_ALL))]
+    return len(members) >= 2
+
+
+def is_video_movie(dirpath, dirnames, filenames):
+    """A movie to render: an analysis h5 to render from."""
+    return any(f.endswith(ANALYSIS_SUFFIX) for f in filenames)
+
+
+def job_movies(inputs, kind="realign"):
+    """Every uploaded movie folder of this round."""
+    looks_like = is_video_movie if kind == "video" else is_realign_movie
     movies = []
-    for dirpath, dirnames, _ in os.walk(inputs):
+    for dirpath, dirnames, filenames in os.walk(inputs):
         dirnames[:] = sorted(d for d in dirnames
                              if not (d.startswith("superseded_") or d.startswith(".")))
-        members = [d for d in dirnames if os.path.isfile(os.path.join(dirpath, d, POINTS_ALL))]
-        if len(members) >= 2:
+        if looks_like(dirpath, dirnames, filenames):
             movies.append(dirpath)
             dirnames[:] = []       # a movie holds no movies
     return sorted(movies)
@@ -231,12 +267,13 @@ def slurm(*command):
     return done.stdout
 
 
-def realign_submit(job, throttle):
+def round_submit(job, kind, throttle):
+    settings = KINDS[kind]
     path = owned_job(job)
     inputs = os.path.join(path, INPUTS)
-    movies = job_movies(inputs)
+    movies = job_movies(inputs, kind)
     if not movies:
-        raise ValueError("job %s holds no movie with two or more ensemble members" % job)
+        raise ValueError("job %s holds no movie a %s round can work on" % (job, kind))
     record = {}
     record_path = os.path.join(path, JOB_RECORD)
     if os.path.isfile(record_path):
@@ -253,10 +290,12 @@ def realign_submit(job, throttle):
     array = "1-%d" % len(movies)
     if throttle:
         array += "%%%d" % throttle
-    out = slurm("sbatch", "--parsable", "--array", array, "-J", "realign_" + job,
-                os.path.join(PROJECT, ARRAY_SCRIPT), manifest, "--no-reanalyse")
+    out = slurm("sbatch", "--parsable", "--array", array, "-J", "%s_%s" % (kind, job),
+                *settings["sbatch"],
+                os.path.join(PROJECT, ARRAY_SCRIPT), manifest,
+                os.path.join(PROJECT, settings["script"]), *settings["args"])
     job_id = out.strip().splitlines()[-1].split(";")[0]
-    record = {"job_id": job_id, "movies": len(movies), "array": array,
+    record = {"job_id": job_id, "kind": kind, "movies": len(movies), "array": array,
               "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")}
     with open(record_path, "w") as f:
         json.dump(record, f, indent=1)
@@ -264,8 +303,11 @@ def realign_submit(job, throttle):
     return {"ok": True, "job_id": job_id, "movies": len(movies)}
 
 
-def movie_state(movie):
-    """What the realignment made of one movie: done, blocked, or not finished yet."""
+def movie_state(movie, kind="realign"):
+    """What the round made of one movie: done, refused, or not finished yet."""
+    if kind == "video":
+        # the stamp is written last, after the mp4 is in place, so it is the finished mark
+        return "rendered" if os.path.isfile(os.path.join(movie, VIDEO_STAMP)) else "pending"
     if os.path.isfile(os.path.join(movie, REALIGN_MARKER)):
         return "realigned"
     if os.path.isfile(os.path.join(movie, BLOCKED)):
@@ -305,13 +347,14 @@ def array_states(job_id):
     return counts, any(state in SLURM_BUSY for state in counts)
 
 
-def realign_status(job):
+def round_status(job, kind):
     path = job_dir(job)
     if not os.path.isdir(path):
         raise ValueError("no such job: %s" % job)
     inputs = os.path.join(path, INPUTS)
-    movies = job_movies(inputs)
-    states = {os.path.relpath(m, inputs).replace(os.sep, "/"): movie_state(m) for m in movies}
+    movies = job_movies(inputs, kind)
+    states = {os.path.relpath(m, inputs).replace(os.sep, "/"): movie_state(m, kind)
+              for m in movies}
     record = {}
     record_path = os.path.join(path, JOB_RECORD)
     if os.path.isfile(record_path):
@@ -322,8 +365,13 @@ def realign_status(job):
             "slurm": counts, "working": working}
 
 
-def result_entries(movie):
-    """What realign_ensemble.py installed here, from its own record of what it moved in."""
+def result_entries(movie, kind="realign"):
+    """What the round made here and the PC should be given back."""
+    if kind == "video":
+        made = [name for name in (MP4, REPROJECTED, VIDEO_STAMP)
+                if os.path.isfile(os.path.join(movie, name))]
+        # the stamp is what says the render finished; without it there is nothing to send
+        return made if VIDEO_STAMP in made else []
     marker = os.path.join(movie, REALIGN_MARKER)
     if os.path.isfile(marker):
         with open(marker) as f:
@@ -335,16 +383,16 @@ def result_entries(movie):
     return []
 
 
-def realign_fetch(job):
+def round_fetch(job, kind):
     """A gzipped tar of every finished movie's new files, MANIFEST.json first."""
     path = job_dir(job)
     if not os.path.isdir(path):
         raise ValueError("no such job: %s" % job)
     inputs = os.path.join(path, INPUTS)
     files = {}
-    for movie in job_movies(inputs):
+    for movie in job_movies(inputs, kind):
         key = os.path.relpath(movie, inputs).replace(os.sep, "/")
-        for entry in result_entries(movie):
+        for entry in result_entries(movie, kind):
             source = os.path.join(movie, *entry.split("/"))
             if not inside(movie, source):
                 continue
@@ -370,7 +418,7 @@ def realign_fetch(job):
     return 0
 
 
-def realign_clean(job):
+def round_clean(job):
     path = owned_job(job)
     shutil.rmtree(path)
     return {"ok": True, "removed": path}
@@ -383,28 +431,31 @@ def main():
     sub.add_parser("declarations")
     rec = sub.add_parser("receive")
     rec.add_argument("--dest", required=True)
-    submit = sub.add_parser("realign-submit")
+    submit = sub.add_parser("round-submit")
     submit.add_argument("--job", required=True)
+    submit.add_argument("--kind", choices=sorted(KINDS), default="realign")
     submit.add_argument("--throttle", type=int, default=0,
                         help="at most this many array tasks at once (0: no limit)")
-    for name in ("realign-status", "realign-fetch", "realign-clean"):
-        sub.add_parser(name).add_argument("--job", required=True)
+    for name in ("round-status", "round-fetch", "round-clean"):
+        verb = sub.add_parser(name)
+        verb.add_argument("--job", required=True)
+        verb.add_argument("--kind", choices=sorted(KINDS), default="realign")
     args = parser.parse_args()
     if args.command == "declarations":
         return declarations()
     if args.command == "receive":
         return receive(args.dest)
-    if args.command == "realign-fetch":
+    if args.command == "round-fetch":
         try:
-            return realign_fetch(args.job)
+            return round_fetch(args.job, args.kind)
         except Exception as e:
             # stdout is the tar itself, so the reason goes to stderr and the PC sees an empty
             # stream rather than a tar with a traceback in it
             sys.stderr.write("%s: %s\n" % (type(e).__name__, e))
             return 1
-    handlers = {"realign-submit": lambda: realign_submit(args.job, args.throttle),
-                "realign-status": lambda: realign_status(args.job),
-                "realign-clean": lambda: realign_clean(args.job)}
+    handlers = {"round-submit": lambda: round_submit(args.job, args.kind, args.throttle),
+                "round-status": lambda: round_status(args.job, args.kind),
+                "round-clean": lambda: round_clean(args.job)}
     if args.command in handlers:
         try:
             print(json.dumps(handlers[args.command]()))

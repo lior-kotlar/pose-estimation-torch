@@ -503,12 +503,19 @@ provenance (`collected_h5/Tsory/ex210825_dark_yaw_t0/`, `collected_h5/roni_dark/
 skipping `bad_signal`/`bad_wings` and every `superseded_*` archive; a changed file replaces the
 old one, which moves to `superseded_<time>/`. `--flat` restores the single-folder layout.
 
-**Re-analysing predictions kept on a PC.** Predicted movies stored off the cluster are
-re-analysed where they are, then collected and uploaded to `collected_h5` automatically:
-see [LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md), written for lab members new to the repo. The one
-fault re-analysing cannot repair -- an ensemble that mixed the two wings into one, in movies
-predicted before `wing_labels.harmonize_wing_labels` -- is repaired from there too, by uploading
-only those movies' ensemble members and re-running `code/realign_ensemble.py` on the cluster.
+**Re-analysing predictions kept on a PC.** Predicted movies stored off the cluster are brought up
+to date where they are: one command surveys each movie, works out which of three jobs it still
+needs -- realigning an ensemble that mixed the two wings into one, re-analysing, or re-rendering an
+overlay video that no longer matches its points -- and does only those, sending the two that need
+real computing to the cluster and bringing the results back. See
+[LOCAL_REANALYSIS.md](LOCAL_REANALYSIS.md), written for lab members new to the repo.
+
+Each stage is decided by a fingerprint rather than a rule, so the dependency between them holds
+itself up: a new ensemble changes the points fingerprint, which makes the analysis stale, which
+changes the analysed points, which makes the video stale. `code/movie_survey.py` asks the
+questions, `code/cluster_round.py` runs a round of work on the cluster, `code/dataset_paths.py`
+finds a movie's source data wherever it now lives, and `code/cluster_link.py` is the ssh transport
+they share.
 
 ---
 

@@ -1,29 +1,32 @@
-"""Re-analyse predicted movies on a PC, then collect and upload their analysis h5 files.
+"""Bring predicted movies kept on a PC up to date, doing only what each one still needs.
 
-The plain-language guide is LOCAL_REANALYSIS.md; this is the program behind the three
-double-click files in local_reanalysis/:
+The plain-language guide is LOCAL_REANALYSIS.md; this is the program behind the double-click
+files in local_reanalysis/:
 
-    python code/local_reanalysis.py setup                 once per PC: server username, ssh key
-    python code/local_reanalysis.py run [FOLDER ...]      re-analyse, collect, upload
-    python code/local_reanalysis.py realign [FOLDER ...]  re-run wrong-handed ensembles, then run
-    python code/local_reanalysis.py update                download the latest committed code
+    python code/local_reanalysis.py setup             once per PC: username, datasets folder, key
+    python code/local_reanalysis.py run [FOLDER ...]  do what each movie needs, collect, upload
+    python code/local_reanalysis.py update            download the latest committed code
 
-A run takes one or more folders -- a single experiment, or a folder holding many -- and:
+A run takes one or more folders -- a single experiment, or a folder holding many -- surveys every
+movie in them (code/movie_survey.py), and does only the stages that have work in them:
 
-  1. finds every predicted movie in them (a folder with points_3D_smoothed_ensemble_best_method.npy)
-  2. downloads, from the cluster, the live perturbation.json of every experiment they belong to
-  3. checks every movie: where its trigger and declaration come from, and whether it is stale
-  4. re-analyses the stale ones in parallel with reanalyse_movies.py; a re-run resumes
-  5. collects the analysis h5 of every up-to-date movie into collected_h5/<experiment>/
-  6. uploads whatever the cluster does not have yet; the cluster checks every file's checksum
-     before installing it, and keeps the version it replaces in superseded_<time>/
+  realign    one of the pose models labelled the two wings the other way round, so the ensemble
+             mixed them into one physical wing. Only re-running the ensemble fixes it, which is
+             half an hour of computing, so it happens on the cluster.
+  reanalyse  the analysis h5, CSV, plots, viewer and pages are older than the analysis code, the
+             declaration or the 3D points. Seconds a movie, here.
+  render     the overlay mp4 was made from points the movie no longer has. The camera images it
+             needs are the one thing a movie folder does not hold, so a shrunk copy goes to the
+             cluster and the finished video comes back.
 
-realign is for the defect underneath the analysis, which re-analysing cannot fix: in some movies
-an ensemble member labelled the two wings the other way round, and the ensemble mixed them into
-one physical wing. It asks each movie whether that happened, sends only the ensemble members of
-the ones where it did (10-20 MB a movie), has the cluster re-run their ensembles and keep the
-result only where nothing got worse, brings the new 3D points back, and re-analyses them here.
-It needs an account that may write to the cluster, so only the pipeline's owner can run it.
+The dependency between them is not a rule this file enforces; it falls out of the fingerprints.
+A new ensemble changes the points fingerprint, which makes the analysis stale, which changes the
+analysed points, which makes the video stale. So a run surveys again after every stage rather
+than deciding everything up front -- and a movie the cluster refused to realign quietly drops out
+of the later stages instead of being redone for nothing.
+
+The two cluster stages need an account that may write there, so only the pipeline's owner runs
+them; anyone else gets the survey, which reads nothing but their own disk.
 
 Everything it talks to the cluster about goes through ssh to code/local_reanalysis_server.py in
 the cluster's copy of the project, one connection per step. None of it runs on the login gateway:
@@ -38,7 +41,6 @@ when they name none.
 import argparse
 import datetime as dt
 import glob
-import hashlib
 import io
 import json
 import os
@@ -54,6 +56,11 @@ CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 for _p in (CODE_DIR, os.path.join(CODE_DIR, 'prediction_code_lior')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+import cluster_round as rounds
+import movie_survey
+from cluster_link import (Problem, SERVER_HELPER, count, helper_command, on_node, remote,
+                          sha256, stage)
 
 # The folder the code was unpacked into on the PC; everything the tool keeps lives next to it.
 HOME = os.path.dirname(CODE_DIR)
@@ -78,19 +85,19 @@ DEFAULT_SETTINGS = {
     'collected_h5': '',
     # 0: half the processor threads, one movie each
     'jobs': 0,
+    # where this PC keeps the source datasets -- the box h5 a movie was predicted from, its
+    # calibration and its perturbation.json. The paths a prediction recorded are the cluster's,
+    # and the datasets are far too large to keep there, so this is how a movie's own data is
+    # found once it has been moved off. Empty: only the recorded paths are tried.
+    'dataset_root': '',
     # Nothing this PC asks for runs on the login gateway: every command is handed to slurm,
     # which places it on a compute node. Emptying this runs them on the login host instead.
     'srun_flags': '--ntasks=1 --cpus-per-task=1 --mem=4g --time=2:00:00 --gres=gpu:0 '
                   '--chdir=/tmp --job-name=pose_pc',
 }
-# A login shell on the gateway has neither slurm on its PATH nor SLURM_CONF in its environment,
-# so srun there cannot even find the cluster. Both are named here.
-SLURM_BIN = '/vol/slurm/moriah/bindir/bin'
-SLURM_CONF = '/vol/slurm/moriah/slurm.conf'
-SERVER_HELPER = 'code/local_reanalysis_server.py'
 UPLOAD_LEDGER = '.uploaded.json'
-# realignment: what a movie's ensemble is made of, and what re-running it leaves behind
-REALIGN_JOBS_DIR = os.path.join(HOME, 'realign_jobs')
+# where the rounds this PC has going are written down, so one can be picked up again
+REALIGN_JOBS_DIR = os.path.join(HOME, rounds.JOBS_DIRNAME)
 REALIGN_MARKER = '.realigned_ensemble.json'
 BLOCKED_REPORT = '.realign_staging/BLOCKED.json'
 # left in a movie the cluster refused to change, so later rounds do not re-run it for nothing
@@ -98,14 +105,14 @@ BLOCKED_MARKER = '.realign_blocked.json'
 POINTS_ALL = 'points_3D_all.npy'
 POINTS_SMOOTHED = 'points_3D_smoothed_ensemble_best_method.npy'
 OLD_POINTS = (POINTS_SMOOTHED, 'points_3D_ensemble_best_method.npy')
-MEMBER_CONFIGS = ('specific_configuration.json', 'configuration.json')
-README_GLOB = ('README_mov*.txt',)
+# what a rendered movie carries back, and the sidecar that says which cameras saw a whole fly
+MP4_NAME = 'movie 2D and 3D.mp4'
+VIDEO_STAMP = 'video.json'
+CAM_VALIDITY = 'prescan_cam_validity.npz'
 # Set for the re-run that follows an automatic update, so it cannot update again in a loop.
 UPDATED_FLAG = 'POSE_REANALYSIS_JUST_UPDATED'
 
 
-class Problem(Exception):
-    """Something the user has to fix; printed without a traceback."""
 
 
 class Tee:
@@ -179,73 +186,14 @@ def collected_root(settings):
     return settings['collected_h5'] or os.path.join(HOME, 'collected_h5')
 
 
-def on_node(settings, command, attempts=1):
-    """`command`, wrapped so that slurm runs it on a compute node.
-
-    The lab's login gateway is for logging in, not for working, so everything this PC asks the
-    cluster to do -- reading the declarations, checking a file in, tarring up the code, running
-    the helper -- is handed to srun, which queues it and runs it on whichever node is free. srun
-    passes stdin and stdout straight through, so the tar streams work as they did; its own
-    progress messages go to stderr, where they cannot get into the data. The gateway's shell has
-    neither srun on its PATH nor SLURM_CONF set, so both are named before it is called.
-
-    A node sometimes comes up without the lab filesystem mounted (the automount expires under
-    load), which would fail a command for no reason of its own. So the node waits for the project
-    to appear before starting, and a command that neither reads from this PC nor streams its
-    answer back may be given to slurm again, which usually lands it somewhere else."""
-    flags = (settings.get('srun_flags') or '').strip()
-    if not flags:
-        return command
-    project = shlex.quote(settings['server_project'])
-    wait = (f'P={project}; n=0; while [ ! -d "$P" ] && [ $n -lt 30 ]; do ls -d "$P" >/dev/null 2>&1; '
-            'sleep 2; n=$((n+1)); done; '
-            'if [ ! -d "$P" ]; then echo "$(hostname) cannot see $P -- either the lab '
-            'filesystem is not mounted there, or the server_project setting is wrong" >&2; '
-            'exit 75; fi; ')
-    launcher = (f'if [ -z "$SLURM_CONF" ] && [ -f {SLURM_CONF} ]; then SLURM_CONF={SLURM_CONF}; '
-                'export SLURM_CONF; fi; '
-                'if command -v srun >/dev/null 2>&1; then _srun=srun; '
-                f'else _srun={SLURM_BIN}/srun; fi; ')
-    step = f'"$_srun" {flags} /bin/sh -c {shlex.quote(wait + command)}'
-    if attempts > 1:
-        # only the unmounted node is worth another node; anything else is the command's own
-        # answer and is passed back as it is
-        return launcher + (f'for _try in $(seq {attempts}); do {step}; _rc=$?; '
-                           '[ $_rc -ne 75 ] && exit $_rc; done; exit $_rc')
-    return launcher + step
 
 
-def remote(settings, command, batch=False, **popen_kwargs):
-    """Start `command` in a shell on the cluster, over ssh."""
-    if not settings.get('server_user'):
-        raise Problem("no server username in the settings; run local_reanalysis\\setup.bat")
-    argv = ['ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30']
-    if batch:
-        argv += ['-o', 'BatchMode=yes']
-    argv += [f"{settings['server_user']}@{settings['server_host']}", command]
-    try:
-        return subprocess.Popen(argv, **popen_kwargs)
-    except FileNotFoundError:
-        raise Problem("the 'ssh' command was not found. On Windows, turn on 'OpenSSH Client' in "
-                      "Settings > System > Optional features, then try again")
 
 
-def helper_command(settings, *args, attempts=1):
-    helper = posixpath.join(settings['server_project'], SERVER_HELPER)
-    return on_node(settings, ' '.join(['python3', shlex.quote(helper)]
-                                      + [shlex.quote(a) for a in args]), attempts=attempts)
 
 
-def stage(number, total, text):
-    print(f"\n=== {number}/{total}  {text} ===", flush=True)
 
 
-def sha256(path):
-    digest = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for block in iter(lambda: f.read(1 << 20), b''):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 # -- setup ---------------------------------------------------------------------------------------
@@ -268,6 +216,14 @@ def setup(args):
         if settings['server_user']:
             break
     settings['server_host'] = ask("Server address", settings['server_host'])
+    print("\nWhere do you keep the source datasets -- the folder that holds each experiment's")
+    print("movies as they came off the rig (the box h5 files and calibration.h5)? Needed only to")
+    print("rebuild a movie's video; leave empty if you do not have them here.")
+    root = ask("Datasets folder (e.g. E:\\Lior\\inference_datasets)", settings['dataset_root'])
+    if root and not os.path.isdir(root):
+        print(f"  note: {root} is not a folder on this PC. Saving it anyway -- correct it in "
+              f"{os.path.basename(SETTINGS_PATH)} if it is wrong.")
+    settings['dataset_root'] = root
     save_settings(settings)
     print(f"\nsaved {SETTINGS_PATH}")
 
@@ -594,12 +550,6 @@ def save_ledger(path, ledger):
     os.replace(staged, path)
 
 
-def count(items):
-    tally = {}
-    for item in items:
-        tally[item] = tally.get(item, 0) + 1
-    return ', '.join(f'{k} {v}' for k, v in sorted(tally.items()))
-
 
 def run(args):
     os.makedirs(REPORTS_DIR, exist_ok=True)
@@ -618,12 +568,10 @@ def run(args):
             sys.stdout, sys.stderr = out, err
 
 
-def run_steps(args, log_path):
-    started = time.time()
-    settings = load_settings()
+def wanted_folders(args, what='re-analyse'):
     folders = list(args.folders)
     if not folders:
-        answer = ask("Folder to re-analyse (one experiment, or a folder of experiments)")
+        answer = ask(f"Folder to {what} (one experiment, or a folder of experiments)")
         folders = [answer] if answer else []
     roots = []
     for folder in folders:
@@ -633,216 +581,76 @@ def run_steps(args, log_path):
         roots.append(folder)
     if not roots:
         raise Problem("no folder given")
-    upload_step = may_upload(settings) and not args.no_upload
-    total = 6 if upload_step else 5
-
-    # before anything is imported or re-analysed, so the run uses the cluster's current code
-    updated = update_if_outdated(args, settings)
-    if updated is not None:
-        return updated
-
-    # heavy imports only now, so setup/update and a wrong folder answer quickly
-    stage(1, total, "finding predicted movies")
-    import collect_analysis_h5 as collector
-    import reanalyse_movies as rm
-
-    movie_root = {}
-    for root in roots:
-        for movie_dir in rm.find_movie_dirs(root):
-            movie_root.setdefault(movie_dir, root)
-    movie_dirs = sorted(movie_root)
-    if not movie_dirs:
-        raise Problem(f"no predicted movies (folders with {rm.POINTS_NAME}) under: {', '.join(roots)}")
-    groups = {d: collector.experiment_key(d, movie_root[d]) for d in movie_dirs}
-    print(f"{len(movie_dirs)} movie(s) in {len(set(groups.values()))} experiment(s):")
-    for group in sorted(set(groups.values())):
-        print(f"  {group}: {sum(g == group for g in groups.values())}")
-
-    stage(2, total, "downloading the experiments' declarations (perturbation.json) from the server")
-    box_paths = sorted({b for b in (rm.recorded_source_box(d) for d in movie_dirs) if b})
-    received, path_maps = fetch_declarations(settings, box_paths)
-    print(f"{received} declaration file(s) found on the server; experiments without one keep "
-          f"what their movies' previous analysis recorded")
-
-    stage(3, total, "checking every movie")
-    code_fp, commit = rm.code_fingerprint(), rm.git_commit()
-    print(f"analysis code {code_fp} (commit {commit})")
-    checks = rm.preflight_rows(movie_dirs, 'auto', path_maps, code_fp, group_of=groups.get)
-    rm.print_preflight_summary(checks)
-
-    stale = [c['movie_dir'] for c in checks if c.get('state') != 'current']
-    current = [c['movie_dir'] for c in checks if c.get('state') == 'current']
-    jobs = auto_jobs(settings)
-    stage(4, total, f"re-analysing {len(stale)} movie(s), {jobs} at a time "
-                    f"({len(current)} already up to date)")
-    stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-    opts = dict(archive=True, with_video=False, force_video=False, pert_source='auto',
-                path_maps=path_maps, allow_no_trigger=False, only_stale=True,
-                code_fp=code_fp, commit=commit)
-    rows = rm.run_movies(stale, stamp, opts, jobs) if stale else []
-    rows += [{'experiment': os.path.basename(os.path.dirname(d)), 'movie': os.path.basename(d),
-              'movie_dir': d, 'status': 'current'} for d in current]
-    for row in rows:
-        row['experiment'] = groups[row['movie_dir']]
-    report = rm.write_report(rows, os.path.join(REPORTS_DIR, f'reanalyse_report_{stamp}.csv'))
-    failed_any = rm.print_run_summary(rows)
-
-    stage(5, total, "collecting the analysis h5 files")
-    excluded = () if args.include_bad else collector.DEFAULT_EXCLUDE_DIRS
-    ready = [r['movie_dir'] for r in rows if r.get('status') in ('done', 'current')]
-    bad = [d for d in ready if excluded and is_bad(d, movie_root[d], excluded)]
-    ready = [d for d in ready if d not in bad]
-    collected = collect_movies(settings, ready, movie_root, groups, collector)
-    print(f"{len(collected)} file(s) into {collected_root(settings)}: "
-          f"{count(r['status'] for r in collected) or 'none'}")
-    if bad:
-        print(f"not collected, being in {'/'.join(sorted(excluded))} folders: {len(bad)} movie(s)")
-    if args.include_bad:
-        from_bad = sum(1 for r in collected if collector.bad_folder(os.path.dirname(r['src'])))
-        print(f"included {from_bad} movie(s) from bad_signal/bad_wings folders, each under its "
-              f"experiment's own subfolder")
-    not_ready = [r for r in rows if r.get('status') not in ('done', 'current')]
-    if not_ready:
-        print(f"not collected, because they failed: {len(not_ready)} movie(s) (listed above)")
-
-    upload_results = {}
-    if upload_step:
-        stage(6, total, "uploading to the server")
-        _, upload_results = upload(settings)
-        if upload_results:
-            print(f"server: {count(upload_results.values())}")
-
-    minutes = (time.time() - started) / 60
-    print(f"\n=== finished in {minutes:.1f} min ===")
-    print(f"re-analysed      : {count(r.get('status') for r in rows)}")
-    print(f"report           : {report}")
-    print(f"log of this run  : {log_path}")
-    print(f"collected on PC  : {collected_root(settings)}")
-    if upload_step:
-        print(f"on the server    : {settings['server_host']}:{upload_destination(settings)}")
-    elif not may_upload(settings):
-        print("uploads are off for this PC; the collected files stay here")
-    if not_ready:
-        print("\nSome movies FAILED -- see the messages above and the report.")
-    return 1 if failed_any or not_ready else 0
+    return roots
 
 
-# -- realignment: one round of the cluster's ensemble re-run, driven from here -------------------
-
-def ensemble_members(movie_dir):
-    """The member folders of a movie that hold 3D candidates, in the ensemble's own order.
-
-    Archived and hidden folders are passed over, so an earlier realignment's superseded_ensemble_*
-    or .realign_staging can never be taken for a member."""
-    return sorted(os.path.join(movie_dir, name) for name in os.listdir(movie_dir)
-                  if not (name.startswith('superseded_') or name.startswith('.'))
-                  and os.path.isfile(os.path.join(movie_dir, name, POINTS_ALL)))
+def dataset_roots(settings):
+    root = (settings.get('dataset_root') or '').strip()
+    return (root,) if root else ()
 
 
-def already_realigned(movie_dir):
-    return os.path.isfile(os.path.join(movie_dir, REALIGN_MARKER))
+class Work:
+    """One run's picture of a folder of movies, refreshed between stages.
+
+    Surveying is cheap and the stages change what the answers are, so a run asks again after every
+    one rather than deciding everything up front. That is what keeps the dependency between the
+    stages honest: a movie the cluster refused to realign simply stops appearing in the later
+    stages, because its fingerprints never moved."""
+
+    def __init__(self, settings, roots, args):
+        import collect_analysis_h5 as collector
+        import reanalyse_movies as rm
+        self.settings, self.roots, self.args = settings, roots, args
+        self.collector, self.rm = collector, rm
+        self.roots_for_data = dataset_roots(settings)
+
+        self.movie_root = {}
+        for root in roots:
+            for movie_dir in rm.find_movie_dirs(root):
+                self.movie_root.setdefault(movie_dir, root)
+        if not self.movie_root:
+            raise Problem(f"no predicted movies (folders with {rm.POINTS_NAME}) under: "
+                          f"{', '.join(roots)}")
+        self.movie_dirs = sorted(self.movie_root)
+        self.groups = {d: collector.experiment_key(d, self.movie_root[d]) for d in self.movie_dirs}
+        self.path_maps = ()
+        self.code_fp, self.commit = rm.code_fingerprint(), rm.git_commit()
+        self.rows = []
+
+    def declarations(self):
+        """Mirror the experiments' perturbation.json from the cluster, for the ones it has."""
+        boxes = sorted({b for b in (self.rm.recorded_source_box(d) for d in self.movie_dirs) if b})
+        received, self.path_maps = fetch_declarations(self.settings, boxes)
+        return received
+
+    def look(self, show=False):
+        self.rows = movie_survey.survey(self.movie_dirs, self.code_fp, self.path_maps,
+                                        self.roots_for_data, group_of=self.groups.get,
+                                        retry_blocked=self.args.retry_blocked,
+                                        render_unknown=self.args.render_unknown, show=show)
+        return self.rows
+
+    def needing(self, stage):
+        return [row for row in self.rows if stage in row['needs']]
 
 
-def screen_movies(movie_dirs, retry_blocked=False):
-    """Which movies' ensembles would change if they were re-run, and by how much.
+# -- what each kind of round sends, and what it does with what comes back -------------------------
 
-    Reads each movie's members and asks wing_labels.harmonize_wing_labels whether any candidate
-    has its wings the other way round. Numpy alone, so it needs no pose estimator on this PC.
-
-    A movie already realigned is passed over, and so is one a round has already tried and been
-    refused: re-running it would cost the same half hour and be refused again."""
-    from wing_labels import harmonize_wing_labels
-    import numpy as np
-
-    flagged, skipped, unreadable, blocked = [], 0, [], 0
-    for number, movie_dir in enumerate(movie_dirs, 1):
-        if number % 25 == 0 or number == len(movie_dirs):
-            print(f"  checked {number}/{len(movie_dirs)}", flush=True)
-        if already_realigned(movie_dir):
-            skipped += 1
-            continue
-        if not retry_blocked and os.path.isfile(os.path.join(movie_dir, BLOCKED_MARKER)):
-            blocked += 1
-            continue
-        members = ensemble_members(movie_dir)
-        if len(members) < 2:
-            skipped += 1
-            continue
-        try:
-            points = [np.load(os.path.join(d, POINTS_ALL)) for d in members]
-            _, exchanged = harmonize_wing_labels(points)
-        except (OSError, ValueError) as e:
-            unreadable.append((movie_dir, f'{type(e).__name__}: {e}'))
-            continue
-        if exchanged:
-            flagged.append({'movie_dir': movie_dir, 'exchanged_pairs': int(exchanged),
-                            'members': len(members)})
-    return flagged, skipped, unreadable, blocked
-
-
-def job_state_path(job):
-    return os.path.join(REALIGN_JOBS_DIR, f'{job}.json')
-
-
-def save_job_state(state):
-    os.makedirs(REALIGN_JOBS_DIR, exist_ok=True)
-    path = job_state_path(state['job'])
-    staged = path + '.partial'
-    with open(staged, 'w', encoding='utf-8') as f:
-        json.dump(state, f, indent=1)
-    os.replace(staged, path)
-
-
-def unfinished_job(folders):
-    """The newest round over these same folders that has not been finished off yet."""
-    if not os.path.isdir(REALIGN_JOBS_DIR):
-        return None
-    for name in sorted(os.listdir(REALIGN_JOBS_DIR), reverse=True):
-        if not name.endswith('.json'):
-            continue
-        try:
-            with open(os.path.join(REALIGN_JOBS_DIR, name), encoding='utf-8') as f:
-                state = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not state.get('finished') and state.get('folders') == folders:
-            return state
-    return None
-
-
-def new_job_state(folders, movies):
-    # the round is named after this PC, so several PCs' rounds never share a folder on the cluster
-    pc = os.environ.get('COMPUTERNAME') or os.environ.get('HOSTNAME') or 'pc'
-    name = ''.join(c if c.isalnum() else '_' for c in pc)[:24]
-    job = f"{name or 'pc'}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    return {'job': job, 'created': dt.datetime.now().isoformat(timespec='seconds'),
-            'folders': folders, 'movies': movies, 'uploaded': False, 'job_id': '',
-            'installed': {}, 'finished': False}
-
-
-def movie_keys(flagged, groups):
-    """A short name per movie for the job tree: <experiment>/<movie>, kept unique."""
-    keys, used = {}, set()
-    for entry in sorted(flagged, key=lambda e: e['movie_dir']):
-        movie_dir = entry['movie_dir']
-        base = f"{groups[movie_dir]}/{os.path.basename(movie_dir)}"
-        key, number = base, 1
-        while key in used:
-            number += 1
-            key = f"{base}_{number}"
-        used.add(key)
-        keys[key] = movie_dir
-    return keys
+MEMBER_CONFIGS = ('specific_configuration.json', 'configuration.json')
+README_GLOB = ('README_mov*.txt',)
+# where a staged movie's source data and its synthesised member config are put on the cluster
+STAGED_SOURCE = 'source'
+STAGED_MEMBER = 'staged_member'
 
 
 def realign_inputs(movie_dir):
-    """The files the cluster needs to re-run this movie's ensemble, relative to the movie.
+    """What the cluster needs to re-run this movie's ensemble: (name under the movie, path here).
 
     Each model's 3D candidates and the config that names it, plus the movie's current ensemble
     points, which are the 'before' side of the comparison the cluster makes. Nothing else: not
     the source movie, not the analysis h5, not the video."""
     names = []
-    for member in ensemble_members(movie_dir):
+    for member in movie_survey.ensemble_members(movie_dir):
         base = os.path.basename(member)
         names.append(f'{base}/{POINTS_ALL}')
         for config in MEMBER_CONFIGS:
@@ -852,190 +660,78 @@ def realign_inputs(movie_dir):
     for pattern in README_GLOB:
         for path in sorted(glob.glob(os.path.join(glob.escape(movie_dir), pattern))):
             names.append(os.path.basename(path))
-    return names
+    return [(name, os.path.join(movie_dir, *name.split('/'))) for name in names]
 
 
-def upload_members(settings, state):
-    """Send every flagged movie's ensemble members to its folder of the job on the cluster."""
-    destination = posixpath.join(settings['server_project'], 'realign_jobs', state['job'], 'inputs')
-    pending = {}
-    for key, movie_dir in sorted(state['movies'].items()):
-        for name in realign_inputs(movie_dir):
-            source = os.path.join(movie_dir, *name.split('/'))
-            pending[f'{key}/{name}'] = (source, sha256(source))
-    size = sum(os.path.getsize(source) for source, _ in pending.values())
-    print(f"sending {len(pending)} file(s), {size / 1e6:.0f} MB, to "
-          f"{settings['server_host']}:{destination}", flush=True)
-    proc = remote(settings, helper_command(settings, 'receive', '--dest', destination),
-                  stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    try:
-        with tarfile.open(fileobj=proc.stdin, mode='w|') as tar:
-            manifest = json.dumps({'files': {rel: digest
-                                             for rel, (_, digest) in pending.items()}}).encode('utf-8')
-            info = tarfile.TarInfo('MANIFEST.json')
-            info.size = len(manifest)
-            info.mtime = int(time.time())
-            tar.addfile(info, io.BytesIO(manifest))
-            for number, rel in enumerate(sorted(pending), 1):
-                tar.add(pending[rel][0], arcname=rel, recursive=False)
-                if number % 50 == 0 or number == len(pending):
-                    print(f"  sent {number}/{len(pending)}", flush=True)
-        proc.stdin.close()
-    except (BrokenPipeError, OSError) as e:
-        output = proc.stdout.read().decode('utf-8', errors='replace')
-        proc.wait()
-        raise Problem(f"the upload was cut off ({e}). {output.strip()} -- nothing on this PC was "
-                      "touched; run the same command again to start over")
-    answer = server_answer(proc, 'the server did not accept the ensemble members')
-    print(f"the server has every file: {count(answer['results'].values())}")
+def prepare_video(settings, state, jobs_dir, rows):
+    """Shrink each movie's box and lay out what the cluster needs to render it.
+
+    The camera images are the only bulky thing a render needs, and the renderer reads one
+    time-channel per camera out of nine. Shrinking to those before sending turns 185 MB a movie
+    into about 60 MB. The member config is written here rather than taken from the movie, so the
+    cluster opens the copies that were just uploaded and nothing depends on where this movie's
+    data lived when it was predicted."""
+    import dataset_paths
+
+    staged = {}
+    for number, row in enumerate(rows, 1):
+        movie_dir, key = row['movie_dir'], row['key']
+        outgoing = os.path.join(jobs_dir, state['job'], 'outgoing', *key.split('/'))
+        source_dir = os.path.join(outgoing, STAGED_SOURCE)
+        os.makedirs(source_dir, exist_ok=True)
+        box = row['source']
+        reduced = os.path.join(source_dir, os.path.basename(box))
+        if not os.path.isfile(reduced):
+            print(f"  [{number}/{len(rows)}] shrinking {os.path.basename(movie_dir)}'s images",
+                  flush=True)
+            _, before, after = dataset_paths.reduce_box(box, reduced)
+            print(f"      {before / 1e6:.0f} MB -> {after / 1e6:.0f} MB", flush=True)
+
+        files = [(f'{STAGED_SOURCE}/{os.path.basename(reduced)}', reduced)]
+        beside = os.path.dirname(box)
+        calibration = row.get('calibration') or os.path.join(os.path.dirname(beside),
+                                                             'calibration.h5')
+        for extra, name in ((calibration, 'calibration.h5'),
+                            (os.path.join(beside, CAM_VALIDITY), CAM_VALIDITY)):
+            if os.path.isfile(extra):
+                files.append((f'{STAGED_SOURCE}/{name}', extra))
+
+        h5_path = self_analysis_h5(movie_dir)
+        files.append((os.path.basename(h5_path), h5_path))
+
+        # the config regenerate_video reads, pointing at the copies as the cluster will see them
+        on_cluster = posixpath.join(rounds.job_inputs(settings, state['job']), key, STAGED_SOURCE)
+        config_path = os.path.join(outgoing, STAGED_MEMBER, 'configuration.json')
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump({'movie path': posixpath.join(on_cluster, os.path.basename(reduced)),
+                       'calibration path': posixpath.join(on_cluster, 'calibration.h5'),
+                       'IMAGE HEIGHT': row.get('image_height', 800),
+                       'IMAGE WIDTH': row.get('image_width', 1280)}, f, indent=1)
+        files.append((f'{STAGED_MEMBER}/configuration.json', config_path))
+        staged[movie_dir] = files
+    return staged
 
 
-def server_answer(proc, what):
-    """The one JSON line a helper verb prints, or a Problem naming what went wrong.
-
-    When its errors were captured as well -- they are for the short questions, so that slurm's
-    queueing messages stay out of the window -- they go into the Problem, since that is where
-    'could not reach slurm' would appear."""
-    if proc.stderr is not None:
-        out, errors = proc.communicate()
-        output = out.decode('utf-8', errors='replace').strip()
-        errors = errors.decode('utf-8', errors='replace').strip()
-    else:
-        output = proc.stdout.read().decode('utf-8', errors='replace').strip()
-        proc.wait()
-        errors = ''
-    try:
-        answer = json.loads(output.splitlines()[-1])
-    except (IndexError, ValueError):
-        answer = {'ok': False,
-                  'error': ' '.join(part for part in (output, errors) if part)
-                           or f'no answer from the server (exit {proc.returncode})'}
-    if not answer.get('ok'):
-        raise Problem(f"{what}: {answer.get('error')}")
-    return answer
+def self_analysis_h5(movie_dir):
+    import reanalyse_movies as rm
+    path = rm.analysis_h5(movie_dir)
+    if not path:
+        raise Problem(f"{os.path.basename(movie_dir)} has no analysis h5 to render from")
+    return path
 
 
-def helper_json(settings, *args, what='the server could not do that'):
-    # these verbs read nothing from this PC and answer in one line, so slurm may be asked again
-    proc = remote(settings, helper_command(settings, *args, attempts=3), stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE)
-    return server_answer(proc, what)
-
-
-def wait_for_job(settings, state, poll_seconds):
-    """Watch the array job until every movie has been realigned, blocked or given up on."""
-    job = state['job']
-    started, last, shown, warned, settled = time.time(), None, 0, False, False
-    while True:
-        answer = helper_json(settings, 'realign-status', '--job', job,
-                             what='the server could not say how the realignment is going')
-        states = answer.get('states') or {}
-        tally = count(states.values()) or 'none'
-        pending = [k for k, v in states.items() if v == 'pending']
-        queued = answer.get('slurm')
-        minutes = (time.time() - started) / 60
-        queue = (', slurm: ' + ', '.join(f'{state} {number}'
-                                         for state, number in sorted(queued.items()))
-                 if queued else '')
-        # a line whenever anything moves -- a movie finishing, or the queue letting one start --
-        # and a heartbeat now and then, so a long wait never looks like a hung window
-        if (tally, queue) != last or minutes - shown >= 10:
-            print(f"  [{minutes:5.1f} min] {tally}{queue}", flush=True)
-            last, shown = (tally, queue), minutes
-        if not pending:
-            return states
-        if answer.get('working') is False:
-            # slurm drops a task from its books the moment it ends, which can be before its last
-            # file is there to be seen; give the results one more poll before giving up on them
-            if not settled:
-                settled = True
-                time.sleep(min(poll_seconds, 30))
-                continue
-            print(f"\n{len(pending)} movie(s) finished without a result. The cluster keeps each "
-                  f"task's messages in logs/realign_{job}_*.out", flush=True)
-            for key in pending[:10]:
-                print(f"  no result: {key}")
-            return states
-        settled = False
-        if answer.get('working') is None and not warned:
-            print("  (the cluster's queue could not be asked; watching for the results "
-                  "themselves instead. Close the window if this never moves)", flush=True)
-            warned = True
-        time.sleep(poll_seconds)
-
-
-def safe_key(relpath, movies):
-    """True when a downloaded name belongs to a movie of this round and stays inside it."""
-    parts = relpath.split('/')
-    if not relpath or relpath.startswith('/') or '..' in parts or not all(parts):
-        return False
-    return any(relpath.startswith(key + '/') for key in movies)
-
-
-def fetch_results(settings, state):
-    """Download the new ensembles into this PC's staging folder; returns the files' relative paths."""
-    staging = os.path.join(REALIGN_JOBS_DIR, state['job'], 'incoming')
-    if os.path.isdir(staging):
-        shutil.rmtree(staging)
-    os.makedirs(staging)
-    proc = remote(settings, helper_command(settings, 'realign-fetch', '--job', state['job']),
-                  stdout=subprocess.PIPE)
-    manifest, received = None, []
-    try:
-        with tarfile.open(fileobj=proc.stdout, mode='r|gz') as tar:
-            for member in tar:
-                if member.name == 'MANIFEST.json':
-                    manifest = json.loads(tar.extractfile(member).read().decode('utf-8'))['files']
-                    continue
-                if not member.isfile() or manifest is None or member.name not in manifest:
-                    continue
-                if not safe_key(member.name, state['movies']):
-                    raise Problem(f"the server offered a file this PC did not ask for "
-                                  f"({member.name!r}); nothing was touched")
-                target = os.path.join(staging, *member.name.split('/'))
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with tar.extractfile(member) as source, open(target, 'wb') as out:
-                    shutil.copyfileobj(source, out)
-                received.append(member.name)
-    except tarfile.TarError as e:
-        proc.wait()
-        raise Problem(f"the download was cut off ({e}); nothing on this PC was touched. Run the "
-                      "same command again to retry it")
-    if proc.wait() != 0 or manifest is None:
-        raise Problem("the server did not send the realigned files; nothing on this PC was "
-                      "touched. Run the same command again to retry it")
-    for rel, digest in manifest.items():
-        path = os.path.join(staging, *rel.split('/'))
-        if not os.path.isfile(path):
-            raise Problem(f"{rel} is missing from the download; nothing on this PC was touched")
-        if sha256(path) != digest:
-            raise Problem(f"{rel} arrived damaged; nothing on this PC was touched. Run the same "
-                          "command again to download it afresh")
-    print(f"{len(received)} file(s) downloaded and checked")
-    return staging, sorted(manifest)
-
-
-def install_results(state, staging, relpaths):
-    """Put each movie's new ensemble in place, keeping the one it replaces beside it.
-
-    Each movie is recorded as soon as it is done, so a round taken up again installs only what
-    it had not installed yet, instead of archiving a movie's files a second time."""
+def install_realign(work, state, staging, relpaths):
+    """Put each movie's new ensemble in place, keeping the one it replaces beside it."""
     import numpy as np
 
-    by_movie = {}
-    for rel in relpaths:
-        for key in state['movies']:
-            if rel.startswith(key + '/'):
-                by_movie.setdefault(key, []).append(rel[len(key) + 1:])
-                break
     stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
     installed = dict(state.get('installed') or {})
-    for key in sorted(by_movie):
+    for key, names in sorted(rounds.by_movie(state, relpaths).items()):
         if installed.get(key):
             print(f"  {key}: already done earlier in this round")
             continue
         movie_dir = state['movies'][key]
-        names = by_movie[key]
         source = os.path.join(staging, *key.split('/'))
         if REALIGN_MARKER not in names:
             report = os.path.join(source, *BLOCKED_REPORT.split('/'))
@@ -1050,9 +746,8 @@ def install_results(state, staging, relpaths):
                           blocked_at=dt.datetime.now().isoformat(timespec='seconds'))
             with open(os.path.join(movie_dir, BLOCKED_MARKER), 'w', encoding='utf-8') as f:
                 json.dump(record, f, indent=1)
+            rounds.record(REALIGN_JOBS_DIR, state, key, 'blocked')
             installed[key] = 'blocked'
-            state['installed'] = installed
-            save_job_state(state)
             continue
 
         new_points = os.path.join(source, POINTS_SMOOTHED)
@@ -1061,28 +756,17 @@ def install_results(state, staging, relpaths):
             if np.load(new_points).shape != np.load(old_points).shape:
                 print(f"  {key}: LEFT ALONE, the new points have a different shape from this "
                       f"movie's own; nothing was replaced")
+                rounds.record(REALIGN_JOBS_DIR, state, key, 'mismatch')
                 installed[key] = 'mismatch'
-                state['installed'] = installed
-                save_job_state(state)
                 continue
 
         archive = os.path.join(movie_dir, f'superseded_ensemble_{stamp}')
-        os.makedirs(archive, exist_ok=True)
-        moved = []
-        # the marker last, so an interrupted install leaves a movie that is redone, not one that
-        # looks finished
-        for name in sorted(n for n in names if n != REALIGN_MARKER):
-            target = os.path.join(movie_dir, *name.split('/'))
-            top = name.split('/')[0]
-            existing = os.path.join(movie_dir, top)
-            if os.path.exists(existing) and top not in moved:
-                shutil.move(existing, os.path.join(archive, top))
-                moved.append(top)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.move(os.path.join(source, *name.split('/')), target)
+        moved = move_in(source, movie_dir, [n for n in names if n != REALIGN_MARKER], archive)
         marker = json.load(open(os.path.join(source, REALIGN_MARKER), encoding='utf-8'))
         marker.update(movie=movie_dir, installed_from=state['job'],
                       installed_at=dt.datetime.now().isoformat(timespec='seconds'))
+        # the marker last, so an interrupted install leaves a movie that is redone, not one that
+        # looks finished
         with open(os.path.join(movie_dir, REALIGN_MARKER), 'w', encoding='utf-8') as f:
             json.dump(marker, f, indent=1)
         if os.path.isfile(os.path.join(movie_dir, BLOCKED_MARKER)):
@@ -1091,166 +775,235 @@ def install_results(state, staging, relpaths):
         change = (f", frames with both wings on one wing {collapse[0]:.1f}% -> {collapse[1]:.1f}%"
                   if len(collapse) == 2 else '')
         print(f"  {key}: new ensemble in place{change}; what it replaced is in "
-              f"{os.path.basename(archive)}/")
+              f"{os.path.basename(archive)}/ ({len(moved)} file(s))")
+        rounds.record(REALIGN_JOBS_DIR, state, key, 'realigned')
         installed[key] = 'realigned'
-        state['installed'] = installed
-        save_job_state(state)
     return installed
 
 
-def realign(args):
-    os.makedirs(REPORTS_DIR, exist_ok=True)
-    log_path = os.path.join(REPORTS_DIR, f"realign_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-    with open(log_path, 'w', encoding='utf-8') as handle:
-        out, err = sys.stdout, sys.stderr
-        sys.stdout, sys.stderr = Tee(out, handle), Tee(err, handle)
-        try:
-            return realign_steps(args, log_path)
-        except Problem as e:
-            print(f"\nSTOPPED: {e}", flush=True)
-            print(f"log of this round: {log_path}", flush=True)
-            return 1
-        finally:
-            sys.stdout, sys.stderr = out, err
+def install_video(work, state, staging, relpaths):
+    """Put each movie's new overlay video in place, keeping the one it replaces beside it."""
+    stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+    installed = dict(state.get('installed') or {})
+    for key, names in sorted(rounds.by_movie(state, relpaths).items()):
+        if installed.get(key):
+            print(f"  {key}: already done earlier in this round")
+            continue
+        movie_dir = state['movies'][key]
+        source = os.path.join(staging, *key.split('/'))
+        if VIDEO_STAMP not in names:
+            print(f"  {key}: no video came back; left alone")
+            rounds.record(REALIGN_JOBS_DIR, state, key, 'no video')
+            installed[key] = 'no video'
+            continue
+        archive = os.path.join(movie_dir, f'superseded_{stamp}')
+        # the stamp last: it is what says the video in this folder is the one the h5 describes
+        moved = move_in(source, movie_dir, [n for n in names if n != VIDEO_STAMP], archive)
+        move_in(source, movie_dir, [VIDEO_STAMP], archive)
+        mp4 = os.path.join(movie_dir, MP4_NAME)
+        size = f" ({os.path.getsize(mp4) / 1e6:.0f} MB)" if os.path.isfile(mp4) else ''
+        print(f"  {key}: new video in place{size}; what it replaced is in "
+              f"{os.path.basename(archive)}/ ({len(moved)} file(s))")
+        rounds.record(REALIGN_JOBS_DIR, state, key, 'rendered')
+        installed[key] = 'rendered'
+    return installed
 
 
-def realign_steps(args, log_path):
+def move_in(source, movie_dir, names, archive):
+    """Move files from the staging folder into the movie, keeping what they replace."""
+    moved = []
+    for name in sorted(names):
+        target = os.path.join(movie_dir, *name.split('/'))
+        top = name.split('/')[0]
+        existing = os.path.join(movie_dir, top)
+        if os.path.exists(existing) and top not in moved:
+            os.makedirs(archive, exist_ok=True)
+            shutil.move(existing, os.path.join(archive, top))
+            moved.append(top)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.move(os.path.join(source, *name.split('/')), target)
+    return moved
+
+
+ROUNDS = {
+    'realign': {'what': 'realigning', 'inputs': None, 'install': install_realign,
+                'note': 'Each movie takes about half an hour, longer for a long one.'},
+    'video': {'what': 'rendering', 'inputs': None, 'install': install_video,
+              'note': 'A video takes about 20 minutes per thousand frames.'},
+}
+
+
+def do_round(work, kind, rows, number, total):
+    """One round of work on the cluster, resumable: send, run, watch, fetch, install, clear."""
+    settings, args = work.settings, work.args
+    spec = ROUNDS[kind]
+    state = None if args.restart else rounds.unfinished_job(REALIGN_JOBS_DIR, work.roots, kind)
+    if state:
+        print(f"\ncontinuing the {kind} round started {state['created']} "
+              f"({len(state['movies'])} movie(s), job {state['job']})")
+    else:
+        state = rounds.new_job_state(work.roots, rounds.movie_keys(rows), kind)
+        rounds.save_job_state(REALIGN_JOBS_DIR, state)
+    # the round's own names for the movies, whether it was just made or taken up again
+    by_dir = {movie_dir: key for key, movie_dir in state['movies'].items()}
+    rows = [row for row in rows if row['movie_dir'] in by_dir]
+    for row in rows:
+        row['key'] = by_dir[row['movie_dir']]
+
+    if not state['uploaded']:
+        stage(number, total, f"sending {len(state['movies'])} movie(s) to the cluster for "
+                             f"{spec['what']}")
+        if kind == 'video':
+            staged = prepare_video(settings, state, REALIGN_JOBS_DIR, rows)
+            # a movie of the round that is no longer in the survey has nothing to send
+            files_for = lambda movie_dir: staged.get(movie_dir, [])
+        else:
+            files_for = realign_inputs
+        rounds.upload_round(settings, state, files_for)
+        state['uploaded'] = True
+        rounds.save_job_state(REALIGN_JOBS_DIR, state)
+    else:
+        stage(number, total, f"the cluster already has these movies ({spec['what']})")
+
+    if not state['job_id']:
+        job_id, movies = rounds.submit(settings, state, args.at_once)
+        state['job_id'] = job_id
+        rounds.save_job_state(REALIGN_JOBS_DIR, state)
+        print(f"slurm job {job_id}, {movies} task(s), at most {args.at_once} at a time")
+    else:
+        print(f"the cluster is already running this round (slurm job {state['job_id']})")
+
+    print(f"\n{spec['note']} You can close this window and run the same command later to pick "
+          f"it up again.", flush=True)
+    rounds.wait_for_job(settings, state, args.poll_seconds)
+
+    staging, relpaths = rounds.fetch_results(settings, REALIGN_JOBS_DIR, state)
+    installed = spec['install'](work, state, staging, relpaths)
+    state['installed'] = installed
+    shutil.rmtree(staging, ignore_errors=True)
+    if args.keep_on_server:
+        print(f"kept, as asked: {settings['server_project']}/realign_jobs/{state['job']}")
+    else:
+        rounds.clean(settings, state)
+        print("the round is gone from the cluster; this PC keeps both the new files and the ones "
+              "they replaced")
+    state['finished'] = True
+    rounds.save_job_state(REALIGN_JOBS_DIR, state)
+    shutil.rmtree(os.path.join(REALIGN_JOBS_DIR, state['job']), ignore_errors=True)
+    return installed
+
+
+def run_steps(args, log_path):
     started = time.time()
     settings = load_settings()
-    # the check itself reads nothing but this PC's own disk, so anyone may run it; repairing a
-    # movie computes on the cluster and writes there, which only the pipeline's owner may do
-    check_only = args.check_only or not may_upload(settings)
-    folders = list(args.folders)
-    if not folders:
-        answer = ask("Folder to realign (one experiment, or a folder of experiments)")
-        folders = [answer] if answer else []
-    roots = []
-    for folder in folders:
-        folder = os.path.abspath(folder.strip().strip('"'))
-        if not os.path.isdir(folder):
-            raise Problem(f"not a folder: {folder}")
-        roots.append(folder)
-    if not roots:
-        raise Problem("no folder given")
+    roots = wanted_folders(args)
+    upload_step = may_upload(settings) and not args.no_upload
 
+    # before anything is imported or re-analysed, so the run uses the cluster's current code
     updated = update_if_outdated(args, settings)
     if updated is not None:
         return updated
 
-    total = 1 if check_only else (6 if args.no_reanalyse else 7)
-    state = None if (args.restart or check_only) else unfinished_job(roots)
-    if state:
-        print(f"\ncontinuing the round started {state['created']} ({len(state['movies'])} movie(s), "
-              f"job {state['job']})")
+    # heavy imports only now, so setup/update and a wrong folder answer quickly
+    print("\n=== working out what each movie needs ===", flush=True)
+    work = Work(settings, roots, args)
+    print(f"{len(work.movie_dirs)} movie(s) in {len(set(work.groups.values()))} experiment(s)")
+    received = work.declarations()
+    print(f"{received} declaration file(s) found on the server; experiments without one keep "
+          f"what their movies' previous analysis recorded")
+    print(f"analysis code {work.code_fp} (commit {work.commit})\n")
+    work.look()
+    for line in movie_survey.summarise(work.rows):
+        print(line)
 
-    if state is None:
-        stage(1, total, "checking which movies' ensembles would change")
-        import collect_analysis_h5 as collector
-        import reanalyse_movies as rm
-        movie_root = {}
-        for root in roots:
-            for movie_dir in rm.find_movie_dirs(root):
-                movie_root.setdefault(movie_dir, root)
-        movie_dirs = sorted(movie_root)
-        if not movie_dirs:
-            raise Problem(f"no predicted movies (folders with {rm.POINTS_NAME}) under: "
-                          f"{', '.join(roots)}")
-        print(f"{len(movie_dirs)} movie(s) to check; this reads each one's ensemble members")
-        flagged, skipped, unreadable, blocked = screen_movies(movie_dirs, args.retry_blocked)
-        for movie_dir, problem in unreadable:
-            print(f"  could not read {os.path.basename(movie_dir)}: {problem}")
-        unchanged = len(movie_dirs) - len(flagged) - len(unreadable) - blocked
-        print(f"\n{len(flagged)} movie(s) would change, {unchanged} would come out exactly as "
-              f"they are ({skipped} of them already realigned or without members to compare)")
+    allowed = set(args.only or movie_survey.STAGES)
+    todo = [stage_name for stage_name in movie_survey.STAGES
+            if stage_name in allowed and work.needing(stage_name)]
+    if args.check:
+        print("\nThis was the check only; nothing was changed.")
+        return 0
+    if not todo:
+        print("\nNothing to do: every movie is up to date.")
+        return 0
+    if not may_upload(settings):
+        blocked = [s for s in todo if s in ('realign', 'render')]
         if blocked:
-            print(f"{blocked} more were tried in an earlier round and refused, so they are left "
-                  f"out; --retry-blocked offers them again")
-        for entry in sorted(flagged, key=lambda e: -e['exchanged_pairs'])[:10]:
-            print(f"  {os.path.basename(entry['movie_dir']):<34} "
-                  f"{entry['exchanged_pairs']} (frame, candidate) pair(s) the other way round")
-        if len(flagged) > 10:
-            print(f"  ... and {len(flagged) - 10} more")
-        if not flagged:
-            print("\nNothing to realign: " + ("the only movies that would change were tried "
-                                               "before and refused" if blocked else
-                                               "every movie's ensemble already has its wings "
-                                               "the same way round") + ".")
-            return 0
-        if check_only:
-            if args.check_only:
-                print("\nThis was the check only. Run it without --check-only to repair them.")
-            else:
-                print("\nRepairing these movies runs on the lab cluster, and this account may "
-                      "not write there, so only the pipeline's owner can do it. Send the list "
-                      "above to Lior. Nothing has left this PC, and nothing here was changed.")
-            return 0
-        groups = {e['movie_dir']: collector.experiment_key(e['movie_dir'], movie_root[e['movie_dir']])
-                  for e in flagged}
-        state = new_job_state(roots, movie_keys(flagged, groups))
-        save_job_state(state)
+            print(f"\n{', '.join(blocked)} runs on the lab cluster, and this account may not "
+                  f"write there, so only the pipeline's owner can do it. The list above is what "
+                  f"to send on.")
+            todo = [s for s in todo if s not in blocked]
+            if not todo:
+                return 0
 
-    if not state['uploaded']:
-        stage(2, total, f"sending {len(state['movies'])} movie(s) to the cluster")
-        upload_members(settings, state)
-        state['uploaded'] = True
-        save_job_state(state)
-    else:
-        stage(2, total, "the cluster already has these movies")
+    total = len(todo) + 1 + (1 if upload_step else 0)
+    number = 0
+    rows = []
 
-    if not state['job_id']:
-        stage(3, total, "asking the cluster to re-run their ensembles")
-        answer = helper_json(settings, 'realign-submit', '--job', state['job'],
-                             '--throttle', str(args.at_once),
-                             what='the cluster would not start the realignment')
-        state['job_id'] = str(answer['job_id'])
-        save_job_state(state)
-        print(f"slurm job {state['job_id']}, {answer['movies']} task(s), "
-              f"at most {args.at_once} at a time")
-    else:
-        stage(3, total, f"the cluster is already running this round (slurm job {state['job_id']})")
+    if 'realign' in todo:
+        number += 1
+        do_round(work, 'realign', work.needing('realign'), number, total)
+        work.look()          # the cascade, asked rather than assumed
 
-    stage(4, total, "waiting for the cluster")
-    print("Each movie takes about half an hour, longer for a long one. You can close this "
-          "window and run the same command later to pick it up again.")
-    wait_for_job(settings, state, args.poll_seconds)
+    if 'reanalyse' in todo:
+        number += 1
+        stale = [row['movie_dir'] for row in work.needing('reanalyse')]
+        jobs = auto_jobs(settings)
+        stage(number, total, f"re-analysing {len(stale)} movie(s), {jobs} at a time")
+        stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+        opts = dict(archive=True, with_video=False, force_video=False, pert_source='auto',
+                    path_maps=work.path_maps, allow_no_trigger=False, only_stale=True,
+                    code_fp=work.code_fp, commit=work.commit, dataset_roots=work.roots_for_data)
+        rows = work.rm.run_movies(stale, stamp, opts, jobs) if stale else []
+        for row in rows:
+            row['experiment'] = work.groups.get(row['movie_dir'], row.get('experiment', ''))
+        report = work.rm.write_report(rows, os.path.join(REPORTS_DIR,
+                                                         f'reanalyse_report_{stamp}.csv'))
+        print(f"\nreport: {report}")
+        work.rm.print_run_summary(rows)
+        work.look()
 
-    stage(5, total, "downloading the new ensembles and putting them in place")
-    staging, relpaths = fetch_results(settings, state)
-    installed = install_results(state, staging, relpaths)
-    state['installed'] = installed
-    save_job_state(state)
-    shutil.rmtree(staging, ignore_errors=True)
-    realigned = [k for k, v in installed.items() if v == 'realigned']
-    print(f"\n{len(realigned)} movie(s) realigned, {len(installed) - len(realigned)} left alone")
+    if 'render' in todo:
+        number += 1
+        do_round(work, 'video', work.needing('render'), number, total)
+        work.look()
 
-    stage(6, total, "clearing the round off the cluster")
-    if args.keep_on_server:
-        print(f"kept, as asked: {settings['server_project']}/realign_jobs/{state['job']}")
-    else:
-        helper_json(settings, 'realign-clean', '--job', state['job'],
-                    what='the cluster could not delete this round')
-        print("the uploaded members and their results are gone from the cluster; this PC keeps "
-              "both the new files and the ones they replaced")
-    state['finished'] = True
-    save_job_state(state)
+    number += 1
+    stage(number, total, "collecting the analysis h5 files")
+    collector = work.collector
+    excluded = () if args.include_bad else collector.DEFAULT_EXCLUDE_DIRS
+    ready = [row['movie_dir'] for row in work.rows if 'reanalyse' not in row['needs']]
+    bad = [d for d in ready if excluded and is_bad(d, work.movie_root[d], excluded)]
+    ready = [d for d in ready if d not in bad]
+    collected = collect_movies(settings, ready, work.movie_root, work.groups, collector)
+    print(f"{len(collected)} file(s) into {collected_root(settings)}: "
+          f"{count(r['status'] for r in collected) or 'none'}")
+    if bad:
+        print(f"not collected, being in {'/'.join(sorted(excluded))} folders: {len(bad)} movie(s)")
+    not_ready = [row for row in work.rows if 'reanalyse' in row['needs']]
+    if not_ready:
+        print(f"not collected, because they are still not up to date: {len(not_ready)} movie(s)")
+
+    if upload_step:
+        number += 1
+        stage(number, total, "uploading to the server")
+        _, results = upload(settings)
+        if results:
+            print(f"server: {count(results.values())}")
 
     minutes = (time.time() - started) / 60
-    print(f"\n=== realignment finished in {minutes:.1f} min ===")
-    print(f"log of this round: {log_path}")
-    if not realigned:
-        print("No movie changed, so there is nothing to re-analyse.")
-        return 0
-    if args.no_reanalyse:
-        print("\nThe realigned movies now need re-analysing: run reanalyse.bat over the same "
-              "folder when you are ready.")
-        return 0
-
-    stage(7, total, "re-analysing the realigned movies, and collecting them")
-    print("A realigned movie counts as stale, so this redoes exactly those, plus any other "
-          "movie whose products are out of date.\n")
-    nested = argparse.Namespace(folders=[str(r) for r in roots], no_upload=args.no_upload,
-                                no_update=True, include_bad=args.include_bad)
-    return run_steps(nested, log_path)
+    print(f"\n=== finished in {minutes:.1f} min ===")
+    print(f"did              : {', '.join(todo)}")
+    if rows:
+        print(f"re-analysed      : {count(r.get('status') for r in rows)}")
+    print(f"log of this run  : {log_path}")
+    print(f"collected on PC  : {collected_root(settings)}")
+    if upload_step:
+        print(f"on the server    : {settings['server_host']}:{upload_destination(settings)}")
+    elif not may_upload(settings):
+        print("uploads are off for this PC; the collected files stay here")
+    if not_ready:
+        print("\nSome movies are still not up to date -- see the messages above.")
+    return 1 if not_ready else 0
 
 
 def main():
@@ -1258,9 +1011,29 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command')
     sub.add_parser('setup', help='one-time setup of this PC')
-    run_parser = sub.add_parser('run', help='re-analyse, collect and upload')
+    run_parser = sub.add_parser(
+        'run', help='work out what each movie needs -- realigning, re-analysing, rendering -- '
+                    'and do only that, then collect and upload')
     run_parser.add_argument('folders', nargs='*',
                             help='one experiment folder, or a folder of experiments (asked if omitted)')
+    run_parser.add_argument('--check', action='store_true',
+                            help='say what each movie needs and stop; nothing is changed')
+    run_parser.add_argument('--only', action='append', choices=movie_survey.STAGES,
+                            help='do just this stage, even if others are needed (repeatable)')
+    run_parser.add_argument('--render-unknown', action='store_true',
+                            help='also render the videos of movies made before videos were '
+                                 'stamped, which nothing on disk can judge either way')
+    run_parser.add_argument('--retry-blocked', action='store_true',
+                            help='offer again the movies a realignment round was refused')
+    run_parser.add_argument('--at-once', type=int, default=20,
+                            help='how many movies the cluster works on at a time (default 20)')
+    run_parser.add_argument('--poll-seconds', type=int, default=300,
+                            help='how often to ask the cluster how a round is going (default 300; '
+                                 'each question is itself a small job on a node)')
+    run_parser.add_argument('--restart', action='store_true',
+                            help='start a new round instead of continuing the last unfinished one')
+    run_parser.add_argument('--keep-on-server', action='store_true',
+                            help='leave a round\'s uploaded files and results on the cluster')
     run_parser.add_argument('--no-upload', action='store_true',
                             help='re-analyse and collect on this PC only')
     run_parser.add_argument('--no-update', action='store_true',
@@ -1270,35 +1043,9 @@ def main():
                                  'folders (they are always re-analysed; by default they are '
                                  'not collected). Each goes under its experiment\'s <bad '
                                  'folder>/ subfolder, never among its usable movies')
-    realign_parser = sub.add_parser(
-        'realign', help="re-run the ensemble of movies whose wings are labelled inconsistently, "
-                        "on the cluster, then re-analyse them here")
-    realign_parser.add_argument('folders', nargs='*',
-                                help='one experiment folder, or a folder of experiments (asked if omitted)')
-    realign_parser.add_argument('--check-only', action='store_true',
-                                help='only say which movies would change; touch nothing')
-    realign_parser.add_argument('--retry-blocked', action='store_true',
-                                help='offer again the movies an earlier round was refused')
-    realign_parser.add_argument('--at-once', type=int, default=20,
-                                help='how many movies the cluster works on at a time (default 20)')
-    realign_parser.add_argument('--poll-seconds', type=int, default=300,
-                                help='how often to ask the cluster how it is going (default 300; '
-                                     'each question is itself a small job on a node)')
-    realign_parser.add_argument('--restart', action='store_true',
-                                help='start a new round instead of continuing the last unfinished one')
-    realign_parser.add_argument('--keep-on-server', action='store_true',
-                                help='leave the uploaded members and results on the cluster')
-    realign_parser.add_argument('--no-reanalyse', action='store_true',
-                                help='install the new ensembles but do not re-analyse them yet')
-    realign_parser.add_argument('--no-upload', action='store_true',
-                                help='re-analyse and collect on this PC only')
-    realign_parser.add_argument('--no-update', action='store_true',
-                                help='run with this copy of the code even if the server has newer')
-    realign_parser.add_argument('--include-bad', action='store_true',
-                                help='also collect movies from bad_signal/bad_wings folders')
     sub.add_parser('update', help='download the latest committed code from the server')
     args = parser.parse_args()
-    handlers = {'setup': setup, 'run': run, 'update': update, 'realign': realign}
+    handlers = {'setup': setup, 'run': run, 'update': update}
     if args.command not in handlers:
         parser.print_help()
         return 2

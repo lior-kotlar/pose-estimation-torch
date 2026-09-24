@@ -215,6 +215,7 @@ local_reanalysis_settings.json
 declarations_cache/
 reports/
 realign_jobs/
+.dataset_index.json
 BUNDLE_COMMIT
 inference_datasets/
 training_datasets/

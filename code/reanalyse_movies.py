@@ -11,10 +11,10 @@ points_ensemble_smoothed_reprojected.npy and "movie 2D and 3D.mp4". Those stay g
 correct -- they hold the same set of 3D locations either way -- but FlightAnalysis decides
 left from right before reprojecting, so on a movie where that decision changes the stale
 reprojection keeps the old index order and the mp4 colours the wings the other way round from
-the new h5. Pass --with-mp4 to rewrite those two as well; that needs the calibration and the
-source box h5 (both recovered from the saved member config), but still no GPU and no
-re-prediction. Movies whose source movie has since been deleted keep their old video and are
-listed at the end -- their angles are up to date either way.
+the new h5. Pass --with-mp4 to rewrite those two as well, or --only-video to rewrite just them;
+that needs the calibration and the source box h5 (both recovered from the saved member config),
+but still no GPU and no re-prediction. Movies whose source movie has since been deleted keep
+their old video and are listed at the end -- their angles are up to date either way.
 
 The trigger offset, frame rate and provenance are read back out of the existing analysis h5,
 so no other input is needed. The declaration (pulse window AND lighting) is taken from the live
@@ -28,8 +28,17 @@ analysis h5 and source.json -- plus its experiment's perturbation.json, so an ex
 another machine is re-analysed where it lives (LOCAL_REANALYSIS.md). The paths recorded at
 predict time are cluster paths; --path-map SERVER=LOCAL rewrites them wherever one is opened and
 maps the declaration's path back before it is written, so the products read the same whichever
-machine made them. A movie whose trigger cannot be found is refused rather than numbered from
-box frame 0 (--allow-no-trigger overrides).
+machine made them. --dataset-root goes further: it finds a movie's source data by what it is
+rather than by where it was, for datasets that have since been moved off the cluster altogether
+(code/dataset_paths.py). A movie whose trigger cannot be found is refused rather than numbered
+from box frame 0 (--allow-no-trigger overrides).
+
+Rendering only. --only-video rewrites the reprojection and the overlay mp4 and nothing else,
+reading the analysed points, the trigger and the declaration back out of the analysis h5. So it
+needs neither the points file nor an analysis of its own, which is what lets a cluster node render
+a movie whose only copy is on someone's PC: the h5 and a box are staged beside each other and this
+turns them into an mp4. Each render leaves a video.json beside the video saying which points it was
+drawn from, so a later run can tell whether it is still right without opening the box at all.
 
 Staleness. Every re-analysed movie is stamped -- in its h5 and in source.json -- with a
 fingerprint of the analysis code, of the declaration it used and of the 3D points it read.
@@ -39,7 +48,7 @@ interrupted run and brings a whole tree up to date without redoing what already 
 
 Usage:
     .env/bin/python code/reanalyse_movies.py <dir> [<dir> ...] [--jobs N] [--only-stale]
-        [--path-map SERVER=LOCAL] [--with-mp4] [--dry-run]
+        [--path-map SERVER=LOCAL] [--dataset-root DIR] [--with-mp4 | --only-video] [--dry-run]
 
 <dir> may be a single movie directory, or any directory above one -- every movie dir holding
 a points_3D_smoothed_ensemble_best_method.npy underneath it is re-analysed, except the archived
@@ -87,6 +96,7 @@ from plot_wing_and_body import plot_one as plot_movie_figures, FIGURE_NAMES, lig
 from utils import load_perturbation, stamp_declaration, get_trigger_frame_info, pitch_read_sign
 from plot_flight_viewer import (make_viewer as make_flight_viewer,
                                 OUT_SUFFIX as VIEWER_SUFFIX)
+import dataset_paths
 
 POINTS_NAME = 'points_3D_smoothed_ensemble_best_method.npy'
 PROVENANCE_KEYS = ("experiment", "movie_dir", "source_movie_dir", "box_h5")
@@ -95,6 +105,10 @@ MP4_NAME = 'movie 2D and 3D.mp4'
 SOURCE_JSON = 'source.json'
 # code/realign_ensemble.py leaves this behind in a movie whose ensemble it re-ran
 REALIGN_MARKER = '.realigned_ensemble.json'
+# what the overlay video was made from, so a later run can tell whether it still matches the h5
+VIDEO_STAMP = 'video.json'
+# where an index of the dataset roots is cached, when one is needed at all
+DATASET_INDEX = os.path.join(os.path.dirname(CODE_DIR), '.dataset_index.json')
 
 # The sources that decide what the analysis products contain. An edit to any of them makes
 # every movie stale for --only-stale. Deliberately broad: redoing a movie costs seconds, and
@@ -182,6 +196,39 @@ def unmap_path(path, path_maps):
     return server + ('/' + rest.replace(os.sep, '/') if rest else '')
 
 
+_RESOLVERS = {}
+
+
+def source_resolver(dataset_roots=()):
+    """The resolver for these roots, built once per process (a worker re-imports this module)."""
+    key = tuple(dataset_roots or ())
+    if key not in _RESOLVERS:
+        _RESOLVERS[key] = dataset_paths.Resolver(key, cache_path=DATASET_INDEX if key else None)
+    return _RESOLVERS[key]
+
+
+def reachable(recorded, path_maps=(), dataset_roots=()):
+    """A recorded source path as this machine can open it.
+
+    --path-map first, since a wholesale prefix move is exactly what it is for and it needs no
+    search; then the dataset roots, which find a file that has since been moved off the cluster
+    altogether. Falls back to the mapped path so the caller reports the name it went looking for
+    rather than None."""
+    mapped = map_path(recorded, path_maps)
+    if not recorded or os.path.exists(mapped):
+        return mapped
+    return source_resolver(dataset_roots)(recorded) or mapped
+
+
+def array_fingerprint(values):
+    """A short hash of an array's exact contents, shape and dtype included."""
+    array = np.ascontiguousarray(values)
+    digest = hashlib.sha256()
+    digest.update(f'{array.dtype.str}|{array.shape}|'.encode())
+    digest.update(array.tobytes())
+    return digest.hexdigest()[:16]
+
+
 def code_fingerprint():
     """A short hash of the analysis code, identical for a Windows and a Linux checkout."""
     digest = hashlib.sha256()
@@ -208,6 +255,97 @@ def points_fingerprint(movie_dir):
     except OSError:
         return ''
     return digest.hexdigest()[:16]
+
+
+def h5_text(hdf, key):
+    """One text dataset of an h5, or '' when it is not there."""
+    if key not in hdf:
+        return ''
+    value = hdf[key][()]
+    return value.decode(errors='replace') if isinstance(value, bytes) else str(value)
+
+
+def analysed_points_fingerprint(hdf):
+    """The fingerprint of the points an h5's video would be reprojected from.
+
+    Normally the stamp the analysis wrote. An h5 from before that stamp existed still holds the
+    array itself, and create_movie_analysis_h5 stores it exactly as FlightAnalysis produced it, so
+    hashing it here gives the same answer -- which is what lets an older movie's video be judged
+    without re-analysing it first."""
+    stamped = h5_text(hdf, 'analysed_points_fingerprint')
+    if stamped:
+        return stamped
+    return array_fingerprint(hdf['points_3D'][()]) if 'points_3D' in hdf else ''
+
+
+def analysis_h5(movie_dir):
+    """The movie's current analysis h5, or None."""
+    live = sorted(f for f in os.listdir(movie_dir) if f.endswith('_analysis_smoothed.h5'))
+    return os.path.join(movie_dir, live[0]) if live else None
+
+
+def analysis_stamps(movie_dir):
+    """What the movie's current analysis h5 says made it: (analysed points fp, points fp).
+
+    The analysed points are the ones FlightAnalysis produced, which is what the overlay video is
+    reprojected from -- not the same thing as the points file on disk, because the analysis
+    decides left from right before reprojecting."""
+    path = analysis_h5(movie_dir)
+    if not path:
+        return '', ''
+    try:
+        with h5py.File(path, 'r') as hdf:
+            return analysed_points_fingerprint(hdf), h5_text(hdf, 'points_fingerprint')
+    except (OSError, KeyError):
+        return '', ''
+
+
+def read_video_stamp(movie_dir):
+    try:
+        with open(os.path.join(movie_dir, VIDEO_STAMP), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def video_state(movie_dir):
+    """Whether the overlay mp4 still matches the analysis beside it.
+
+    'missing'  there is no mp4 at all
+    'current'  it was made from exactly the points the h5 holds now
+    'stale'    it was not -- the ensemble or the analysis moved under it
+    'unknown'  it predates this stamp, so nothing on disk can say either way
+
+    Decided from the h5 and a small json beside the video, so it costs nothing and needs neither
+    the source box h5 nor the cluster. That is the whole point: without it, finding out whether a
+    video is worth re-rendering would mean shipping 60 MB to the cluster to be told it is not."""
+    if not os.path.isfile(os.path.join(movie_dir, MP4_NAME)):
+        return 'missing'
+    analysed, _ = analysis_stamps(movie_dir)
+    stamped = read_video_stamp(movie_dir).get('analysed_points_fingerprint', '')
+    if not analysed or not stamped:
+        return 'unknown'
+    return 'current' if analysed == stamped else 'stale'
+
+
+def write_video_stamp(movie_dir, h5_path, box_h5):
+    """Record what the video was made from, beside it.
+
+    The fingerprints are copied out of the h5 rather than recomputed, so a video rendered on the
+    cluster from a PC's h5 records the PC's numbers -- the two machines' floating point differs in
+    the last bits, and a recomputed fingerprint would make every such video look stale for ever."""
+    with h5py.File(h5_path, 'r') as hdf:
+        stamp = {'analysed_points_fingerprint': analysed_points_fingerprint(hdf),
+                 'points_fingerprint': h5_text(hdf, 'points_fingerprint'),
+                 'analysis_code_fingerprint': h5_text(hdf, 'analysis_code_fingerprint')}
+    stamp.update(rendered_at=dt.datetime.now().isoformat(timespec='seconds'),
+                 box_h5=box_h5 or '', host=socket.gethostname(), mp4=MP4_NAME)
+    path = os.path.join(movie_dir, VIDEO_STAMP)
+    staged = path + '.partial'
+    with open(staged, 'w', encoding='utf-8') as f:
+        json.dump(stamp, f, indent=1)
+    os.replace(staged, path)
+    return stamp
 
 
 def realigned_at(movie_dir):
@@ -280,9 +418,10 @@ def read_prediction_config(movie_dir):
     raise NoSourceMovie(f'no member config with a movie/calibration path under {movie_dir}')
 
 
-def regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
-                     stamp=None, archive=True, force=False, perturbation=None, path_maps=()):
-    """Rewrite the reprojected 2D points and the overlay mp4 from the re-analysed points.
+def regenerate_video(movie_dir, points_3D, first_frame, h5_path, trigger_offset, frame_rate,
+                     stamp=None, archive=True, force=False, perturbation=None, path_maps=(),
+                     dataset_roots=()):
+    """Rewrite the reprojected 2D points and the overlay mp4 from the analysed points.
 
     FlightAnalysis decides left from right, so its points_3D can come out in a different
     index order than the run that produced the existing reprojection -- the same 3D locations,
@@ -290,20 +429,29 @@ def regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
     after that decision changes would show the wings swapped relative to the new h5. This is
     the same reprojection predict.py does; it needs the calibration and the source movie, but
     no GPU and no re-prediction.
+
+    The points are passed in rather than taken off a FlightAnalysis, so a machine that only has
+    to render can read them straight out of the h5 and skip the analysis altogether.
     """
-    box_path, calibration_path, image_height, image_width = read_prediction_config(movie_dir)
-    box_path, calibration_path = map_path(box_path, path_maps), map_path(calibration_path, path_maps)
+    recorded_box, recorded_calibration, image_height, image_width = read_prediction_config(movie_dir)
+    box_path = reachable(recorded_box, path_maps, dataset_roots)
+    calibration_path = reachable(recorded_calibration, path_maps, dataset_roots)
     if not os.path.isfile(box_path):
         raise NoSourceMovie(box_path)
-
-    # read the cropzone straight out of the h5 rather than importing Predictor2D, which would
-    # drag torch in for a two-line array read
+    # a box shrunk for transport keeps only the channels the renderer reads; refuse one that does
+    # not hold them rather than render black panels
+    kept = dataset_paths.reduced_channels(box_path)
     with h5py.File(box_path, 'r') as box:
+        # read the cropzone straight out of the h5 rather than importing Predictor2D, which would
+        # drag torch in for a two-line array read
         cropzone = box['/cropzone'][:] if '/cropzone' in box else box['/cropZone'][:]
+        needed = dataset_paths.render_channels(box[dataset_paths.BOX].shape[1])
+    if kept is not None and not set(needed) <= set(kept):
+        raise NoSourceMovie(f'{box_path} was reduced to channels {kept}, but the video needs '
+                            f'{needed}')
 
     triangulator = Triangulator(calibration_path, image_height, image_width)
-    reprojected = triangulator.get_reprojections(
-        analysis.points_3D[analysis.first_analysed_frame:], cropzone)
+    reprojected = triangulator.get_reprojections(points_3D[first_frame:], cropzone)
 
     # reprojecting is seconds, rendering the mp4 is minutes, and on most movies the left/right
     # decision did not change -- so the new reprojection is identical to the one already on
@@ -317,6 +465,9 @@ def regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
         previous = np.load(reprojected_path)
         if previous.shape == reprojected.shape and np.allclose(previous, reprojected,
                                                                atol=1e-6, equal_nan=True):
+            # the video on disk is right for these points; say so, or every later run would ask
+            # the cluster to prove it again
+            write_video_stamp(movie_dir, h5_path, recorded_box)
             return 'unchanged, mp4 left as is'
 
     if archive and stamp is not None:
@@ -341,6 +492,7 @@ def regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
                 os.remove(leftover)
         raise
     shutil.move(staged_path, reprojected_path)
+    write_video_stamp(movie_dir, h5_path, recorded_box)
     return 'rewritten'
 
 
@@ -349,20 +501,33 @@ def is_archive_dir(name):
     return name.startswith('superseded_') or name.startswith('.')
 
 
-def find_movie_dirs(root):
-    """Every directory under root (or root itself) holding a smoothed 3D points file.
+def holds_points(filenames):
+    return POINTS_NAME in filenames
+
+
+def holds_analysis(filenames):
+    """A movie that can be rendered: it has an analysis h5, whether or not its points are here."""
+    return any(f.endswith('_analysis_smoothed.h5') for f in filenames)
+
+
+def find_movie_dirs(root, holds=holds_points):
+    """Every directory under root (or root itself) that counts as a movie.
+
+    By default that means one holding a smoothed 3D points file. Rendering asks for movies with
+    an analysis h5 instead, since everything an overlay video needs is in there and a movie staged
+    for rendering carries no points file at all.
 
     Archives are pruned from the walk: realign_ensemble.py moves a movie's previous
     points file into superseded_ensemble_<stamp>/ (and stages candidates in
     .realign_staging/), and re-analysing that copy would write products from the
     points the movie no longer uses."""
     root = os.path.abspath(root)
-    if os.path.exists(os.path.join(root, POINTS_NAME)):
+    if os.path.isdir(root) and holds(os.listdir(root)):
         return [root]
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if not is_archive_dir(d))
-        if POINTS_NAME in filenames:
+        if holds(filenames):
             found.append(dirpath)
     return sorted(found)
 
@@ -522,7 +687,7 @@ def recorded_box_path(movie_dir, source):
     return box
 
 
-def declaration_from_json(movie_dir, source, frame_rate, path_maps=()):
+def declaration_from_json(movie_dir, source, frame_rate, path_maps=(), dataset_roots=()):
     """The live perturbation.json's declaration for this movie, or None.
 
     Found through the source movie's recorded path; load_perturbation needs only that path to
@@ -532,13 +697,13 @@ def declaration_from_json(movie_dir, source, frame_rate, path_maps=()):
     box = recorded_box_path(movie_dir, source)
     if not box:
         return None
-    perturbation = load_perturbation(map_path(box, path_maps), frame_rate)
+    perturbation = load_perturbation(reachable(box, path_maps, dataset_roots), frame_rate)
     if perturbation is not None and perturbation.get('source'):
         perturbation['source'] = unmap_path(perturbation['source'], path_maps)
     return perturbation
 
 
-def resolve_context(movie_dir, pert_source='auto', path_maps=()):
+def resolve_context(movie_dir, pert_source='auto', path_maps=(), dataset_roots=()):
     """Everything a movie's re-analysis takes besides its 3D points. Writes nothing.
 
     Shared by the run and by --dry-run, so the preflight reports exactly what a run would use.
@@ -553,7 +718,8 @@ def resolve_context(movie_dir, pert_source='auto', path_maps=()):
     if trigger_offset is None:
         box = recorded_box_path(movie_dir, source)
         if box:
-            recovered_offset, recovered_rate = get_trigger_frame_info(map_path(box, path_maps))
+            recovered_offset, recovered_rate = get_trigger_frame_info(
+                reachable(box, path_maps, dataset_roots))
             if recovered_offset is not None:
                 trigger_offset, trigger = recovered_offset, 'sparse mat'
                 frame_rate = frame_rate or recovered_rate
@@ -562,7 +728,7 @@ def resolve_context(movie_dir, pert_source='auto', path_maps=()):
     # block added after prediction can come from.
     perturbation, used = h5_perturbation, ('analysis h5' if h5_perturbation else 'none')
     if pert_source in ('auto', 'json'):
-        live = declaration_from_json(movie_dir, source, frame_rate, path_maps)
+        live = declaration_from_json(movie_dir, source, frame_rate, path_maps, dataset_roots)
         if live is not None:
             perturbation, used = live, live.get('source') or 'perturbation.json'
         elif pert_source == 'json':
@@ -722,11 +888,11 @@ def compare_with_previous(archive_dir, h5_path):
 
 def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=False,
               pert_source='auto', path_maps=(), allow_no_trigger=False, only_stale=False,
-              code_fp=None, commit='unknown'):
+              code_fp=None, commit='unknown', dataset_roots=()):
     """Re-analyse one movie; returns its row for the run report."""
     points_path = os.path.join(movie_dir, POINTS_NAME)
     movie = os.path.basename(movie_dir.rstrip(os.sep))
-    ctx = resolve_context(movie_dir, pert_source, path_maps)
+    ctx = resolve_context(movie_dir, pert_source, path_maps, dataset_roots)
     perturbation, trigger_offset, frame_rate = ctx['perturbation'], ctx['trigger_offset'], ctx['frame_rate']
     print(f"  declaration: {ctx['declaration']}"
           + (f" | status {perturbation.get('status')} | lighting "
@@ -760,7 +926,10 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
                                           frame_rate=frame_rate, source=ctx['source'],
                                           perturbation=perturbation)
     stamps = {'analysis_code_fingerprint': code_fp, 'analysis_git_commit': commit,
-              'analysed_at': analysed_at, 'points_fingerprint': points_fp}
+              'analysed_at': analysed_at, 'points_fingerprint': points_fp,
+              # the points the analysis produced, which the overlay video is reprojected from:
+              # what lets a later run tell whether that video still matches this h5
+              'analysed_points_fingerprint': array_fingerprint(analysis.points_3D)}
     if realigned:
         # so a shipped h5 says its points came from a re-run ensemble, not the predicted one
         stamps['ensemble_realigned_at'] = realigned
@@ -775,9 +944,11 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
     if with_video:
         # a missing source movie costs the mp4, not the analysis that already succeeded
         try:
-            video = regenerate_video(movie_dir, analysis, h5_path, trigger_offset, frame_rate,
-                                     stamp=stamp, archive=archive, force=force_video,
-                                     perturbation=perturbation, path_maps=path_maps)
+            video = regenerate_video(movie_dir, analysis.points_3D,
+                                     analysis.first_analysed_frame, h5_path, trigger_offset,
+                                     frame_rate, stamp=stamp, archive=archive, force=force_video,
+                                     perturbation=perturbation, path_maps=path_maps,
+                                     dataset_roots=dataset_roots)
         except NoSourceMovie as e:
             video = f'skipped (source movie gone: {e})'
         print(f"  video: {video}", flush=True)
@@ -838,10 +1009,12 @@ def status_line(row):
     return text
 
 
-def preflight_rows(movie_dirs, pert_source, path_maps, code_fp, group_of=None):
+def preflight_rows(movie_dirs, pert_source, path_maps, code_fp, group_of=None,
+                   dataset_roots=(), show=True):
     """What a run would use and redo, one row per movie, printed as it goes. Writes nothing.
 
-    group_of names the group a movie is summarised under; by default its parent folder."""
+    group_of names the group a movie is summarised under; by default its parent folder. show=False
+    keeps the per-movie lines back, for a caller that has its own summary to print."""
     rows = []
     for movie_dir in movie_dirs:
         name = os.path.basename(movie_dir)
@@ -849,9 +1022,10 @@ def preflight_rows(movie_dirs, pert_source, path_maps, code_fp, group_of=None):
                'group': group_of(movie_dir) if group_of else os.path.basename(os.path.dirname(movie_dir))}
         rows.append(row)
         try:
-            ctx = resolve_context(movie_dir, pert_source, path_maps)
+            ctx = resolve_context(movie_dir, pert_source, path_maps, dataset_roots)
         except Exception as e:
-            print(f"  {name:<34} ERROR {type(e).__name__}: {e}")
+            if show:
+                print(f"  {name:<34} ERROR {type(e).__name__}: {e}")
             row.update(state='error', trigger='?', declaration='?', error=f'{type(e).__name__}: {e}')
             continue
         perturbation = ctx['perturbation']
@@ -861,7 +1035,8 @@ def preflight_rows(movie_dirs, pert_source, path_maps, code_fp, group_of=None):
         kind = ('perturbation.json' if declaration.endswith('perturbation.json') else declaration)
         detail = (f"{perturbation.get('status')}, {perturbation.get('lighting_regime', 'unknown')}"
                   if perturbation else 'nothing declared')
-        print(f"  {name:<34} trigger {ctx['trigger']:<11} {state:<7} declaration {kind} ({detail})")
+        if show:
+            print(f"  {name:<34} trigger {ctx['trigger']:<11} {state:<7} declaration {kind} ({detail})")
         row.update(state=state, trigger=ctx['trigger'], declaration=kind)
     return rows
 
@@ -882,10 +1057,58 @@ def print_preflight_summary(rows):
         print(f"\n{missing} movie(s) have no trigger and would FAIL; see --path-map / --allow-no-trigger")
 
 
-def preflight(movie_dirs, pert_source, path_maps, code_fp):
+def preflight(movie_dirs, pert_source, path_maps, code_fp, dataset_roots=()):
     """--dry-run: what a run would use and redo, per movie and per experiment. Writes nothing."""
-    print_preflight_summary(preflight_rows(movie_dirs, pert_source, path_maps, code_fp))
+    print_preflight_summary(preflight_rows(movie_dirs, pert_source, path_maps, code_fp,
+                                           dataset_roots=dataset_roots))
     return 0
+
+
+def render_only(movie_dirs, path_maps=(), dataset_roots=(), force=False, archive=True):
+    """Rewrite each movie's reprojection and overlay mp4, and nothing else.
+
+    Everything the render needs is already in the analysis h5 -- the analysed 3D points, where
+    the analysis started, the trigger and the declaration -- so this reads them back rather than
+    re-deriving them. That means no FlightAnalysis, no points file and no declaration lookup, and
+    it means the video is reprojected from exactly the points the h5 holds rather than from a
+    fresh analysis that might differ in its last bits on another machine.
+
+    This is what runs on a cluster node for a movie whose only copy is on someone's PC: the h5 and
+    a box are staged beside each other, and this turns them into an mp4.
+    """
+    stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+    rows = []
+    for number, movie_dir in enumerate(movie_dirs, 1):
+        row = {'experiment': os.path.basename(os.path.dirname(movie_dir)),
+               'movie': os.path.basename(movie_dir), 'movie_dir': movie_dir}
+        rows.append(row)
+        started = time.time()
+        print(f"\n[{number}/{len(movie_dirs)}] {movie_label(movie_dir)}", flush=True)
+        try:
+            h5_path = analysis_h5(movie_dir)
+            if not h5_path:
+                raise NoSourceMovie('the movie has no analysis h5 to render from')
+            with h5py.File(h5_path, 'r') as hdf:
+                points = hdf['points_3D'][()]
+                first_frame = int(hdf['first_analysed_frame'][()]) if 'first_analysed_frame' in hdf else 0
+                trigger_offset = int(hdf['trigger_offset'][()]) if 'trigger_offset' in hdf else None
+                frame_rate = float(hdf['frame_rate'][()]) if 'frame_rate' in hdf else None
+            perturbation = read_perturbation(h5_path)
+            video = regenerate_video(movie_dir, points, first_frame, h5_path, trigger_offset,
+                                     frame_rate, stamp=stamp, archive=archive, force=force,
+                                     perturbation=perturbation, path_maps=path_maps,
+                                     dataset_roots=dataset_roots)
+            print(f"  video: {video}", flush=True)
+            row.update(status='done', video=video, frames=len(points))
+        except NoSourceMovie as e:
+            print(f"  video: skipped ({e})", flush=True)
+            row.update(status='no source', video=f'skipped ({e})')
+        except Exception as e:
+            traceback.print_exc()
+            row.update(status='failed', error=f'{type(e).__name__}: {e}')
+        row['seconds'] = round(time.time() - started, 1)
+        print(status_line(row), flush=True)
+    return print_run_summary(rows)
 
 
 def write_report(rows, path):
@@ -929,6 +1152,15 @@ def main():
                         help='where a cluster path prefix recorded at predict time lives on this '
                              'machine, e.g. /cs/labs/tsevi/lior.kotlar/pose-estimation-torch='
                              'E:\\pose-estimation-torch (repeatable)')
+    parser.add_argument('--dataset-root', action='append', metavar='DIR',
+                        help='where this machine keeps the source datasets, when they are no '
+                             'longer where the prediction recorded them (repeatable). Used to '
+                             'find a movie\'s box h5, calibration, cam-validity and '
+                             'perturbation.json')
+    parser.add_argument('--only-video', action='store_true',
+                        help='rewrite only the reprojection and the overlay mp4, from the '
+                             'analysis h5 already in the folder. Needs no analysis and no points '
+                             'file: this is what a machine that only renders runs')
     parser.add_argument('--allow-no-trigger', action='store_true',
                         help='re-analyse a movie whose trigger cannot be found, numbering its '
                              'frames from box frame 0 (refused by default)')
@@ -938,27 +1170,36 @@ def main():
                              'is above the movies)')
     args = parser.parse_args()
     path_maps = parse_path_maps(args.path_map)
+    dataset_roots = tuple(args.dataset_root or ())
 
+    holds = holds_analysis if args.only_video else holds_points
     movie_dirs = []
     for root in args.dirs:
-        movie_dirs.extend(find_movie_dirs(root))
+        movie_dirs.extend(find_movie_dirs(root, holds))
     movie_dirs = sorted(set(movie_dirs))
     if not movie_dirs:
-        print(f"no movie dirs with a {POINTS_NAME} under: {', '.join(args.dirs)}")
+        wanted = 'an analysis h5' if args.only_video else POINTS_NAME
+        print(f"no movie dirs with {wanted} under: {', '.join(args.dirs)}")
         return 1
 
     code_fp, commit = code_fingerprint(), git_commit()
     print(f"{len(movie_dirs)} movie(s) | analysis code {code_fp} ({commit})", flush=True)
     for server, local in path_maps:
         print(f"path map: {server} -> {local}", flush=True)
+    for root in dataset_roots:
+        print(f"dataset root: {root}", flush=True)
     if args.dry_run:
-        return preflight(movie_dirs, args.perturbation_source, path_maps, code_fp)
+        return preflight(movie_dirs, args.perturbation_source, path_maps, code_fp, dataset_roots)
+    if args.only_video:
+        return render_only(movie_dirs, path_maps, dataset_roots, force=args.force_mp4,
+                           archive=not args.no_archive)
 
     stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
     opts = dict(archive=not args.no_archive, with_video=args.with_mp4,
                 force_video=args.force_mp4, pert_source=args.perturbation_source,
                 path_maps=path_maps, allow_no_trigger=args.allow_no_trigger,
-                only_stale=args.only_stale, code_fp=code_fp, commit=commit)
+                only_stale=args.only_stale, code_fp=code_fp, commit=commit,
+                dataset_roots=dataset_roots)
     rows = run_movies(movie_dirs, stamp, opts, args.jobs)
 
     report = args.report

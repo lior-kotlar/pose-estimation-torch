@@ -1,6 +1,7 @@
 @echo off
-rem Re-analyse, collect and upload. Drag a folder onto this file, or double-click and paste one.
-rem See LOCAL_REANALYSIS.md.
+rem Work out what each movie in a folder still needs -- realigning, re-analysing, rendering its
+rem video -- and do only that, then collect and upload. Drag a folder onto this file, or
+rem double-click and paste one. See LOCAL_REANALYSIS.md.
 setlocal
 set "ROOT=%~dp0.."
 set "PY=%ROOT%\venv\Scripts\python.exe"
