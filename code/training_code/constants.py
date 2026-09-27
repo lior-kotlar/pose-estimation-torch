@@ -33,3 +33,7 @@ CONFIGURATION_FILE_NAME = "configuration.json"
 # (model + optimizer + scheduler + epoch). Overwritten each save instead of
 # emitting one file per epoch, so weights/ can't grow unbounded.
 LATEST_CHECKPOINT_FILE_NAME = "last_checkpoint.pth"
+
+# The exact train/val sample indices a run trained on, saved in its run folder
+# so a resume continues on the same samples.
+TRAIN_VAL_INDICES_FILE_NAME = "train_val_split.npz"

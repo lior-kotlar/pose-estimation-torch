@@ -28,10 +28,6 @@ class ModelCallbacks:
         # self.camera_matrices = h5py.File(self.data_path, "r")['/cameras_dlt_array'][:].T
         # self.l2_loss_callback = L2LossCallback(validation, run_path)
         # self.l2_per_point_callback = L2PerPointLossCallback(validation, run_path)
-        # self.reduce_lr_callback = ReduceLROnPlateau(monitor="val_loss", factor=self.reduce_lr_factor,
-        #                                             patience=self.reduce_lr_patience, verbose=1, mode="auto",
-        #                                             min_delta=self.reduce_lr_min_delta, cooldown=self.reduce_lr_cooldown,
-        #                                             min_lr=self.reduce_lr_min_lr)
         # if self.save_every_epoch:
         #     self.checkpointer = ModelCheckpoint(
         #         filepath=os.path.join(run_path, "weights/weights.{epoch:03d}-{val_loss:.9f}.keras"),
@@ -63,10 +59,10 @@ class ModelCallbacks:
                                               num_cams=self.num_cams))
         return callbacks
     
-    def on_train_start(self):
+    def on_train_start(self, start_epoch=0):
         for callback in self.model_callbacks:
             if hasattr(callback, 'on_train_start'):
-                callback.on_train_start()
+                callback.on_train_start(start_epoch=start_epoch)
 
     def get_model_callbacks(self):
         return self.model_callbacks
@@ -320,24 +316,35 @@ class ModelCallbacks:
             plt.savefig(save_path)
             plt.close()
 
-        def on_train_start(self):
+        def on_train_start(self, start_epoch=0):
             self.history = []
             if os.path.exists(self.csv_file_path):
 
                 with open(self.csv_file_path, mode='r', newline='') as file:
-                    reader = csv.DictReader(file)
-                    for row in reader:
-                        logs = {
-                            'train loss': float(row['train loss']),
-                            'validation loss': float(row['val loss'])
-                        }
-                        # L2 columns are optional: only present in CSVs written
-                        # by this (or a newer) version, so restore them if there.
-                        if row.get('train l2') not in (None, ''):
-                            logs['train_l2_loss'] = float(row['train l2'])
-                        if row.get('val l2') not in (None, ''):
-                            logs['val_l2_loss'] = float(row['val l2'])
-                        self.history.append(logs)
+                    rows = list(csv.DictReader(file))
+                # The row for an epoch is written before its checkpoint, so a
+                # run stopped between the two has rows the checkpoint does not
+                # cover. The resume redoes those epochs; drop their old rows.
+                kept = [row for row in rows if int(row['epoch']) < start_epoch]
+                if len(kept) != len(rows):
+                    with open(self.csv_file_path, mode='w', newline='') as file:
+                        writer = csv.DictWriter(file, fieldnames=['epoch', 'train loss', 'val loss', 'train l2', 'val l2'],
+                                                extrasaction='ignore')
+                        writer.writeheader()
+                        writer.writerows(kept)
+                    print(f"Dropped {len(rows) - len(kept)} history rows past the checkpoint.")
+                for row in kept:
+                    logs = {
+                        'train loss': float(row['train loss']),
+                        'validation loss': float(row['val loss'])
+                    }
+                    # L2 columns are optional: only present in CSVs written
+                    # by this (or a newer) version, so restore them if there.
+                    if row.get('train l2') not in (None, ''):
+                        logs['train_l2_loss'] = float(row['train l2'])
+                    if row.get('val l2') not in (None, ''):
+                        logs['val_l2_loss'] = float(row['val l2'])
+                    self.history.append(logs)
                 print(f"Resuming history from {self.csv_file_path}, {len(self.history)} epochs loaded.")
 
             else:

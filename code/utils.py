@@ -35,16 +35,11 @@ class TrainConfig:
             self.config = config
             self.debug_mode = bool(config["debug mode"])
             self.num_epochs = config['epochs']
-            self.val_fraction = config['val fraction']
             self.loss_function_as_string = config["loss function"]
             self.learning_rate = config["learning rate"]
             self.optimizer_as_string = config["optimizer"]
             self.optimizer_epsilon = config["optimizer epsilon"]
             self.weight_initialization_method = config["weight initialization method"]
-            self.reduce_lr_factor = config["reduce lr factor"]
-            self.reduce_lr_patience = config["reduce lr patience"]
-            self.reduce_lr_min_delta = config["reduce lr min delta"]
-            self.reduce_lr_cooldown = config["reduce lr cooldown"]
             self.reduce_lr_min_lr = config["reduce lr min lr"]
             self.base_output_directory = config["base output directory"]
             self.how_many_visualizations = 1 if self.debug_mode else config.get("how many visualizations", 10)
@@ -60,8 +55,11 @@ class TrainConfig:
             self.data_path = config['data path']
             self.test_path = config['test path']
             
-            self.resume_training_checkpoint_path = config.get("training checkpoint file path", None)
-            self.resume_training_directory = config.get("resume training directory", None)
+            # The frozen train/val/test split of the labelled frames
+            # (make_heldout_split.py). Required: every model trains on the same
+            # split and never on its test frames, so all of them can be scored
+            # on those frames and compared.
+            self.split_file = config["split file"]
             
             # preprocessing configuration
             self.mix_with_test = bool(config['mix with test'])
@@ -111,9 +109,6 @@ class TrainConfig:
     def get_run_tag(self):
         return self.run_tag
 
-    def get_val_fraction(self):
-        return self.val_fraction
-    
     def get_num_epochs(self):
         return self.num_epochs
 
@@ -156,12 +151,9 @@ class TrainConfig:
     def get_num_cameras(self):
         return self.num_cameras
     
-    def get_resume_training_checkpoint_path(self):
-        return self.resume_training_checkpoint_path
-    
-    def get_resume_training_directory(self):
-        return self.resume_training_directory
-    
+    def get_split_file(self):
+        return self.split_file
+
     def get_learning_rate(self):
         return self.learning_rate
     
@@ -676,8 +668,8 @@ def create_train_run_folders(base_output_directory, run_name, original_config_fi
         json.dump(original_config_file, file, indent=4)
     return run_path
 
-def save_training_code(base_run_directory):
-    save_to_directory = os.path.join(base_run_directory, "training code")
+def save_training_code(base_run_directory, folder_name="training code"):
+    save_to_directory = os.path.join(base_run_directory, folder_name)
     if not os.path.exists(save_to_directory):
         os.makedirs(save_to_directory)
     code_directory = os.path.dirname(TRAINING_CODE_DIRECTORY)

@@ -67,7 +67,7 @@ directly except for quick tests.
 | `predict_configurations/*.json` | Prediction run configs (movie/calibration/output + which model registry) |
 | `prediction_models/<name>/` | The prediction ensemble: one folder per model (`best_model.pt` + `model.json`), auto-discovered |
 | `code/register_prediction_model.py` | Register (graduate) a trained model into `prediction_models/` |
-| `sbatch_files/*.sh` | SLURM job scripts (train, predict, pipeline) |
+| `sbatch_files/*.sh` | SLURM job scripts (`sbatch_configurable.sh` runs any script, training included; predict; pipeline) |
 | `matlab/` | MATLAB scripts for building `.h5` movies, calibration, datasets, and raw movies (`+VideoEditing/JoinSparses.m`) |
 | `micro-flight-lab-master/` | Vendored lab MATLAB utilities (Hull reconstruction, Cine→sparse, …) |
 | `train_output/`, `predict_output/` | Run outputs (gitignored) |
@@ -281,7 +281,7 @@ renders an mp4, and extracts kinematics.
 **Choosing the ensemble:** the ensemble is exactly the set of model folders under
 `prediction_models/` — each is self-contained (`best_model.pt` + a `model.json`
 giving its served `model type`). To add a member, run
-`code/register_prediction_model.py` (see [Section 7.4](#74-training-models-for-the-ensemble));
+`code/register_prediction_model.py` (see [Section 7.5](#75-training-models-for-the-ensemble));
 to bench one without deleting it, set `"enabled": false` in its `model.json`.
 Nothing in `train_output/` is used for prediction until it is registered here.
 
@@ -363,80 +363,98 @@ measured value.
 ## 7. Training
 
 Training fits the 2D-landmark CNN on a labelled dataset `.h5` and writes a
-timestamped run directory containing the best model (`best_model.pt`),
-checkpoints, history, and a copy of the training code + config.
+run folder containing the best model (`best_model.pt`), a resumable
+checkpoint, the history, and a copy of the training code + config.
 
-### 7.1 The training config
+### 7.1 The train / validation / test split
 
-`train_configurations/config1.json` — the fields you typically set:
+Every model trains on **one frozen split** of the labelled frames, stored next to
+the dataset (`training_datasets/random_trainset_201_frames_18_joints.split_v1.npz`:
+139 train / 21 validation / 41 test frames). It is the only way to train:
+
+- **test** frames are never trained on and never used to pick a checkpoint, so
+  every model — and the fused ensemble — can be scored on them and compared;
+- **validation** frames pick each run's best epoch;
+- a labelled frame becomes several samples (its two wings; for 3-camera models,
+  its camera subsets), and they all go wherever their frame goes, so no sibling
+  of a held-out frame is trained on;
+- frames from the same flight a few frames apart are grouped into one clump and
+  kept on one side, so a held-out frame has no near-twin in training.
+
+The split was made once by
+
+```bash
+.env/bin/python code/training_code/make_heldout_split.py training_datasets/<dataset>.h5
+```
+
+which refuses to overwrite an existing split. A new split (for example once new
+labelled movies arrive) is a new version, `--out ...split_v2.npz`, and models are
+only comparable when they were trained on the same version.
+
+### 7.2 The training config
+
+One config per model in `train_configurations/`. The fields you typically set:
 
 | field | meaning |
 |-------|---------|
 | `model type` | architecture / feeding scheme (see [Section 4](#4-key-concepts--data-formats)) |
 | `data path` | labelled training dataset `.h5` |
+| `split file` | the frozen split above — **required**; training checks it was made for `data path` |
 | `base output directory` | where the run folder is created (`train_output/...`) |
-| `epochs` | number of epochs |
+| `epochs` | the run's total number of epochs (the cosine learning-rate curve spans exactly these) |
 | `batch size` | mini-batch size |
 | `loss function` | `MSE`, `KL`, `softargmax`, or `JSD` |
-| `learning rate` | initial LR (decayed by cosine annealing over the run) |
+| `learning rate` | initial LR, decayed by cosine annealing down to `reduce lr min lr` at the last epoch |
 | `number of base filters`, `number of encoder decoder blocks`, `convolution kernel size`, `dilation rate`, `dropout ratio` | network shape |
+| `camera fusion`, `number of cameras` | multi-view models only: how cameras are merged, and 3 for the 3-camera models |
 | augmentation block (`rotation range`, `zoom range`, `horizontal/vertical flip`, `xy shift`, …) | data augmentation |
-| `run tag` | optional short label appended to the run folder name (distinguishes variants that share a model type, e.g. `JSD`) |
+| `run tag` | short label in the run folder name |
 
 The run folder is auto-named `<model_type>_<run_tag>_<date>` (e.g.
-`MODEL_PER_CAM_PER_WING_JSD_Jun 30`).
+`MODEL_PER_CAM_PER_WING_JSD_HELDOUT_Sep 27`).
 
-### 7.2 Run a training job
+### 7.3 Run a training job
+
+Through the generic launcher (never on the login or interactive node):
 
 ```bash
-# default GPU (L40S / salmon); CONFIG defaults to train_configurations/config1.json:
-sbatch -J train_run sbatch_files/sbatch_job.sh train_configurations/config1.json
-
-# or via the generic launcher (lets you override gres/partition):
-sbatch -J train_jsd -p salmon --gres=gpu:l40s:1 sbatch_files/sbatch_configurable.sh \
-    code/training_code/train.py train_configurations/config_per_cam_jsd.json
+sbatch -J train_per_cam_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 \
+    sbatch_files/sbatch_configurable.sh \
+    code/training_code/train.py train_configurations/config_per_cam_jsd_heldout.json
 ```
 
-Watch it with `tail -f logs/train_run_*.out`.
+Ask for enough time that the run never has to be resumed: a 100-epoch run takes
+roughly half a day to a day and a half depending on the GPU. Watch it with
+`tail -f logs/train_per_cam_jsd_*.out`.
 
-### 7.3 Resuming from a checkpoint
+### 7.4 Resuming a stopped run
 
-Each run keeps just two artifacts: `best_model.pt` (the best-so-far scripted
-model, for inference) and `weights/last_checkpoint.pth` (a single rolling
-checkpoint — model + optimizer + scheduler + epoch — overwritten every save,
-so `weights/` never grows unbounded). Resume from the rolling checkpoint by
-pointing the config at it and its original run directory (see
-`train_configurations/config1_resume.json`):
+If a run stops early (node failure, time limit), continue it from its folder:
 
-```json
-"training checkpoint file path": ".../<run>/weights/last_checkpoint.pth",
-"resume training directory": ".../<run>"
+```bash
+sbatch -J resume_per_cam_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 \
+    sbatch_files/sbatch_configurable.sh \
+    code/training_code/train.py --resume "train_output/debug_outputs/<run folder>"
 ```
 
-Because `last_checkpoint.pth` always holds the latest epoch, set `"epochs"` in
-the resume config to the *remaining* count (the cosine scheduler's `T_max` is
-restored from the checkpoint, so the loop trains `epochs` more epochs from the
-resume point — e.g. resuming a 100-epoch run at epoch 40 means `"epochs": 60`).
+Nothing to edit: the run folder holds the exact config it started with, the last
+checkpoint (`weights/last_checkpoint.pth`: model, optimizer, learning-rate
+schedule, epoch) and the samples it trained on (`train_val_split.npz`). The
+resume reloads all three and continues to the planned last epoch — `epochs` is
+always the total, so the learning-rate curve ends exactly where it would have.
+The history keeps one row per epoch, and the code the resume runs is saved beside
+the original as `training code (resumed <date>)`. Resuming a run that already
+finished does nothing.
 
-The resumed config must match the original on the structural fields (model type,
-batch size, val fraction, kernel size, filters, blocks, loss) — the trainer
-enforces this and reuses the saved train/val split for reproducibility.
+### 7.5 Training models for the ensemble
 
-### 7.4 Training models for the ensemble
-
-The included `config_per_cam_*.json` variants exist to build a **diverse**
-prediction ensemble (different loss functions and architectures over the same
-`MODEL_PER_CAM_PER_WING` I/O), e.g.:
-
-- `config_per_cam_jsd.json` — JSD loss (loss-function diversity)
-- `config_per_cam_dil3.json` — different filters/dilation
-- `config_per_cam_unet.json` — true U-Net variant
-
-After training each, graduate it into the prediction ensemble with one command:
+The ensemble members differ in architecture, loss and camera handling; each has
+its own `config_<member>_heldout.json`. After training one, graduate it into the
+prediction ensemble with one command:
 
 ```bash
 python code/register_prediction_model.py --name per_cam_jsd \
-    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_Jul 02"
+    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_HELDOUT_Sep 27"
 ```
 
 This copies its `best_model.pt` into `prediction_models/<name>/` and writes a

@@ -1,4 +1,7 @@
+import argparse
+import json
 import os
+import shutil
 import sys
 abspath = os.path.abspath(__file__)
 code_directory = os.path.dirname(os.path.dirname(abspath))
@@ -14,7 +17,8 @@ import numpy as np
 import torch.optim.lr_scheduler as lr_scheduler
 from utils import TrainConfig, optimizer_from_string, create_train_run_folders, save_training_code, show_interest_points_with_index
 import Callbacks
-from constants import CONFIGURATION_FILE_NAME, LATEST_CHECKPOINT_FILE_NAME
+from make_heldout_split import md5_of
+from constants import CONFIGURATION_FILE_NAME, LATEST_CHECKPOINT_FILE_NAME, TRAIN_VAL_INDICES_FILE_NAME
 
 
 N = 0
@@ -23,44 +27,23 @@ H = 2
 W = 3
 REPORT_EVERY = 100
 
-def arrange_loaded_checkpoint(general_configuration: TrainConfig):
-    '''
-    Check if resuming from checkpoint, if so, check that both directory and file exist.
-    If not resuming, create new run directory.
-    returns the base output directory to use if resuming. If not resuming, returns None.
-    '''
-    file = general_configuration.get_resume_training_checkpoint_path()
-    directory = general_configuration.get_resume_training_directory()
-    if (file and not directory) or (directory and not file):
-        exit("resume training directory, checkpoint file only one of them is missing")
-    if file and directory:
-        both_exist = os.path.exists(file) and os.path.exists(directory)
-        if not both_exist:
-            exit("resume training directory or checkpoint file doesn't exist")
-    return directory
-
 class Trainer:
     def __init__(self,
                  general_configuration: TrainConfig,
                  base_run_directory,
-                 device):
+                 device,
+                 resume_checkpoint=None):
         self.device = device
         if general_configuration.debug_mode:
             self.batches_per_epoch = 1
 
         self.general_configuration = general_configuration
         self.base_run_directory = base_run_directory
-        self.ensure_resume_compatibility()
-        self.val_fraction = self.general_configuration.get_val_fraction()
         self.preprocessor = Preprocessor.Preprocessor(self.general_configuration)
         self.best_val_loss = float("inf")
         self.start_epoch = 0
         self.num_epochs = self.general_configuration.get_num_epochs()
-        self.checkpoint_load_path = self.general_configuration.get_resume_training_checkpoint_path()
-        if self.checkpoint_load_path and len(self.checkpoint_load_path) > 0 and not os.path.exists(self.checkpoint_load_path):
-            raise FileNotFoundError(
-                f"Checkpoint file not found at: {self.checkpoint_load_path}"
-            )
+        self.checkpoint_load_path = resume_checkpoint
 
         # Do preprocessing according to the model type
         self.preprocessor.do_preprocess()
@@ -101,7 +84,7 @@ class Trainer:
         if self.checkpoint_load_path:
             self._load_checkpoint(self.checkpoint_load_path)
 
-        self.train_box, self.train_confmap, self.val_box, self.val_confmap, _, _ = self.train_val_split_resume()
+        self.train_box, self.train_confmap, self.val_box, self.val_confmap = self.train_val_split()
         viz_sample_list = (self.val_box[:self.general_configuration.how_many_visualizations], self.val_confmap[:self.general_configuration.how_many_visualizations])
 
         # show_interest_points_with_index(viz_sample_list[0], viz_sample_list[1], save_directory='.', filename="viz_sample_points.png")
@@ -118,29 +101,6 @@ class Trainer:
                                         num_cams=self.preprocessor.cams_per_sample
                                         )
     
-    def ensure_resume_compatibility(self):
-        original_config_path = os.path.join(self.base_run_directory, CONFIGURATION_FILE_NAME)
-        original_configuration = TrainConfig(config_path=original_config_path)
-        if original_configuration.get_val_fraction() != self.general_configuration.get_val_fraction():
-            raise ValueError("Validation fraction in the resumed configuration does not match the original configuration.")
-        if original_configuration.batch_size != self.general_configuration.batch_size:
-            raise ValueError("Batch size in the resumed configuration does not match the original configuration.")
-        if original_configuration.model_type != self.general_configuration.model_type:
-            raise ValueError("Model type in the resumed configuration does not match the original configuration.")
-        if original_configuration.kernel_size != self.general_configuration.kernel_size:
-            raise ValueError("Kernel size in the resumed configuration does not match the original configuration.")
-        if original_configuration.num_base_filters != self.general_configuration.num_base_filters:
-            raise ValueError("Number of base filters in the resumed configuration does not match the original configuration.")
-        if original_configuration.num_blocks != self.general_configuration.num_blocks:
-            raise ValueError("Number of encoder-decoder blocks in the resumed configuration does not match the original configuration.")
-        if original_configuration.loss_function_as_string != self.general_configuration.loss_function_as_string:
-            raise ValueError("Loss function in the resumed configuration does not match the original configuration.")
-        if original_configuration.get_num_cameras() != self.general_configuration.get_num_cameras():
-            raise ValueError("Number of cameras in the resumed configuration does not match the original configuration.")
-        if original_configuration.get_camera_fusion() != self.general_configuration.get_camera_fusion():
-            raise ValueError("Camera fusion in the resumed configuration does not match the original configuration.")
-        return
-
     def create_visualization_dataset(self):
         pass
 
@@ -297,10 +257,16 @@ class Trainer:
         train_loader = Datasets.prepare_dataloader(train_set, self.general_configuration.batch_size)
         val_loader = Datasets.prepare_dataloader(val_set, self.general_configuration.batch_size)
 
-        training_start_time = time.time()
-        self.callbacks.on_train_start()
+        if self.start_epoch >= self.num_epochs:
+            print(f"All {self.num_epochs} planned epochs are already done; nothing to resume.", flush=True)
+            return
 
-        for epoch in range(self.start_epoch, self.start_epoch + self.num_epochs):
+        training_start_time = time.time()
+        self.callbacks.on_train_start(start_epoch=self.start_epoch)
+
+        # "epochs" in the config is the run's TOTAL, and the cosine schedule
+        # spans exactly that many, so a resumed run continues to the same end.
+        for epoch in range(self.start_epoch, self.num_epochs):
             self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
             if self.general_configuration.save_every > 0 and \
                     epoch % self.general_configuration.save_every == 0:
@@ -313,92 +279,70 @@ class Trainer:
         minutes, seconds = divmod(rem, 60)
         print(f'Training completed in {int(hours):0>2}:{int(minutes):0>2}:{int(seconds):0>2} (hh:mm:ss)', flush=True)
     
-    def split_indices(self, shuffle=True):
-        """Train/val sample indices, split by SOURCE LABELLED FRAME.
+    def split_indices(self):
+        """Train/val sample indices from the frozen split (make_heldout_split.py).
 
-        Preprocessing turns one labelled frame into several samples: its left
-        and right wing, and (for multi-view models trained on fewer cameras
-        than the dataset has) one per camera subset. Those samples share the
-        same underlying images, so splitting them independently -- which is
-        what shuffling raw sample indices does -- puts near-duplicates of
-        training data in the validation set. That makes the validation loss
-        optimistic and corrupts best-model selection.
+        Preprocessing turns one labelled frame into several samples (its two
+        wings, and for 3-camera models its camera subsets), so the split is
+        made per FRAME: every sample goes wherever its source frame is.
+        Test frames go nowhere -- no model trains on them or picks its
+        checkpoint with them, so every model can be scored on them.
 
-        Falls back to per-sample splitting when the preprocessor did not
-        report groups, which keeps any model type it does not cover working.
-        """
+        Every error here is fatal: a model that drew its own split, or saw the
+        test frames, could no longer be compared with the others."""
         groups = self.preprocessor.sample_group_ids
         n_samples = len(self.box)
+        split_path = self.general_configuration.get_split_file()
+        split = np.load(split_path)
+        frame_split = split["frame_split"]
+        meta = json.loads(str(split["meta"]))
         if groups is None or len(groups) != n_samples:
-            if groups is not None:
-                print(f"[Trainer] group ids ({len(groups)}) do not match "
-                      f"{n_samples} samples; splitting per sample")
-            all_idx = np.arange(n_samples)
-            if shuffle:
-                np.random.shuffle(all_idx)
-            val_size = int(np.round(n_samples * self.val_fraction))
-            return all_idx[val_size:], all_idx[:val_size]
-
-        unique_groups = np.unique(groups)
-        if shuffle:
-            np.random.shuffle(unique_groups)
-        n_val_groups = int(np.round(len(unique_groups) * self.val_fraction))
-        val_groups = set(unique_groups[:n_val_groups].tolist())
-        is_val = np.array([g in val_groups for g in groups])
-        val_idx = np.flatnonzero(is_val)
-        train_idx = np.flatnonzero(~is_val)
-        print(f"[Trainer] split by source frame: "
-              f"{len(unique_groups) - n_val_groups} train / {n_val_groups} val "
-              f"frames -> {len(train_idx)} / {len(val_idx)} samples")
+            raise ValueError(f"split file {split_path} needs a source frame per "
+                             f"sample, and this model type does not report one")
+        if len(frame_split) != self.preprocessor.num_frames:
+            raise ValueError(f"split file covers {len(frame_split)} frames, "
+                             f"the dataset has {self.preprocessor.num_frames}")
+        data_path = self.general_configuration.get_data_path()
+        if md5_of(data_path) != meta["dataset_md5"]:
+            raise ValueError(f"split file {split_path} was made for a different "
+                             f"dataset than {data_path}")
+        labels = meta["labels"]
+        sample_side = frame_split[groups]
+        train_idx = np.flatnonzero(sample_side == labels["train"])
+        val_idx = np.flatnonzero(sample_side == labels["val"])
+        np.random.shuffle(train_idx)
+        n_test = int((sample_side == labels["test"]).sum())
+        print(f"[Trainer] split from {split_path}: "
+              f"{(frame_split == labels['train']).sum()} train / "
+              f"{(frame_split == labels['val']).sum()} val / "
+              f"{(frame_split == labels['test']).sum()} test frames -> "
+              f"{len(train_idx)} / {len(val_idx)} samples, {n_test} test samples "
+              f"held out", flush=True)
         return train_idx, val_idx
 
-    def train_val_split_resume(self, shuffle=True):
-        """ 
-        Splits datasets into train and validation sets. 
-        Handles saving/loading of splits for reproducible resume training.
-        """
-        # 1. Check if we are resuming from a previous run
-        resume_dir = self.general_configuration.resume_training_directory
-        
-        # Define the standard filename for the split
-        split_filename = "train_val_split.npz"
-
-        # --- PATH A: RESUME TRAINING ---
-        if resume_dir is not None:
-            split_file_path = os.path.join(resume_dir, split_filename)
-            
-            if os.path.exists(split_file_path):
-                print(f"[Trainer] Resuming: Loading data split from {split_file_path}")
-                # Load the indices
-                data = np.load(split_file_path)
-                train_idx = data['train_idx']
-                val_idx = data['val_idx']
-            else:
-                raise FileNotFoundError(
-                    f"[Trainer] Resume directory provided, but {split_filename} not found in {resume_dir}. "
-                    "Cannot guarantee reproducible data split."
-                )
-
-        # --- PATH B: FRESH TRAINING ---
+    def train_val_split(self):
+        """The train and validation samples. A fresh run takes them from the
+        split file and saves the exact indices (and a copy of the file) in the
+        run folder; a resumed run reloads those indices, so it continues on
+        precisely the samples -- in the order -- it started with."""
+        indices_path = os.path.join(self.base_run_directory, TRAIN_VAL_INDICES_FILE_NAME)
+        if self.checkpoint_load_path:
+            data = np.load(indices_path)
+            train_idx, val_idx = data['train_idx'], data['val_idx']
+            print(f"[Trainer] resuming on the saved split {indices_path}: "
+                  f"{len(train_idx)} / {len(val_idx)} samples", flush=True)
         else:
-            train_idx, val_idx = self.split_indices(shuffle)
-
-            # SAVE THE SPLIT
-            save_path = os.path.join(self.base_run_directory, split_filename)
-            np.savez(save_path, train_idx=train_idx, val_idx=val_idx)
-            print(f"[Trainer] Created new split and saved to {save_path}")
-
-        # Apply the indices to the data
-        # Note: Using .copy() is often safer to ensure memory continuity, 
-        # but strictly optional depending on your RAM constraints.
-        return (self.box[train_idx], self.confmaps[train_idx], 
-                self.box[val_idx], self.confmaps[val_idx], 
-                train_idx, val_idx)
+            train_idx, val_idx = self.split_indices()
+            np.savez(indices_path, train_idx=train_idx, val_idx=val_idx)
+            shutil.copy(self.general_configuration.get_split_file(), self.base_run_directory)
+        return (self.box[train_idx], self.confmaps[train_idx],
+                self.box[val_idx], self.confmaps[val_idx])
 
 def training_main(
                 general_configuration,
                 base_run_directory,
-                use_gpu
+                use_gpu,
+                resume_checkpoint=None
                ):
     if use_gpu:
         device = torch.device(f'cuda:{0}')
@@ -410,7 +354,8 @@ def training_main(
         trainer = Trainer(
             general_configuration=general_configuration,
             base_run_directory=base_run_directory,
-            device=device
+            device=device,
+            resume_checkpoint=resume_checkpoint
         )
         trainer.train()        
     except Exception as e:
@@ -418,15 +363,43 @@ def training_main(
         print(f"Exception during training: {e}", flush=True)
         traceback.print_exc()
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train a pose-estimation model.",
+        epilog="Fresh run:  train.py <config.json>\n"
+               "Resume:     train.py --resume <run folder>   (uses the run's own saved "
+               "configuration.json and continues to its planned last epoch)",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("config", nargs="?", help="training configuration json")
+    source.add_argument("--resume", metavar="RUN_FOLDER",
+                        help="continue the run in this folder from its last checkpoint")
+    return parser.parse_args()
+
 def main():
     overall_start_time = time.time()
-    config_path = sys.argv[1] if len(sys.argv) > 1 else exit("Please provide a config file.")
-    print(f"Using config file: {config_path}", flush=True)
-    general_configuration = TrainConfig(config_path=config_path)
+    args = parse_args()
 
-    base_output_directory = arrange_loaded_checkpoint(general_configuration=general_configuration)
-
-    if not base_output_directory:
+    resume_checkpoint = None
+    if args.resume:
+        # A resume needs nothing but the run folder: it holds the exact config
+        # the run started with, the checkpoint, and the split indices. Taking
+        # the config from there means it cannot disagree with the run.
+        base_output_directory = os.path.abspath(args.resume)
+        config_path = os.path.join(base_output_directory, CONFIGURATION_FILE_NAME)
+        resume_checkpoint = os.path.join(base_output_directory, "weights", LATEST_CHECKPOINT_FILE_NAME)
+        for needed in (config_path, resume_checkpoint,
+                       os.path.join(base_output_directory, TRAIN_VAL_INDICES_FILE_NAME)):
+            if not os.path.exists(needed):
+                exit(f"cannot resume {base_output_directory}: {needed} is missing")
+        print(f"Resuming {base_output_directory}", flush=True)
+        general_configuration = TrainConfig(config_path=config_path)
+        # Keep the code the run started with; add this code beside it.
+        save_training_code(base_output_directory,
+                           folder_name=f"training code (resumed {date.today().isoformat()})")
+    else:
+        print(f"Using config file: {args.config}", flush=True)
+        general_configuration = TrainConfig(config_path=args.config)
         date_str = date.today().strftime('%b %d')
         run_tag = general_configuration.get_run_tag()
         run_name = f"{general_configuration.model_type}_{run_tag}_{date_str}" if run_tag \
@@ -435,8 +408,8 @@ def main():
             base_output_directory=general_configuration.get_base_output_directory(),
             run_name=run_name,
             original_config_file=general_configuration.get_config_file())
-    save_training_code(base_output_directory)
-    
+        save_training_code(base_output_directory)
+
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}", flush=True)
         use_gpu = True
@@ -448,7 +421,8 @@ def main():
     training_main(
         general_configuration=general_configuration,
         base_run_directory=base_output_directory,
-        use_gpu=use_gpu
+        use_gpu=use_gpu,
+        resume_checkpoint=resume_checkpoint
     )
 
     # Total wall-clock for the whole run: preprocessing + setup + training.
