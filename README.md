@@ -411,7 +411,7 @@ One config per model in `train_configurations/`. The fields you typically set:
 | `run tag` | short label in the run folder name |
 
 The run folder is auto-named `<model_type>_<run_tag>_<date>` (e.g.
-`MODEL_PER_CAM_PER_WING_JSD_HELDOUT_Sep 27`).
+`MODEL_PER_CAM_PER_WING_JSD_Sep 27`).
 
 ### 7.3 Run a training job
 
@@ -420,12 +420,18 @@ Through the generic launcher (never on the login or interactive node):
 ```bash
 sbatch -J train_per_cam_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 \
     sbatch_files/sbatch_configurable.sh \
-    code/training_code/train.py train_configurations/config_per_cam_jsd_heldout.json
+    code/training_code/train.py train_configurations/config_per_cam_jsd.json
 ```
 
 Ask for enough time that the run never has to be resumed: a 100-epoch run takes
 roughly half a day to a day and a half depending on the GPU. Watch it with
-`tail -f logs/train_per_cam_jsd_*.out`.
+`tail -f logs/train_per_cam_jsd_*.out`. A training that crashes ends the job as
+FAILED, so `sacct` tells you.
+
+To check a new or edited config end to end before committing a GPU for a day,
+add `--debug` after the config: same data, split and checks, but 2 epochs of 5
+batches, into a run folder tagged `DEBUG` (delete it afterwards). It finishes a
+few minutes after preprocessing.
 
 ### 7.4 Resuming a stopped run
 
@@ -449,12 +455,27 @@ finished does nothing.
 ### 7.5 Training models for the ensemble
 
 The ensemble members differ in architecture, loss and camera handling; each has
-its own `config_<member>_heldout.json`. After training one, graduate it into the
+its own `config_<member>.json`. Each family has a `base` model, and every other
+name says what it changes relative to that base:
+
+| config | what it is |
+|--------|------------|
+| `per_cam_base` | one camera, one wing per sample; 64 filters, dilation 2, MSE — the per-camera reference |
+| `per_cam_small_dil3` | 32 filters (a quarter of the parameters), dilation 3, dropout 0.4 |
+| `per_cam_jsd` | the base trained with JSD loss instead of MSE |
+| `per_cam_unet` | the base plus skip connections (a U-Net) |
+| `all_cams_4cam_base` | all 4 cameras in one sample, merged by concatenation, dilation 2 — the multi-view reference |
+| `all_cams_4cam_dil3` | the 4-camera base with dilation 3 |
+| `all_cams_4cam_maxfusion` | the 4-camera base with cameras merged by an element-wise max (camera-order independent) |
+| `all_cams_3cam_base`, `_dil3`, `_maxfusion` | the same three for 3-camera movies, trained on every 3-of-4 camera subset |
+
+Per-camera models run on any rig; `4cam` models only on 4-camera movies and
+`3cam` models only on 3-camera ones. After training one, graduate it into the
 prediction ensemble with one command:
 
 ```bash
 python code/register_prediction_model.py --name per_cam_jsd \
-    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_HELDOUT_Sep 27"
+    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_Sep 27"
 ```
 
 This copies its `best_model.pt` into `prediction_models/<name>/` and writes a

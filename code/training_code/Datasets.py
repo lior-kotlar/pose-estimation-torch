@@ -197,10 +197,10 @@ class Augmentor():
             scaled_sample, scaled_label = self.center_example(scaled_sample, scaled_label, scale_factor)
             return scaled_sample, scaled_label
         
-def prepare_dataloader(dataset, batch_size):
+def prepare_dataloader(dataset, batch_size, shuffle):
     return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         pin_memory=True,
-        shuffle=False
+        shuffle=shuffle
     )

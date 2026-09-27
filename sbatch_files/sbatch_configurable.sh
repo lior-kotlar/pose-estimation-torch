@@ -13,7 +13,7 @@
 #
 # Examples:
 #   sbatch -J train_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 sbatch_configurable.sh \
-#       code/training_code/train.py train_configurations/config_per_cam_jsd_heldout.json
+#       code/training_code/train.py train_configurations/config_per_cam_jsd.json
 #   # continue a stopped run from its folder (see README 7.4):
 #   sbatch -J resume_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 sbatch_configurable.sh \
 #       code/training_code/train.py --resume "train_output/debug_outputs/<run folder>"
@@ -43,5 +43,9 @@ echo "Running script: $SCRIPT_PATH"
 echo "With args: $*"
 
 python "$SCRIPT_PATH" "$@"
+status=$?
 
-echo "finished working"
+# End the job with the script's own exit status, so a script that fails shows
+# as FAILED in sacct instead of COMPLETED.
+echo "finished working (exit status $status)"
+exit $status

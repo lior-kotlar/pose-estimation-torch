@@ -33,7 +33,6 @@ class TrainConfig:
             config = json.load(CF)
             # training configuration
             self.config = config
-            self.debug_mode = bool(config["debug mode"])
             self.num_epochs = config['epochs']
             self.loss_function_as_string = config["loss function"]
             self.learning_rate = config["learning rate"]
@@ -42,7 +41,9 @@ class TrainConfig:
             self.weight_initialization_method = config["weight initialization method"]
             self.reduce_lr_min_lr = config["reduce lr min lr"]
             self.base_output_directory = config["base output directory"]
-            self.how_many_visualizations = 1 if self.debug_mode else config.get("how many visualizations", 10)
+            self.how_many_visualizations = config.get("how many visualizations", 10)
+            # None = every batch; set only by train.py --debug.
+            self.max_batches_per_epoch = None
             self.model_type = config["model type"]
             # Optional short label appended to the auto-generated run folder
             # name (after model type) so variants that share a model type are
@@ -53,7 +54,6 @@ class TrainConfig:
             self.confmaps_orig = None
             self.box_orig = None
             self.data_path = config['data path']
-            self.test_path = config['test path']
             
             # The frozen train/val/test split of the labelled frames
             # (make_heldout_split.py). Required: every model trains on the same
@@ -62,10 +62,7 @@ class TrainConfig:
             self.split_file = config["split file"]
             
             # preprocessing configuration
-            self.mix_with_test = bool(config['mix with test'])
             self.mask_dilation = config['mask dilation']
-            self.wing_size_rank = config["rank wing size"]
-            self.do_curriculum_learning = config["do curriculum learning"]
             self.single_time_channel = bool(config["single time channel"])
 
             # Network configuration
@@ -95,7 +92,7 @@ class TrainConfig:
             self.horizontal_flip = bool(config["horizontal flip"])
             self.vertical_flip = bool(config["vertical flip"])
             self.shift = config["xy shift"]
-            self.batch_size = config["batch size"] if not self.debug_mode else 1
+            self.batch_size = config["batch size"]
 
     def get_config_file(self):
         return self.config
@@ -115,14 +112,19 @@ class TrainConfig:
     def get_single_time_channel(self):
         return self.single_time_channel
     
-    def get_debug_mode(self):
-        return self.debug_mode
+    def enable_debug_run(self, epochs, batches_per_epoch):
+        """Turn this config into a quick end-to-end check (train.py --debug):
+        a few short epochs into a run folder tagged DEBUG. The saved
+        configuration.json records the shortened epoch count and says so."""
+        self.num_epochs = epochs
+        self.max_batches_per_epoch = batches_per_epoch
+        self.how_many_visualizations = 1
+        self.run_tag = f"{self.run_tag}_DEBUG" if self.run_tag else "DEBUG"
+        self.config = {"// DEBUG RUN //": f"train.py --debug: {epochs} epochs of {batches_per_epoch} batches, not a real model",
+                       **self.config, "epochs": epochs, "run tag": self.run_tag}
     
     def get_mask_dilation(self):
         return self.mask_dilation
-    
-    def get_mix_with_test(self):
-        return self.mix_with_test
     
     def get_base_output_directory(self):
         return self.base_output_directory

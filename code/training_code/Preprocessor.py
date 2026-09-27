@@ -11,12 +11,7 @@ class Preprocessor:
     def __init__(self, general_configuration: TrainConfig):
         self.confmaps_orig = None
         self.box_orig = None
-        self.mix_with_test = general_configuration.get_mix_with_test()
         self.mask_dilation = general_configuration.get_mask_dilation()
-        # self.debug_mode = bool(config['debug mode'])
-        # self.wing_size_rank = config["rank wing size"]
-        # self.do_curriculum_learning = config["do curriculum learning"]
-        # self.single_time_channel = bool(config["single time channel"])
         self.model_type = general_configuration.get_model_type()
         self.box, self.confmaps = self.load_dataset(general_configuration.get_data_path())
 
@@ -65,17 +60,6 @@ class Preprocessor:
         self.fly_with_right_mask = np.append(self.time_channels, self.right_mask_ind)
 
         self.num_samples = None
-        if self.model_type == HEAD_TAIL_ALL_CAMS or self.model_type == HEAD_TAIL_PER_CAM:
-            self.mix_with_test = False
-        if general_configuration.get_debug_mode():
-            if self.num_dims == 5:
-                self.box = self.box[:10, :, :, :, :]
-                self.confmaps = self.confmaps[:10, :, :, :, :]
-            else:
-                self.box = self.box[:, :10, :, :, :, :]
-                self.confmaps = self.confmaps[:, :10, :, :, :, :]
-            self.num_frames = self.box.shape[0]
-            self.mix_with_test = False
 
         self.body_masks, self.body_sizes = self.get_body_masks()
         self.retrieve_points_3D(general_configuration.get_data_path())
@@ -357,8 +341,6 @@ class Preprocessor:
     
 
     def do_preprocess(self):
-        # if self.mix_with_test:
-        #     self.do_mix_with_test()
         self.preprocess_function()
 
     

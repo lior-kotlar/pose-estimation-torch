@@ -18,7 +18,8 @@ import torch.optim.lr_scheduler as lr_scheduler
 from utils import TrainConfig, optimizer_from_string, create_train_run_folders, save_training_code, show_interest_points_with_index
 import Callbacks
 from make_heldout_split import md5_of
-from constants import CONFIGURATION_FILE_NAME, LATEST_CHECKPOINT_FILE_NAME, TRAIN_VAL_INDICES_FILE_NAME
+from constants import CONFIGURATION_FILE_NAME, LATEST_CHECKPOINT_FILE_NAME, TRAIN_VAL_INDICES_FILE_NAME, \
+    DEBUG_EPOCHS, DEBUG_BATCHES_PER_EPOCH
 
 
 N = 0
@@ -34,9 +35,6 @@ class Trainer:
                  device,
                  resume_checkpoint=None):
         self.device = device
-        if general_configuration.debug_mode:
-            self.batches_per_epoch = 1
-
         self.general_configuration = general_configuration
         self.base_run_directory = base_run_directory
         self.preprocessor = Preprocessor.Preprocessor(self.general_configuration)
@@ -210,7 +208,10 @@ class Trainer:
 
         logs = {}
 
+        max_batches = self.general_configuration.max_batches_per_epoch
         for data in train_loader:
+            if max_batches is not None and step_count >= max_batches:
+                break
             inputs, labels = data
             inputs = inputs.to(self.device)
             labels = labels.to(self.device)
@@ -254,8 +255,10 @@ class Trainer:
         augmentor = Datasets.Augmentor(self.general_configuration)
         train_set = Datasets.Dataset(self.train_box, self.train_confmap, augmentor.get_transforms())
         val_set = Datasets.Dataset(self.val_box, self.val_confmap)
-        train_loader = Datasets.prepare_dataloader(train_set, self.general_configuration.batch_size)
-        val_loader = Datasets.prepare_dataloader(val_set, self.general_configuration.batch_size)
+        # Training samples come in a new order every epoch, so batches are
+        # regrouped each time; validation order does not matter.
+        train_loader = Datasets.prepare_dataloader(train_set, self.general_configuration.batch_size, shuffle=True)
+        val_loader = Datasets.prepare_dataloader(val_set, self.general_configuration.batch_size, shuffle=False)
 
         if self.start_epoch >= self.num_epochs:
             print(f"All {self.num_epochs} planned epochs are already done; nothing to resume.", flush=True)
@@ -310,7 +313,6 @@ class Trainer:
         sample_side = frame_split[groups]
         train_idx = np.flatnonzero(sample_side == labels["train"])
         val_idx = np.flatnonzero(sample_side == labels["val"])
-        np.random.shuffle(train_idx)
         n_test = int((sample_side == labels["test"]).sum())
         print(f"[Trainer] split from {split_path}: "
               f"{(frame_split == labels['train']).sum()} train / "
@@ -350,18 +352,15 @@ def training_main(
     else:
         device = torch.device("cpu")
         print(f"Running on CPU", flush=True)
-    try:
-        trainer = Trainer(
-            general_configuration=general_configuration,
-            base_run_directory=base_run_directory,
-            device=device,
-            resume_checkpoint=resume_checkpoint
-        )
-        trainer.train()        
-    except Exception as e:
-        import traceback
-        print(f"Exception during training: {e}", flush=True)
-        traceback.print_exc()
+    # No try/except: an error must end the job with a failure status, so
+    # slurm reports FAILED instead of COMPLETED for a run that crashed.
+    trainer = Trainer(
+        general_configuration=general_configuration,
+        base_run_directory=base_run_directory,
+        device=device,
+        resume_checkpoint=resume_checkpoint
+    )
+    trainer.train()
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -374,7 +373,13 @@ def parse_args():
     source.add_argument("config", nargs="?", help="training configuration json")
     source.add_argument("--resume", metavar="RUN_FOLDER",
                         help="continue the run in this folder from its last checkpoint")
-    return parser.parse_args()
+    parser.add_argument("--debug", action="store_true",
+                        help=f"quick end-to-end check of the config: {DEBUG_EPOCHS} epochs of "
+                             f"{DEBUG_BATCHES_PER_EPOCH} batches, into a run folder tagged DEBUG")
+    args = parser.parse_args()
+    if args.debug and args.resume:
+        parser.error("--debug checks a config; it cannot be combined with --resume")
+    return args
 
 def main():
     overall_start_time = time.time()
@@ -400,6 +405,9 @@ def main():
     else:
         print(f"Using config file: {args.config}", flush=True)
         general_configuration = TrainConfig(config_path=args.config)
+        if args.debug:
+            general_configuration.enable_debug_run(DEBUG_EPOCHS, DEBUG_BATCHES_PER_EPOCH)
+            print(f"DEBUG run: {DEBUG_EPOCHS} epochs of {DEBUG_BATCHES_PER_EPOCH} batches", flush=True)
         date_str = date.today().strftime('%b %d')
         run_tag = general_configuration.get_run_tag()
         run_name = f"{general_configuration.model_type}_{run_tag}_{date_str}" if run_tag \
