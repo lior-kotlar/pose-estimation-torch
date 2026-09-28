@@ -85,6 +85,15 @@ class TrainConfig:
             # dataset's count turns each labelled frame into one sample per
             # camera subset -- see Preprocessor.camera_subsets.
             self.num_cameras = config.get("number of cameras")
+            # A camera every subset must contain. "bottom" (the only value)
+            # keeps the bottom camera -- found from the dataset's own
+            # camera_centers by find_bottom_camera -- in every subset, and in
+            # slot 0 of it, which is how the 2-camera (bottom + one side)
+            # models are trained. None = plain combinations, as before.
+            self.required_camera = config.get("required camera")
+            if self.required_camera not in (None, REQUIRED_CAMERA_BOTTOM):
+                raise ValueError(f"'required camera' = {self.required_camera!r}; "
+                                 f"only {REQUIRED_CAMERA_BOTTOM!r} is supported")
 
             # augmentation configuration
             self.rotation_range = config["rotation range"]
@@ -152,7 +161,10 @@ class TrainConfig:
 
     def get_num_cameras(self):
         return self.num_cameras
-    
+
+    def get_required_camera(self):
+        return self.required_camera
+
     def get_split_file(self):
         return self.split_file
 
@@ -196,6 +208,127 @@ def model_accepts_num_cams(model_config, num_cams):
     return int(declared) == int(num_cams)
 
 
+def model_requires_bottom_camera(model_config):
+    return model_config.get("bottom camera") == BOTTOM_CAMERA_REQUIRED
+
+
+def model_accepts_movie(model_config, num_cams, bottom_cam):
+    """Can this ensemble member run on this movie?
+
+    A member that needs the bottom camera (the 2-camera bottom + side models)
+    runs once per (bottom, side) pair, so it fits any movie that HAS a bottom
+    camera and at least its own camera count -- a 4-camera movie as well as a
+    2-camera one -- and no movie without one, such as the old 3-camera rig,
+    which is the side triad alone. Every other member keeps the plain
+    camera-count rule."""
+    if model_requires_bottom_camera(model_config):
+        return (bottom_cam is not None
+                and int(num_cams) >= int(model_config["num cameras"]))
+    return model_accepts_num_cams(model_config, num_cams)
+
+
+# ---------------------------------------------------------------------------
+# The bottom camera
+# ---------------------------------------------------------------------------
+# Value of a train config's "required camera", and of a model.json's
+# "bottom camera", meaning "every sample / every run holds the bottom camera".
+REQUIRED_CAMERA_BOTTOM = "bottom"
+BOTTOM_CAMERA_REQUIRED = "required"
+# calibration.h5 dataset declaring the bottom camera's 0-based index, written
+# at prep (process_experiment --bottom-cam); -1 declares there is none.
+BOTTOM_CAMERA_KEY = "bottom_camera"
+# Angle windows find_bottom_camera accepts, in degrees. Measured: the bottom
+# camera sits 54-56 deg from each side camera, the side cameras 88-93 deg from
+# each other, on the training set, Shalev and every Tsory calibration.
+BOTTOM_TO_SIDE_DEG = (35.0, 75.0)
+SIDE_TO_SIDE_DEG = (75.0, 105.0)
+
+
+def camera_angles_deg(camera_centers):
+    """(N, N) angles between the cameras as seen from the calibration origin
+    (the arena centre). Takes camera_centers as (3, N) or (N, 3)."""
+    c = np.asarray(camera_centers, dtype=float)
+    if c.shape[0] != 3 and c.shape[1] == 3:
+        c = c.T
+    u = c / np.linalg.norm(c, axis=0, keepdims=True)
+    return np.degrees(np.arccos(np.clip(u.T @ u, -1.0, 1.0)))
+
+
+def find_bottom_camera(camera_centers):
+    """Index of the camera filming from below, or None when there is none.
+
+    The rig's three side cameras are mutually ~90 deg apart (an orthogonal
+    triad) and the bottom camera sits on the triad's axis, ~55 deg from each
+    of them. That pattern is read from the camera positions alone, so it does
+    not depend on which way the calibration's lab frame points (its +z is the
+    sum of the viewing directions, not gravity). Needs 3+ cameras: with two
+    the one angle between them cannot say which of the pair is below, so the
+    bottom camera of a 2-camera rig has to be declared (load_bottom_camera).
+    The old 3-camera rig (the side triad alone) returns None."""
+    ang = camera_angles_deg(camera_centers)
+    n = ang.shape[0]
+    if n < 3:
+        return None
+    found = []
+    for c in range(n):
+        others = [o for o in range(n) if o != c]
+        to_sides = ang[c, others]
+        between = [ang[a, b] for i, a in enumerate(others) for b in others[i + 1:]]
+        if (np.all((to_sides >= BOTTOM_TO_SIDE_DEG[0]) & (to_sides <= BOTTOM_TO_SIDE_DEG[1]))
+                and np.all((np.array(between) >= SIDE_TO_SIDE_DEG[0])
+                           & (np.array(between) <= SIDE_TO_SIDE_DEG[1]))):
+            found.append(c)
+    return found[0] if len(found) == 1 else None
+
+
+def load_bottom_camera(calibration_path):
+    """The movie's bottom camera: declared in calibration.h5 if prep wrote it,
+    otherwise found from the camera positions. None = no bottom camera (or,
+    for a 2-camera rig, none declared). A declaration that contradicts the
+    geometry of a 3+-camera rig is fatal, not overridden either way."""
+    with h5py.File(calibration_path, "r") as f:
+        centers = f["camera_centers"][:]
+        declared = int(np.ravel(f[BOTTOM_CAMERA_KEY][()])[0]) if BOTTOM_CAMERA_KEY in f else None
+    found = find_bottom_camera(centers)
+    if declared is None:
+        return found
+    declared = None if declared < 0 else declared
+    num_cams = camera_angles_deg(centers).shape[0]
+    if num_cams >= 3 and declared != found:
+        raise SystemExit(
+            f"{calibration_path} declares bottom camera {declared} but its camera "
+            f"positions say {found}. Fix the declaration (process_experiment "
+            f"--bottom-cam).")
+    return declared
+
+
+def declare_bottom_camera(calibration_path, choice="auto"):
+    """Write the bottom camera into calibration.h5 at prep, so prediction reads
+    it instead of working it out. `choice`: "auto" (from the camera positions;
+    needs 3+ cameras), "none", or a 0-based camera index -- the only way to
+    give a 2-camera rig one. Returns the index written (None = none)."""
+    with h5py.File(calibration_path, "r") as f:
+        centers = f["camera_centers"][:]
+    num_cams = camera_angles_deg(centers).shape[0]
+    found = find_bottom_camera(centers)
+    if str(choice).lower() == "auto":
+        value = found
+    elif str(choice).lower() == "none":
+        value = None
+    else:
+        value = int(choice)
+        if not 0 <= value < num_cams:
+            raise SystemExit(f"--bottom-cam {value}: the calibration has {num_cams} cameras")
+    if num_cams >= 3 and value != found:
+        raise SystemExit(f"--bottom-cam {choice}: the camera positions in "
+                         f"{calibration_path} say the bottom camera is {found}")
+    with h5py.File(calibration_path, "a") as f:
+        if BOTTOM_CAMERA_KEY in f:
+            del f[BOTTOM_CAMERA_KEY]
+        f[BOTTOM_CAMERA_KEY] = -1 if value is None else value
+    return value
+
+
 # Config value meaning "read this off the data instead of trusting me".
 AUTO = "auto"
 
@@ -231,6 +364,7 @@ class PredictConfig:
             self._declared_num_cams = _explicit_or_auto(config.get('number of cameras'))
             self.calibration_data_path = self._declared_calibration_path
             self.num_cams = self._declared_num_cams
+            self.bottom_camera = None
             self.wings_detector_path = config['wings detector path']
             self.image_height = config['IMAGE HEIGHT']
             self.image_width = config['IMAGE WIDTH']
@@ -299,6 +433,9 @@ class PredictConfig:
                 # Absent => "any", so every model.json written before this
                 # existed keeps working.
                 "num cameras": meta.get("num cameras", ANY_NUM_CAMS),
+                # "required" = the model's camera slot 0 is the bottom camera;
+                # it runs once per (bottom, side) pair of the movie.
+                "bottom camera": meta.get("bottom camera"),
             })
         if not model_config_list:
             raise ValueError(f"No enabled prediction models found in {pred_models_dir}")
@@ -346,14 +483,15 @@ class PredictConfig:
     def get_batch_size(self):
         return self.batch_size
     
-    def get_model_config_list(self, num_cams=None):
+    def get_model_config_list(self, num_cams=None, bottom_cam=None):
         """The ensemble members, optionally restricted to those that can run
-        on a `num_cams`-camera movie. Called per movie, since the count is a
-        property of the data and one config may cover several movies."""
+        on a `num_cams`-camera movie whose bottom camera is `bottom_cam`.
+        Called per movie, since both are properties of the data and one
+        config may cover several movies."""
         if num_cams is None:
             return self.model_config_list
         return [m for m in self.model_config_list
-                if model_accepts_num_cams(m, num_cams)]
+                if model_accepts_movie(m, num_cams, bottom_cam)]
 
     @staticmethod
     def resolve_calibration_path(movie_path):
@@ -401,14 +539,33 @@ class PredictConfig:
             self._declared_calibration_path
             if self._declared_calibration_path is not None
             else self.resolve_calibration_path(movie_path))
+        # Which camera films from below (None = none): decides whether the
+        # bottom + side members can run, and which camera is their slot 0.
+        self.bottom_camera = load_bottom_camera(self.calibration_data_path)
         return self.num_cams, self.calibration_data_path
 
-    def describe_model_selection(self, num_cams):
+    def get_bottom_camera(self):
+        return self.bottom_camera
+
+    def get_bottom_pairs_plan(self):
+        """(runs on bottom + side pairs?, the movie's bottom camera) for the
+        member currently tuned in."""
+        if not self.tuned_configration:
+            raise ValueError("Predict_config not finished configuring. Call finish_configuring() first.")
+        return self.model_requires_bottom, self.bottom_camera
+
+    def describe_model_selection(self, num_cams, bottom_cam=None):
         """(kept, [(name, why-skipped)]) for logging which members will run."""
         kept, skipped = [], []
         for m in self.model_config_list:
-            if model_accepts_num_cams(m, num_cams):
+            if model_accepts_movie(m, num_cams, bottom_cam):
                 kept.append(m)
+            elif model_requires_bottom_camera(m) and bottom_cam is None:
+                skipped.append((m.get("name", m["model type"]),
+                                "needs a bottom camera"))
+            elif model_requires_bottom_camera(m):
+                skipped.append((m.get("name", m["model type"]),
+                                f"needs at least {m['num cameras']} cameras"))
             else:
                 skipped.append((m.get("name", m["model type"]),
                                 f"needs {m['num cameras']} cameras"))
@@ -421,6 +578,10 @@ class PredictConfig:
         self.model_type_second_pass = config_as_dict["model type second pass"]
         self.predict_again_3D_consistency = config_as_dict["predict again 3D consistency"]
         self.use_reprojected_masks = bool(config_as_dict["use reprojected masks"])
+        # A bottom + side member runs on (bottom, side) camera pairs instead of
+        # on every camera at once; model_cameras is how many it takes per run.
+        self.model_requires_bottom = model_requires_bottom_camera(config_as_dict)
+        self.model_cameras = config_as_dict.get("num cameras", ANY_NUM_CAMS)
         self.movie_path = movie_path
         self.specific_output_directory = specific_output_directory
         if not self.tuned_configration:
@@ -463,6 +624,8 @@ class PredictConfig:
             "IMAGE HEIGHT": self.image_height,
             "IMAGE WIDTH": self.image_width,
             "number of cameras": self.num_cams,
+            "bottom camera": self.bottom_camera,
+            "model needs bottom camera": self.model_requires_bottom,
             "mask increase initial": self.mask_increase_initial,
             "mask increase reprojected": self.mask_increase_reprojected,
             "is video": self.is_video,

@@ -90,6 +90,10 @@ class Predictor2D:
         self.use_reprojected_masks = predict_config.get_predictor_data()
 
         self.config_as_dict = predict_config.get_full_config_as_dict()
+        # A bottom + side member (the 2-camera models) runs once per
+        # (bottom, side) pair of the movie, bottom camera in slot 0 as in its
+        # training, instead of once on every camera.
+        self.bottom_pairs, self.bottom_camera = predict_config.get_bottom_pairs_plan()
 
         self.software = 'pytorch'
         calibration_data_path, image_height, image_width = predict_config.get_triangulator_data()
@@ -111,6 +115,11 @@ class Predictor2D:
             raise ValueError(
                 f"movie has {self.num_cams} cameras but the calibration has "
                 f"{self.triangulator.num_cameras}; they must match")
+        if self.bottom_pairs and (self.bottom_camera is None
+                                  or not 0 <= self.bottom_camera < self.num_cams):
+            raise ValueError(
+                f"this member runs on (bottom, side) camera pairs but the movie's "
+                f"bottom camera is {self.bottom_camera}")
         # Which cams saw the WHOLE fly per frame (None => trust them all).
         # The prescan admits frames where a minority of cams see a TRUNCATED
         # fly; this is what keeps those cams out of the triangulation.
@@ -880,6 +889,10 @@ class Predictor2D:
                 print(f"predicting part number {i + 1}/{n}", flush=True)
             all_points_i = []
             for wing in range(2):
+                if self.bottom_pairs:
+                    all_points_i.append(
+                        self.predict_wing_bottom_pairs(splited_frames[i], wing))
+                    continue
                 input_wing_cams = []
                 for cam_idx in range(self.num_cams):
                     input_wing_cam = self.sparse_box.get_camera_dense(camera_idx=cam_idx,
@@ -914,6 +927,36 @@ class Predictor2D:
         all_wing_and_body_points = np.concatenate(all_points, axis=0)
         print("done predicting projected masks", flush=True)
         return all_wing_and_body_points
+
+    def predict_wing_bottom_pairs(self, frames, wing):
+        """One wing's points on every camera from a bottom + side member.
+
+        The member takes two cameras, the bottom one in slot 0 (as it was
+        trained), so it runs once per side camera s on (bottom, s). Each side
+        camera gets its points from its own run; the bottom camera is seen by
+        every run, and its confmaps are averaged over them before the peak is
+        taken. On a 2-camera movie that is a single run. Returns the same
+        (frames, num_cams, 3, points) layout as the all-camera path, so pairing,
+        triangulation and the ensemble downstream are unchanged."""
+        channels = [0, 1, 2, self.num_time_channels + wing]
+        bottom = self.bottom_camera
+        bottom_input = self.sparse_box.get_camera_dense(camera_idx=bottom, channels=channels,
+                                                        frames=frames)
+        per_cam_confmaps = [None] * self.num_cams
+        bottom_sum, n_runs = None, 0
+        for side in range(self.num_cams):
+            if side == bottom:
+                continue
+            side_input = self.sparse_box.get_camera_dense(camera_idx=side, channels=channels,
+                                                          frames=frames)
+            confmaps = self.predict_confmaps_torch(
+                np.concatenate([bottom_input, side_input], axis=-1))
+            n_pts = confmaps.shape[1] // 2
+            bottom_sum = confmaps[:, :n_pts] if bottom_sum is None else bottom_sum + confmaps[:, :n_pts]
+            n_runs += 1
+            per_cam_confmaps[side] = confmaps[:, n_pts:]
+        per_cam_confmaps[bottom] = bottom_sum / n_runs
+        return np.stack([torch_find_peaks(c) for c in per_cam_confmaps], axis=1)
 
     def predict_all_cams_all_points(self,  n=100):
         '''
@@ -1005,6 +1048,13 @@ class Predictor2D:
         Ypk_all = np.transpose(Ypk_all, [0, 1, 3, 2])
         return Ypk_all
     
+    def predict_confmaps_torch(self, input_tensor):
+        """The model's confmaps (B, C, H, W) for an NHWC numpy input."""
+        with torch.no_grad():
+            input_tensor = torch.from_numpy(input_tensor.transpose([0, 3, 1, 2]))
+            confmaps = self.wings_pose_estimation_model(input_tensor.to(self.device))
+            return confmaps.cpu().numpy()
+
     def predict_input_torch(self, input_tensor):
         with torch.no_grad():
             input_tensor = input_tensor.transpose([0, 3, 1, 2])

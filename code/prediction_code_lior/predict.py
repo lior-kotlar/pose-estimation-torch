@@ -133,13 +133,15 @@ class PredictingManager:
             # movie before anything is constructed from them.
             resolved_cams, calib = self.config.apply_movie_geometry(
                 movie_path, n_movie_cams)
-            print(f"cameras: {resolved_cams}   calibration: {calib}", flush=True)
+            bottom_cam = self.config.get_bottom_camera()
+            print(f"cameras: {resolved_cams}   calibration: {calib}   "
+                  f"bottom camera: {bottom_cam}", flush=True)
             # Select on the RESOLVED count, not the box read: when the box
             # could not be opened the config's count is the only one there is,
             # and skipping the filter there would hand a 4-camera model a
             # 3-camera movie.
             model_config_list, skipped = \
-                self.config.describe_model_selection(resolved_cams)
+                self.config.describe_model_selection(resolved_cams, bottom_cam)
             print(f"{resolved_cams} cameras -> "
                   f"{len(model_config_list)} ensemble member(s): "
                   + ", ".join(m.get("name", m["model type"])

@@ -147,6 +147,7 @@ Useful flags (see `--help` for the full list):
 |------|--------|
 | `--max-frames N` | cap each movie to N frames (quick test runs) |
 | `--num-cams N` | override the detected camera count (3 or 4) |
+| `--bottom-cam auto\|none\|N` | the camera filming from below, written into `calibration.h5` (default `auto`: found from the camera positions; a 2-camera rig must give `N`) |
 | `--prescan-min-intersection N` | min all-4-cam single-fly run to keep a movie (default 500) |
 | `--prescan-min-edge-margin N` | px of clearance the fly must keep from every image border (default 5; 0 disables) |
 | `--prescan-min-cams-in-frame N` | how many cams must see the WHOLE fly for a frame to count (default 3; 0 = every cam) |
@@ -169,7 +170,10 @@ Outputs of prep:
 - one `mov_<n>_<start>_<end>_ds_*tc_*tj.h5` per movie (the dataset h5),
 - one `<movie_dir>/prescan_cam_validity.npz` per movie (which cams saw the
   whole fly at each built frame),
-- one shared `<input_dir>/calibration.h5`,
+- one shared `<input_dir>/calibration.h5`, including `bottom_camera` (0-based,
+  -1 = none). Prediction uses it to decide whether the bottom + side (2-camera)
+  members can run. A calibration.h5 from before this flag has no such entry, and
+  prediction then works the bottom camera out from the camera positions,
 - `manifests/good_movies_<experiment>.txt` (the good-movie list),
 - `<input_dir>/process_report.txt` (prescan + verify transcript),
 - `<input_dir>/pipeline_timings.csv` (per-step timings).

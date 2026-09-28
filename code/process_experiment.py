@@ -171,7 +171,8 @@ from verify_calibration import (
 )
 from utils import (PERTURBATION_FILE, PERT_DEFAULT_DURATION_MS,
                    LIGHTING_REGIMES, LIGHT_DEFAULT_RELIGHT_MS,
-                   get_trigger_frame_info, load_perturbation)
+                   get_trigger_frame_info, load_perturbation,
+                   declare_bottom_camera)
 from find_mirror_cam import detect_mirror_cam, print_hypothesis_table
 
 
@@ -808,7 +809,8 @@ def run_build(input_dir: str, mode: str, movies: list,
               easywand: str, max_frames: "int | None", dry_run: bool,
               movie_ranges: "dict | None" = None,
               timings_path: "str | None" = None,
-              num_cams: "int | None" = None) -> list:
+              num_cams: "int | None" = None,
+              bottom_cam: str = "auto") -> list:
     """Runs the MATLAB builder per movie. Returns the list of (movie_dir,
     movie_num) whose build exited non-zero, so the caller can keep them out of
     VERIFY and the manifest -- a failed build still leaves whatever frames it
@@ -869,6 +871,13 @@ def run_build(input_dir: str, mode: str, movies: list,
     matlab_batch(cmd, dry_run,
                  log_path=None if dry_run else os.path.join(
                      input_dir, "build_calibration.log"))
+    # Declare which camera films from below, so prediction knows which
+    # members fit (the bottom + side ones need it) and which camera is their
+    # slot 0. With 3+ cameras it is read off the camera positions; a 2-camera
+    # rig has to name it (--bottom-cam N).
+    if not dry_run:
+        bottom = declare_bottom_camera(calib_out, bottom_cam)
+        print(f"   bottom camera: {bottom if bottom is not None else 'none'}")
 
     return failed_movies
 
@@ -1582,6 +1591,12 @@ def main() -> None:
                    help="override the camera count (normally detected from "
                         "the number of *_sparse.mat per movie dir; the old "
                         "lab rig had 3, the current one has 4)")
+    p.add_argument("--bottom-cam", default="auto",
+                   help="the camera filming from below, written into "
+                        "calibration.h5: 'auto' (default; found from the "
+                        "camera positions, needs 3+ cameras), 'none', or a "
+                        "0-based camera index -- required to give a 2-camera "
+                        "rig one; checked against the positions otherwise")
     p.add_argument("--skip-raw-movies", action="store_true",
                    help="don't give movies without one a raw movie (the "
                         "camera views tiled into one mp4 beside the mats, "
@@ -1832,7 +1847,8 @@ def main() -> None:
                                          args.max_frames, args.dry_run,
                                          movie_ranges=movie_ranges,
                                          timings_path=timings_path,
-                                         num_cams=num_cams)
+                                         num_cams=num_cams,
+                                         bottom_cam=args.bottom_cam)
 
             # Record which cams saw the whole fly per BUILT frame. Runs after
             # BUILD because the slice depends on the range the build actually

@@ -2,7 +2,7 @@ import itertools
 
 import numpy as np
 from constants import *
-from utils import TrainConfig, tf_format_find_peaks
+from utils import TrainConfig, tf_format_find_peaks, find_bottom_camera
 from skimage.morphology import disk, erosion, dilation
 import h5py
 from scipy.ndimage import binary_dilation, binary_closing
@@ -34,8 +34,8 @@ class Preprocessor:
             raise ValueError(
                 f"'number of cameras' = {self.cams_per_sample} but the dataset "
                 f"has {self.num_cams}")
-        self.camera_subsets = list(
-            itertools.combinations(range(self.num_cams), self.cams_per_sample))
+        self.required_camera = general_configuration.get_required_camera()
+        self.camera_subsets = self.make_camera_subsets(general_configuration.get_data_path())
         if self.cams_per_sample != self.num_cams:
             print(f"{self.cams_per_sample} of {self.num_cams} cameras per "
                   f"sample -> {len(self.camera_subsets)} subsets per frame: "
@@ -225,6 +225,28 @@ class Preprocessor:
         self.confmaps = self.confmaps.transpose(0, 3, 1, 2)
         self.num_samples = self.box.shape[0]
     
+    def make_camera_subsets(self, data_path):
+        """The camera subsets a multi-view sample is built from.
+
+        Plain: every combination of cams_per_sample cameras, in ascending order.
+        With 'required camera': 'bottom', every subset holds the bottom camera,
+        in slot 0, plus a combination of the others -- for 2 cameras that is
+        (bottom, side) once per side camera. The bottom camera is found from
+        the dataset's own camera_centers, the same way prediction finds it in
+        a movie's calibration, so the two cannot disagree about which it is."""
+        if self.required_camera is None:
+            return list(itertools.combinations(range(self.num_cams), self.cams_per_sample))
+        with h5py.File(data_path, "r") as f:
+            centers = f["camera_centers"][:]
+        bottom = find_bottom_camera(centers)
+        if bottom is None:
+            raise ValueError(f"'required camera': 'bottom' but no bottom camera "
+                             f"was found in the camera positions of {data_path}")
+        others = [c for c in range(self.num_cams) if c != bottom]
+        print(f"bottom camera: {bottom} (required in every subset, slot 0)")
+        return [(bottom,) + rest
+                for rest in itertools.combinations(others, self.cams_per_sample - 1)]
+
     def expand_camera_subsets(self, box, confmaps, group_ids):
         """Turn per-camera arrays into one sample per camera SUBSET.
 

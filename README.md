@@ -375,8 +375,8 @@ the dataset (`training_datasets/random_trainset_201_frames_18_joints.split_v1.np
 - **test** frames are never trained on and never used to pick a checkpoint, so
   every model — and the fused ensemble — can be scored on them and compared;
 - **validation** frames pick each run's best epoch;
-- a labelled frame becomes several samples (its two wings; for 3-camera models,
-  its camera subsets), and they all go wherever their frame goes, so no sibling
+- a labelled frame becomes several samples (its two wings; for 3- and 2-camera
+  models, its camera subsets), and they all go wherever their frame goes, so no sibling
   of a held-out frame is trained on;
 - frames from the same flight a few frames apart are grouped into one clump and
   kept on one side, so a held-out frame has no near-twin in training.
@@ -406,7 +406,8 @@ One config per model in `train_configurations/`. The fields you typically set:
 | `loss function` | `MSE`, `KL`, `softargmax`, or `JSD` |
 | `learning rate` | initial LR, decayed by cosine annealing down to `reduce lr min lr` at the last epoch |
 | `number of base filters`, `number of encoder decoder blocks`, `convolution kernel size`, `dilation rate`, `dropout ratio` | network shape |
-| `camera fusion`, `number of cameras` | multi-view models only: how cameras are merged, and 3 for the 3-camera models |
+| `camera fusion`, `number of cameras` | multi-view models only: how cameras are merged, and 3 or 2 for the 3- and 2-camera models |
+| `required camera` | `"bottom"` keeps the bottom camera in every camera subset, in slot 0 (the 2-camera models); found from the dataset's `camera_centers` |
 | augmentation block (`rotation range`, `zoom range`, `horizontal/vertical flip`, `xy shift`, …) | data augmentation |
 | `run tag` | short label in the run folder name |
 
@@ -468,9 +469,23 @@ name says what it changes relative to that base:
 | `all_cams_4cam_dil3` | the 4-camera base with dilation 3 |
 | `all_cams_4cam_maxfusion` | the 4-camera base with cameras merged by an element-wise max (camera-order independent) |
 | `all_cams_3cam_base`, `_dil3`, `_maxfusion` | the same three for 3-camera movies, trained on every 3-of-4 camera subset |
+| `all_cams_2cam_base`, `_dil3`, `_maxfusion` | the same three for a bottom camera plus one side camera, trained on the 3 (bottom, side) pairs |
 
 Per-camera models run on any rig; `4cam` models only on 4-camera movies and
-`3cam` models only on 3-camera ones. After training one, graduate it into the
+`3cam` models only on 3-camera ones. `2cam` models run on any movie that has a
+bottom camera — once per (bottom, side) pair, the bottom camera's confmaps
+averaged over the pairs — and never on the old 3-camera rig, which has none.
+
+**The bottom camera** is the one ~55° from every other camera, as seen from the
+arena centre, while the side cameras are ~90° from each other
+(`find_bottom_camera` in `code/utils.py`). It is index 0 in the labelled set
+and in the current rig. Only camera positions are used, so the lab frame's
+orientation doesn't matter. Prep writes it into `calibration.h5` (`--bottom-cam`),
+and a 2-camera rig must name it there, because with two cameras the positions
+can't tell which one is below.
+
+Score models on the split's 41 test frames, per camera setting (a bottom + side
+pair, all 4 cameras, the side triad), with `code/evaluate_on_heldout.py`. After training one, graduate it into the
 prediction ensemble with one command:
 
 ```bash

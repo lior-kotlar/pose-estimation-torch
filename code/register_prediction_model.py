@@ -52,8 +52,8 @@ FIXED_CAM_PREDICT_TYPES = {"PER_WING_ALL_CAMS"}
 ANY_NUM_CAMS = "any"
 
 
-def _read_train_num_cams(train_dir):
-    """Camera count from a train run's saved configuration.json, if it says."""
+def _read_train_config_field(train_dir, key):
+    """A field of a train run's saved configuration.json, if it says."""
     if not train_dir:
         return None
     cfg_path = os.path.join(train_dir, "configuration.json")
@@ -61,9 +61,14 @@ def _read_train_num_cams(train_dir):
         return None
     try:
         with open(cfg_path) as f:
-            return json.load(f).get("number of cameras")
+            return json.load(f).get(key)
     except Exception:
         return None
+
+
+def _read_train_num_cams(train_dir):
+    """Camera count from a train run's saved configuration.json, if it says."""
+    return _read_train_config_field(train_dir, "number of cameras")
 
 
 def _read_train_type(train_dir):
@@ -143,11 +148,17 @@ def main():
             print(f"  (ignoring --num-cams {args.num_cams}: {model_type} runs "
                   f"one camera at a time and works with any count)")
 
+    # A model trained with the bottom camera in every sample (slot 0) runs on
+    # (bottom, side) camera pairs and only on movies that have a bottom camera.
+    needs_bottom = (model_type in FIXED_CAM_PREDICT_TYPES
+                    and _read_train_config_field(args.from_dir, "required camera") == "bottom")
+
     shutil.copy2(weights_path, os.path.join(dest_dir, WEIGHTS_FILE))
     meta = {
         "model type": model_type,
         "num cameras": num_cams,
         "enabled": not args.disabled,
+        **({"bottom camera": "required"} if needs_bottom else {}),
         "predict again 3D consistency": 0,
         "use reprojected masks": 0,
         "source": source_note,
@@ -156,7 +167,8 @@ def main():
         json.dump(meta, f, indent=4)
 
     print(f"registered '{args.name}': type={model_type}, "
-          f"num cameras={num_cams}, enabled={not args.disabled}")
+          f"num cameras={num_cams}, enabled={not args.disabled}"
+          + (", bottom camera required" if needs_bottom else ""))
     print(f"  weights <- {weights_path}")
     print(f"  wrote   -> {dest_dir}/")
 
