@@ -228,3 +228,6 @@ prediction_models/**/*.pt
 comparison_data/manipulated_05_12_22.hdf5
 manifests/
 .claudeignore
+# Paper figures are their own private git repository (see paper_figures/README.md),
+# kept out of this repo so they never reach its public GitHub mirror.
+paper_figures/
