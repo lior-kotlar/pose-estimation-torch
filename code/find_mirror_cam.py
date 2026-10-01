@@ -46,6 +46,17 @@ The all-cameras-flipped row is the same hypothesis as
 is labelled as such -- if that one wins, the problem is the convention, not a
 mirror.
 
+TWO CAMERAS
+-----------
+Leaving one of two cameras out leaves nothing to triangulate from, so a
+2-camera rig is scored by triangulating from both and reprojecting into both.
+That residual only sees a mistake that moves a point OFF its epipolar line,
+and on a bottom + side pair a vertical flip mostly slides points ALONG them:
+on Shalev's pairs a flipped side camera scored 3.0-3.5 px against 1.3-1.7 px
+for the truth, and on one pair not even a flipped bottom camera stood out.
+Such a sweep is inconclusive and the verdict says so rather than guess; a
+2-camera rig's mirror camera has to be known, not detected.
+
 NOTE ON CAMERA ORDER
 --------------------
 Camera index = position in the SORTED `*_sparse.mat` listing, because that is
@@ -231,6 +242,31 @@ def loo_medians(meas, M):
                      else np.inf for c in range(n_cams)])
 
 
+def both_view_medians(meas, M):
+    """Median reprojection error (px) per camera of a 2-camera rig, from the
+    point triangulated with both. The stand-in for loo_medians when leaving a
+    camera out would leave one: much weaker, see TWO CAMERAS above."""
+    n_frames, n_cams, _ = meas.shape
+    errs = np.full((n_frames, n_cams), np.nan)
+    for k in range(n_frames):
+        X = triangulate(meas[k], M, list(range(n_cams)))
+        if X is None:
+            continue
+        for c in range(n_cams):
+            p = M[c] @ np.append(X, 1.0)
+            if abs(p[2]) < 1e-12:
+                continue
+            errs[k, c] = np.linalg.norm(p[:2] / p[2] - meas[k, c])
+    return np.array([np.nanmedian(errs[:, c]) if np.any(~np.isnan(errs[:, c]))
+                     else np.inf for c in range(n_cams)])
+
+
+def camera_medians(meas, M):
+    """Per-camera consistency: leave-one-out from 3 cameras up, both views
+    on a 2-camera rig."""
+    return both_view_medians(meas, M) if meas.shape[1] == 2 else loo_medians(meas, M)
+
+
 def flip_matrix(image_height):
     return np.array([[1.0, 0.0, 0.0],
                      [0.0, -1.0, image_height + 1.0],
@@ -277,7 +313,8 @@ def gather_measurements(movie_dirs, samples, min_pixels, image_height,
 
 
 def evaluate_hypotheses(meas, M, n_cams, image_height):
-    """Every flip subset, ranked by the WORST camera's LOO median.
+    """Every flip subset, ranked by the WORST camera's LOO median (on a
+    2-camera rig, both-view median -- see camera_medians).
 
     All 2**n subsets, including the all-flipped one -- which is the same
     hypothesis as a global y-up/y-down convention error rather than a mirror,
@@ -289,7 +326,7 @@ def evaluate_hypotheses(meas, M, n_cams, image_height):
             Mf = M.copy()
             for c in subset:
                 Mf[c] = F @ Mf[c]
-            med = loo_medians(meas, Mf)
+            med = camera_medians(meas, Mf)
             results.append((subset, med, float(np.max(med))))
     results.sort(key=lambda t: t[2])
     return results
@@ -326,6 +363,11 @@ def verdict_from_results(results, cam_names, n_cams,
         v["reason"] = (f"the best two hypotheses are too close to separate "
                        f"({best_worst:.2f} px vs {runner_up:.2f} px, under "
                        f"{margin:g}x) -- refusing to guess.")
+        if n_cams == 2:
+            v["reason"] += (" With 2 cameras that is expected: a vertical flip "
+                            "mostly slides points along the epipolar lines, "
+                            "which no 2-view check can see. The mirror camera "
+                            "has to be known for this rig.")
         return v
     if len(best_subset) == n_cams:
         v["reason"] = (f"every camera wants flipping, which is a y-up/y-down "

@@ -225,6 +225,9 @@ data_analysis_output/
 # prediction ensemble: track the tiny model.json metadata (which models + type),
 # but ignore the weights themselves -- they are artifacts on the lab filesystem.
 prediction_models/**/*.pt
+# staged, not-yet-deployed members (register_prediction_model.py
+# --prediction-models-dir); deploying into prediction_models/ is what is tracked
+prediction_models_candidates/
 comparison_data/manipulated_05_12_22.hdf5
 manifests/
 .claudeignore

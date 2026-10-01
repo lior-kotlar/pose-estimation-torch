@@ -3,9 +3,9 @@ scan_sparse_movies.py
 =====================
 
 Pre-flight tool: look at a movie's *_sparse.mat files (one per camera; 3 on
-the old rig, 4 on the current one) and decide whether the fly is trackable
-by enough of them (with no second fly) for enough frames to be worth
-processing.
+the old rig, 4 on the current one, 2 on a bottom + side rig) and decide
+whether the fly is trackable by enough of them (with no second fly) for
+enough frames to be worth processing.
 
 Three per-frame, per-cam conditions are checked:
 
@@ -29,11 +29,11 @@ Three per-frame, per-cam conditions are checked:
      the frame and never comes back.
 
 Conditions 1-2 must hold for EVERY cam. Condition 3 only has to hold for
---min-cams-in-frame of them (default 3): a cam that sees the fly CUT is
-tolerated as long as enough others see it whole, and the identity of that
-majority may change from frame to frame. This keeps movies that the
-all-cams rule would cut short, and is only safe because the prescan also
-records WHICH cams were whole per frame -- see the sidecar below, which
+--min-cams-in-frame of them (default 3; on a 2-camera rig, both): a cam that
+sees the fly CUT is tolerated as long as enough others see it whole, and the
+identity of that majority may change from frame to frame. This keeps movies
+that the all-cams rule would cut short, and is only safe because the prescan
+also records WHICH cams were whole per frame -- see the sidecar below, which
 prediction uses to drop the camera pairs a cut cam participates in.
 
 The longest contiguous run of good frames is what BUILD will actually
@@ -81,9 +81,27 @@ import scipy.ndimage as ndi
 DEFAULT_MIN_EDGE_MARGIN = 5
 
 # Camera counts this pipeline knows how to process. 3 is the old lab rig,
-# before a fourth camera was added; 4 is current. A movie directory holding
-# any other number of *_sparse.mat is a broken export, not a rig variant.
-SUPPORTED_CAM_COUNTS = (3, 4)
+# before a fourth camera was added; 4 is current; 2 is a bottom + one side
+# camera rig, which the 2-camera models are made for. A movie directory
+# holding any other number of *_sparse.mat is a broken export, not a rig
+# variant.
+SUPPORTED_CAM_COUNTS = (2, 3, 4)
+# The counts recognised without being declared. A 2-camera movie has to be
+# asked for (--num-cams 2): a 3- or 4-camera movie missing its other exports
+# holds 2 mats as well (Tsory ex210826 has 11 such), and those must stay
+# skipped as incomplete rather than pass for a rig of their own.
+AUTO_CAM_COUNTS = (3, 4)
+
+
+def accepted_cam_counts(num_cams=None) -> tuple:
+    """The mat counts a movie dir may hold to count as a movie: the ones
+    recognised on their own, plus `num_cams` when it is declared."""
+    if num_cams is None:
+        return AUTO_CAM_COUNTS
+    if int(num_cams) not in SUPPORTED_CAM_COUNTS:
+        sys.exit(f"--num-cams {num_cams}: the pipeline handles "
+                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))} cameras")
+    return tuple(sorted(set(AUTO_CAM_COUNTS) | {int(num_cams)}))
 
 # How many cameras must see the WHOLE fly for a frame to count. 0 (or None)
 # means "every camera", which is what this scan required before the rule was
@@ -95,7 +113,8 @@ DEFAULT_MIN_CAMS_IN_FRAME = 3
 # 2 there is exactly ONE camera pair per frame, so the ensemble's per-frame
 # camera-pair search (Predictor2D.get_best_ensemble_combination) has nothing to
 # choose between and the 3D point is whatever that single pair says, with no
-# cross-check. 3 cameras leave C(3,2) = 3 pairs.
+# cross-check. 3 cameras leave C(3,2) = 3 pairs. A 2-camera rig has only the
+# one pair anyway, so there the rule is simply that both see the whole fly.
 MIN_USABLE_CAMS_IN_FRAME = 3
 
 
@@ -338,9 +357,10 @@ def parse_movie_num(d: str):
     return int(m.group(1)) if m else None
 
 
-def detect_mode(input_dir: str) -> tuple:
+def detect_mode(input_dir: str, num_cams=None) -> tuple:
+    counts = accepted_cam_counts(num_cams)
     n_direct = len(glob.glob(os.path.join(input_dir, "*_sparse.mat")))
-    if n_direct in SUPPORTED_CAM_COUNTS:
+    if n_direct in counts:
         mn = parse_movie_num(input_dir)
         if mn is None:
             sys.exit(f"Single-movie mode requires 'mov<N>' basename; got "
@@ -349,7 +369,7 @@ def detect_mode(input_dir: str) -> tuple:
     if n_direct != 0:
         sys.exit(f"Ambiguous: {input_dir} contains {n_direct} *_sparse.mat "
                  f"(expected 0, "
-                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))})")
+                 f"{' or '.join(map(str, counts))})")
     # os.listdir (not a case-sensitive glob) so 'Mov001' Windows exports are
     # discovered alongside canonical 'mov1'.
     movies = []
@@ -360,12 +380,12 @@ def detect_mode(input_dir: str) -> tuple:
         mn = parse_movie_num(sub)
         if mn is None:
             continue
-        if len(glob.glob(os.path.join(sub, "*_sparse.mat"))) in SUPPORTED_CAM_COUNTS:
+        if len(glob.glob(os.path.join(sub, "*_sparse.mat"))) in counts:
             movies.append((sub, mn))
     movies.sort(key=lambda t: t[1])
     if not movies:
         sys.exit(f"No 'mov<N>/' subdirs with "
-                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))} "
+                 f"{' or '.join(map(str, counts))} "
                  f"*_sparse.mat in {input_dir}")
     return "multi", movies
 
@@ -376,8 +396,10 @@ def scan_experiment(input_dir: str, min_intersection: int = 500,
                     blob_distance: float = 100.0,
                     print_results: bool = True,
                     min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN,
-                    min_cams_in_frame=DEFAULT_MIN_CAMS_IN_FRAME) -> list:
-    """Scans all movies under input_dir. Returns list of result dicts:
+                    min_cams_in_frame=DEFAULT_MIN_CAMS_IN_FRAME,
+                    num_cams=None) -> list:
+    """Scans all movies under input_dir (`num_cams`: a declared camera count,
+    see accepted_cam_counts). Returns list of result dicts:
         {'movie_dir': str, 'movie_num': int,
          'verdict': 'OK'|'BAD'|'ERR',
          'intersection': int,                  # total frames passing the tests
@@ -394,7 +416,7 @@ def scan_experiment(input_dir: str, min_intersection: int = 500,
          'mats': [str],                        # in camera-index order
          'error': str | None}
     """
-    mode, movies = detect_mode(input_dir)
+    mode, movies = detect_mode(input_dir, num_cams)
     if print_results:
         print(f"Mode: {mode}; scanning {len(movies)} movie(s)")
         print(f"  thresholds: longest_run >= {min_intersection}, "
@@ -406,7 +428,8 @@ def scan_experiment(input_dir: str, min_intersection: int = 500,
                else str(int(min_cams_in_frame)))
         print(f"  cams that must see the WHOLE fly per frame: {req}"
               + (f" (clamped; min usable is {MIN_USABLE_CAMS_IN_FRAME})"
-                 if req.isdigit() and int(req) < MIN_USABLE_CAMS_IN_FRAME else ""))
+                 if req.isdigit() and int(req) < MIN_USABLE_CAMS_IN_FRAME else "")
+              + (" -> both" if num_cams == 2 and req != "all cams" else ""))
     results = []
     for movie_dir, mn in movies:
         info = scan_movie(movie_dir, pixel_threshold, blob_ratio,
@@ -514,6 +537,10 @@ def main():
                          f"(default: {DEFAULT_MIN_CAMS_IN_FRAME}; 0 = every "
                          f"cam; values below {MIN_USABLE_CAMS_IN_FRAME} are "
                          "clamped)")
+    ap.add_argument("--num-cams", type=int, default=None,
+                    help="declare the camera count; needed only for a "
+                         "2-camera rig, whose movies are otherwise taken for "
+                         "incomplete 3- or 4-camera exports")
     args = ap.parse_args()
     if not os.path.isdir(args.input_dir):
         sys.exit(f"input_dir is not a directory: {args.input_dir}")
@@ -522,7 +549,8 @@ def main():
                               args.blob_ratio, args.blob_distance,
                               print_results=True,
                               min_edge_margin=args.min_edge_margin,
-                              min_cams_in_frame=args.min_cams_in_frame)
+                              min_cams_in_frame=args.min_cams_in_frame,
+                              num_cams=args.num_cams)
     bad_n = sum(1 for r in results if r["verdict"] != "OK")
     sys.exit(1 if bad_n else 0)
 

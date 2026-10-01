@@ -32,7 +32,11 @@ There are two layers:
   dir: **4** for the current rig, **3** for the older one that predates the
   fourth camera. Every movie in an experiment must agree, or prep aborts
   (a movie missing one camera's export would otherwise build a box with a
-  blank camera). `--num-cams` overrides. The count flows on its own from
+  blank camera). `--num-cams` overrides. A **2**-camera (bottom + side) rig
+  is never detected, only declared -- `--num-cams 2 --bottom-cam N` -- because
+  a 3- or 4-camera movie missing its other exports holds 2 mats too, and those
+  stay skipped as incomplete. See section 2c for what a 2-camera rig can and
+  cannot check about itself. The count flows on its own from
   there — the MATLAB builder, the calibration, verify, triangulation and the
   mp4 all size themselves from the data. Two things to know for a 3-camera
   experiment:
@@ -146,7 +150,7 @@ Useful flags (see `--help` for the full list):
 | flag | effect |
 |------|--------|
 | `--max-frames N` | cap each movie to N frames (quick test runs) |
-| `--num-cams N` | override the detected camera count (3 or 4) |
+| `--num-cams N` | override the detected camera count (3 or 4); a 2-camera rig must declare `--num-cams 2` |
 | `--bottom-cam auto\|none\|N` | the camera filming from below, written into `calibration.h5` (default `auto`: found from the camera positions; a 2-camera rig must give `N`) |
 | `--prescan-min-intersection N` | min all-4-cam single-fly run to keep a movie (default 500) |
 | `--prescan-min-edge-margin N` | px of clearance the fly must keep from every image border (default 5; 0 disables) |
@@ -154,6 +158,7 @@ Useful flags (see `--help` for the full list):
 | `--prescan-only` | only run the prescan, then stop |
 | `--verify-only` / `--no-verify` | run only / skip the reprojection sanity check |
 | `--verify-threshold PX` | flag movies whose reprojection error exceeds PX (default 15) |
+| `--verify-threshold-2cam PX` | the same for a 2-camera movie, scored from both views (default 6) |
 | `--cam auto` | let the mirror check pick the camera to flip |
 | `--no-mirror-check` | skip the pre-flip verification (removes the guard) |
 | `--skip-clean / --skip-flip / --skip-build` | skip individual stages |
@@ -405,6 +410,82 @@ stamps `general run name` = the `-J` job name, and runs
 `code/prediction_code_lior/predict.py`.
 
 To re-run only failed tasks: `sbatch --array=12,45,108%16 ...`.
+
+### 2c. 2-camera movies, and simulating them from 4-camera ones
+
+The 2-camera models take the bottom camera plus one side camera. They run on a
+real 2-camera rig's movies, and on every (bottom, side) pair of a 4-camera
+movie as ensemble members.
+
+**A real 2-camera rig** goes through prep like any other, declared:
+
+```bash
+.env/bin/python code/process_experiment.py <input_dir> --easywand <2-camera easyWand.mat> \
+    --num-cams 2 --bottom-cam <index of the camera filming from below> --cam <mirror cam>
+```
+
+Three things are weaker with two cameras, and prep says so:
+
+- **verify** can't leave a camera out (one camera can't triangulate). It
+  triangulates from both views and reprojects into both instead, against
+  `--verify-threshold-2cam`. On Shalev's pairs that gave 0.6-2.5 px with the
+  right calibration and 13-244 px with another session's.
+- **the mirror check** can't see a vertical flip of the side camera. On a bottom +
+  side pair the flip slides points along their epipolar lines, so it stays within
+  a few px of the truth. A flipped bottom camera -- the one that films through the
+  mirror -- stood out on two of Shalev's three pairs (143-219 px) but not on the
+  third (4.9 px). It reports INCONCLUSIVE: `--cam auto` refuses, and an explicit
+  `--cam` is done as asked. The mirror camera has to be known for the rig.
+- **the lab frame** comes from the easyWand, whose +z is the sum of the cameras'
+  viewing directions. For a bottom + side pair that is the bisector of the two,
+  not the vertical, so body pitch, roll and gravity are tilted until the rig
+  declares its own "up".
+
+**Simulating one from 4-camera movies.** `code/make_camera_subset_movies.py`
+cuts each verified 4-camera movie into these subsets:
+
+- its (bottom, side) pairs, three on the 4-camera rig;
+- `all_cams`, the reference.
+
+All subsets are cut over the same frames: the longest run in which every
+camera sees a single, whole fly. Each subset is written as an ordinary
+experiment under `inference_datasets/simulated/<experiment>/<subset>/`:
+
+- a calibration holding the kept cameras' rows, with the 4-camera lab frame
+  kept, so angles stay comparable;
+- the movie h5, cut to the window, with frame 0 still the trigger;
+- symlinks to the kept cameras' mats;
+- `derived_from.json`, which names the source of every frame.
+
+The normal predict array then runs on it unchanged. Because the builder and the
+predictor's preprocessing are per camera, a cut movie is what a 2-camera build of
+those frames gives -- checked bit for bit. Prep refuses any dir holding
+`derived_from.json`, since its mats are the source's.
+
+```bash
+# cut (a verify-passed manifest, never a glob), and submit one array per subset:
+PREDICT_SBATCH_ARGS="-p catfish,salmon --gres=gpu:1 --mem=96g --cpus-per-task=12" \
+.env/bin/python code/make_camera_subset_movies.py manifests/<good movies>.txt \
+    [--movies mov22,mov24] --submit --predict-config predict_configurations/config_candidates.json
+
+# when the arrays finish: every pair against all_cams, frame for frame
+.env/bin/python code/compare_camera_subsets.py inference_datasets/simulated/<experiment>
+```
+
+Predictions land in `predict_output/sim_<experiment>_<subset>/`. The comparison
+goes to `comparison_data/sim_<experiment>/`, with `report.md`, `summary.json`
+and `per_movie.csv`. It reports:
+
+- 3D distance per joint group;
+- wing and body angle differences;
+- wing-label swaps;
+- the pipeline's rigidity score;
+- how far the pairs land from each other;
+- which ensemble members each subset used.
+
+The reference is the 4-camera ensemble, not ground truth. The `sim_` outputs
+are for evaluation only and are never delivered. A source without a bottom
+camera (the old side-camera rig) is refused.
 
 ---
 

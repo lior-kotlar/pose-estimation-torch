@@ -52,6 +52,9 @@ A full transcript of each run is appended to `<input_dir>/process_report.txt`
 Input modes (auto-detected from the path's contents):
     single-movie:    <input_dir>/movN_camK_sparse.mat × 4
     experiment-dir:  <input_dir>/mov*/movX_camK_sparse.mat × 4
+(or × 3 on the old rig). A 2-camera (bottom + side) rig is declared, never
+detected: --num-cams 2 --bottom-cam N. Its mirror camera has to be known --
+two views cannot detect a flip -- and its lab frame is tilted (see BUILD).
 
 USAGE
 -----
@@ -161,7 +164,7 @@ from pipeline_timing import record as record_timing
 from scan_sparse_movies import (DEFAULT_MIN_CAMS_IN_FRAME,
                                 DEFAULT_MIN_EDGE_MARGIN,
                                 MIN_USABLE_CAMS_IN_FRAME,
-                                SUPPORTED_CAM_COUNTS,
+                                accepted_cam_counts,
                                 resolve_min_cams_in_frame,
                                 scan_experiment)
 from verify_calibration import (
@@ -263,14 +266,19 @@ def canonical_movie_dir(movie_dir: str, movie_num: int,
     return movie_dir
 
 
-def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
+def detect_mode(input_dir: str, dry_run: bool = False,
+                num_cams: "int | None" = None) -> tuple:
     """Returns ('single', [(movie_dir, movie_num)]) or
        ('multi', [(movie_dir, movie_num), ...]) or sys.exits on error.
     Non-canonical movie dirs (e.g. 'Mov001') are renamed to 'mov<N>' first, since
     the whole downstream pipeline (MATLAB build included) expects that convention.
+    A movie dir counts when it holds 3 or 4 mats, or `num_cams` of them when
+    that is declared -- the only way a 2-camera movie counts (see
+    scan_sparse_movies.accepted_cam_counts).
     """
+    counts = accepted_cam_counts(num_cams)
     n_direct = count_sparse_mats(input_dir)
-    if n_direct in SUPPORTED_CAM_COUNTS:
+    if n_direct in counts:
         mn = parse_movie_num(input_dir)
         if mn is None:
             sys.exit(f"Single-movie mode requires a 'mov<N>' basename; got "
@@ -280,7 +288,7 @@ def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
     if n_direct != 0:
         sys.exit(f"Ambiguous: {input_dir} contains {n_direct} *_sparse.mat "
                  f"(expected 0, "
-                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))})")
+                 f"{' or '.join(map(str, counts))})")
     # Multi-movie mode. Use os.listdir (not a case-sensitive glob) so 'Mov001'
     # from a Windows export is discovered alongside canonical 'mov1'.
     movies = []
@@ -293,12 +301,12 @@ def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
         if mn is None:
             continue
         n = count_sparse_mats(sub)
-        if n in SUPPORTED_CAM_COUNTS:
+        if n in counts:
             sub = canonical_movie_dir(sub, mn, dry_run)
             movies.append((sub, mn))
         else:
             print(f"  (skipping {sub}: {n} *_sparse.mat, expected "
-                  f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))})")
+                  f"{' or '.join(map(str, counts))})")
             incomplete.append((os.path.basename(sub), n))
     movies.sort(key=lambda t: t[1])
     if incomplete:
@@ -307,7 +315,7 @@ def detect_mode(input_dir: str, dry_run: bool = False) -> tuple:
               + ", ".join(f"{name}({n})" for name, n in incomplete))
     if not movies:
         sys.exit(f"No 'mov<N>/' subdirs with "
-                 f"{' or '.join(map(str, SUPPORTED_CAM_COUNTS))} "
+                 f"{' or '.join(map(str, counts))} "
                  f"*_sparse.mat in {input_dir}")
     return "multi", movies
 
@@ -878,6 +886,15 @@ def run_build(input_dir: str, mode: str, movies: list,
     if not dry_run:
         bottom = declare_bottom_camera(calib_out, bottom_cam)
         print(f"   bottom camera: {bottom if bottom is not None else 'none'}")
+    if num_cams == 2:
+        # all_cameras_class.m points lab +z along the SUM of the cameras'
+        # viewing directions. On the 3- and 4-camera rigs that is the
+        # vertical; for a bottom + side pair it is the bisector of the two,
+        # tens of degrees off, and every body angle inherits the tilt.
+        print("   WARNING: a 2-camera calibration's lab frame is set by the sum "
+              "of its two viewing directions, which is NOT the vertical: body "
+              "pitch, roll and the gravity vector will be tilted. This rig "
+              "needs its own 'up' before its angles can be trusted.")
 
     return failed_movies
 
@@ -903,7 +920,8 @@ def run_prescan(input_dir: str, movies: list,
                 blob_ratio: float, blob_distance: float,
                 dry_run: bool,
                 min_edge_margin: float = DEFAULT_MIN_EDGE_MARGIN,
-                min_cams_in_frame=DEFAULT_MIN_CAMS_IN_FRAME) -> tuple:
+                min_cams_in_frame=DEFAULT_MIN_CAMS_IN_FRAME,
+                num_cams: "int | None" = None) -> tuple:
     """Returns (filtered_movies, movie_ranges, scan_results):
       - filtered_movies: list of (movie_dir, movie_num) — only OK movies
       - movie_ranges:    dict {movie_dir: (start_ind, end_ind)} in MATLAB's
@@ -924,7 +942,8 @@ def run_prescan(input_dir: str, movies: list,
                               pixel_threshold, blob_ratio, blob_distance,
                               print_results=True,
                               min_edge_margin=min_edge_margin,
-                              min_cams_in_frame=min_cams_in_frame)
+                              min_cams_in_frame=min_cams_in_frame,
+                              num_cams=num_cams)
     ok_dirs = {r["movie_dir"] for r in results if r["verdict"] == "OK"}
     n_before = len(movies)
     filtered = [(d, n) for d, n in movies if d in ok_dirs]
@@ -953,6 +972,18 @@ def run_prescan(input_dir: str, movies: list,
 # Prediction reads it to drop the camera pairs that include a cut cam; without
 # it the relaxed --prescan-min-cams-in-frame rule would simply admit garbage.
 CAM_VALIDITY_SIDECAR = "prescan_cam_validity.npz"
+
+# Left in every movie dir that make_camera_subset_movies.py cut out of another
+# experiment. Such a dir holds SYMLINKS to the source's mats, so prep must
+# never run on it: a flip there would rewrite the source experiment's data.
+DERIVED_FROM_FILE = "derived_from.json"
+
+
+def derived_dirs(input_dir: str) -> list:
+    """input_dir and the movie dirs under it that carry DERIVED_FROM_FILE."""
+    found = [d for d in [input_dir] + find_movie_dirs(input_dir)
+             if os.path.isfile(os.path.join(d, DERIVED_FROM_FILE))]
+    return sorted(set(found))
 
 
 def parse_h5_range(h5_path: str) -> "tuple | None":
@@ -1377,10 +1408,22 @@ def check_build_complete(f) -> "dict | None":
             "n_expected": n_expected, "ragged": ragged}
 
 
+# Verify threshold for a 2-camera movie. Leave-one-out is impossible there
+# (one camera left cannot triangulate), so both views triangulate and both
+# reproject, and that residual runs far below a leave-one-out error. Measured
+# on Shalev's and Roni's (bottom, side) pairs: 0.6-2.5 px with the right
+# calibration, 12.4-244 px with the other rig's; 6 px sits over twice the worst
+# good and half the weakest bad. It only catches what moves a point off its epipolar
+# line, so it can NOT catch a missed vertical flip of the side camera (see
+# find_mirror_cam, TWO CAMERAS).
+DEFAULT_VERIFY_THRESHOLD_2CAM = 6.0
+
+
 def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
                      image_height: int = 800, num_cams: "int | None" = None,
                      subsample_frames: int = 500,
-                     min_intersection: int = DEFAULT_MIN_INTERSECTION) -> tuple:
+                     min_intersection: int = DEFAULT_MIN_INTERSECTION,
+                     threshold_2cam: float = DEFAULT_VERIFY_THRESHOLD_2CAM) -> tuple:
     """Verify a movie's calibration by reprojection-error.
 
     Samples from the intersection of frames where ALL cameras have a tracked
@@ -1390,8 +1433,11 @@ def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
 
     Returns (status, medians, info) where:
       - status: 'PASS' | 'FAIL' | 'INCOMPLETE' | 'BAD_DATA' | 'ERR'
-      - medians: per-cam LOO medians (list[float]) for PASS/FAIL,
-                 None for INCOMPLETE/BAD_DATA, error message list for ERR.
+      - medians: per-cam LOO medians (list[float]) for PASS/FAIL -- on a
+                 2-camera movie both-view medians, judged against
+                 `threshold_2cam` -- None for INCOMPLETE/BAD_DATA, error
+                 message list for ERR (also when no camera could be scored,
+                 which must never read as a pass).
       - info: dict with diagnostic counts, or None.
 
     INCOMPLETE outranks the calibration checks on purpose: a truncated build
@@ -1441,9 +1487,14 @@ def verify_one_movie(h5_path: str, calib_path: str, threshold: float,
         return "ERR", [f"calibration has {M.shape[0]} cams, movie has "
                        f"{num_cams}"], None
     meas, valid = collect_measurements(box, cropzone, image_height, num_cams)
-    errs = per_cam_errors(meas, valid, M, mode="loo")
-    medians = [float(np.nanmedian(errs[:, c])) for c in range(num_cams)]
-    passed = all(m < threshold for m in medians if not np.isnan(m))
+    two_views = num_cams == 2
+    errs = per_cam_errors(meas, valid, M, mode="all" if two_views else "loo")
+    medians = [float(np.nanmedian(errs[:, c])) if np.any(~np.isnan(errs[:, c]))
+               else float("nan") for c in range(num_cams)]
+    if all(np.isnan(m) for m in medians):
+        return "ERR", ["no camera could be scored"], info
+    limit = threshold_2cam if two_views else threshold
+    passed = all(m < limit for m in medians if not np.isnan(m))
     return ("PASS" if passed else "FAIL"), medians, info
 
 
@@ -1452,7 +1503,8 @@ def run_verify(input_dir: str, mode: str, movies: list,
                timings_path: "str | None" = None,
                min_intersection: int = DEFAULT_MIN_INTERSECTION,
                build_failed: "list | None" = None,
-               num_cams: "int | None" = None) -> "list | None":
+               num_cams: "int | None" = None,
+               threshold_2cam: float = DEFAULT_VERIFY_THRESHOLD_2CAM) -> "list | None":
     """Returns the list of (movie_dir, movie_num) that PASSED, or None when
     no filtering happened (calibration missing, or dry-run) so the caller
     falls back to the input list.
@@ -1460,8 +1512,11 @@ def run_verify(input_dir: str, mode: str, movies: list,
     `build_failed` is run_build's list of movies whose MATLAB build exited
     non-zero. They are reported and dropped without being opened: their h5 (if
     any) holds only the frames the builder got to before it died."""
-    print(f"\n===== VERIFY (threshold: {threshold:.1f} px per-cam LOO median, "
-          f"min intersection: {min_intersection} frames) =====")
+    two_views = num_cams == 2
+    stat = "both-view" if two_views else "LOO"
+    print(f"\n===== VERIFY (threshold: "
+          f"{threshold_2cam if two_views else threshold:.1f} px per-cam "
+          f"{stat} median, min intersection: {min_intersection} frames) =====")
     calib_path = find_calibration_h5(input_dir, mode, movies)
     if calib_path is None:
         print(f"  ERROR: calibration.h5 not found near {input_dir}; skipping verify.")
@@ -1492,7 +1547,8 @@ def run_verify(input_dir: str, mode: str, movies: list,
         t0 = time.time()
         status, medians, info = verify_one_movie(h5, calib_path, threshold,
                                                  num_cams=num_cams,
-                                                 min_intersection=min_intersection)
+                                                 min_intersection=min_intersection,
+                                                 threshold_2cam=threshold_2cam)
         t1 = time.time()
         n_inter = info["n_intersection"] if (info and "n_intersection" in info) else None
         record_timing(timings_path, f"mov{mn}", "verify", t0, t1,
@@ -1536,7 +1592,7 @@ def run_verify(input_dir: str, mode: str, movies: list,
             meds_str = str(medians)
         inter = info["n_intersection"]
         total = info["n_total"]
-        print(f"  [mov{mn}] {status}  LOO medians: {meds_str}  "
+        print(f"  [mov{mn}] {status}  {stat} medians: {meds_str}  "
               f"(intersection={inter}/{total})")
         if status == "PASS":
             n_pass += 1
@@ -1590,7 +1646,10 @@ def main() -> None:
     p.add_argument("--num-cams", type=int, default=None,
                    help="override the camera count (normally detected from "
                         "the number of *_sparse.mat per movie dir; the old "
-                        "lab rig had 3, the current one has 4)")
+                        "lab rig had 3, the current one has 4). A 2-camera "
+                        "(bottom + side) rig must say --num-cams 2, with "
+                        "--bottom-cam: 2 mats are otherwise read as an "
+                        "incomplete export and skipped")
     p.add_argument("--bottom-cam", default="auto",
                    help="the camera filming from below, written into "
                         "calibration.h5: 'auto' (default; found from the "
@@ -1659,6 +1718,12 @@ def main() -> None:
     p.add_argument("--verify-threshold", type=float, default=15.0,
                    help="per-cam LOO median above which a movie is marked FAIL "
                         "(default: 15.0)")
+    p.add_argument("--verify-threshold-2cam", type=float,
+                   default=DEFAULT_VERIFY_THRESHOLD_2CAM,
+                   help="the same for a 2-camera movie, whose cameras are "
+                        "scored from both views because leaving one out "
+                        "leaves nothing to triangulate from (default: "
+                        f"{DEFAULT_VERIFY_THRESHOLD_2CAM})")
     p.add_argument("--perturbation", action="store_true",
                    help="declare this a perturbation experiment: write "
                         f"{PERTURBATION_FILE} beside calibration.h5. Predict "
@@ -1728,6 +1793,20 @@ def main() -> None:
     if not os.path.isdir(args.input_dir):
         sys.exit(f"input_dir is not a directory: {args.input_dir}")
     input_dir = os.path.abspath(args.input_dir)
+    derived = derived_dirs(input_dir)
+    if derived:
+        sys.exit(f"{derived[0]} was cut out of another experiment "
+                 f"(it has {DERIVED_FROM_FILE}) and holds symlinks to that "
+                 f"experiment's mats; prep would rewrite them. Re-cut it with "
+                 f"make_camera_subset_movies.py instead.")
+    # Checked before anything slow runs: with 2 cameras the positions cannot
+    # say which one films from below, and "auto" would quietly record "none",
+    # after which prediction skips every bottom + side model.
+    if args.num_cams == 2 and str(args.bottom_cam).lower() == "auto":
+        sys.exit("--num-cams 2 needs --bottom-cam N (the 0-based index, in "
+                 "sorted *_sparse.mat order, of the camera filming from below) "
+                 "or --bottom-cam none: two camera positions cannot tell which "
+                 "of them is below.")
 
     # Capture everything printed during the run so it can be saved as a
     # report file next to the experiment for later review.
@@ -1752,7 +1831,7 @@ def main() -> None:
             run_raw_movies(find_movie_dirs(input_dir), args.dry_run,
                            timings=raw_timings)
 
-        mode, movies = detect_mode(input_dir, args.dry_run)
+        mode, movies = detect_mode(input_dir, args.dry_run, args.num_cams)
         # Single-movie mode may have renamed the input dir to canonical 'mov<N>';
         # follow it so clean / verify / report all target the right path.
         if mode == "single":
@@ -1771,7 +1850,8 @@ def main() -> None:
             run_verify(input_dir, mode, movies, args.verify_threshold,
                        args.dry_run, timings_path=timings_path,
                        min_intersection=args.verify_min_intersection,
-                       num_cams=num_cams)
+                       num_cams=num_cams,
+                       threshold_2cam=args.verify_threshold_2cam)
         else:
             if not args.skip_clean:
                 run_clean(input_dir, mode, movies, args.dry_run)
@@ -1799,6 +1879,7 @@ def main() -> None:
                     args.dry_run,
                     min_edge_margin=args.prescan_min_edge_margin,
                     min_cams_in_frame=args.prescan_min_cams_in_frame,
+                    num_cams=args.num_cams,
                 )
                 if not movies:
                     print("\nAll movies flagged BAD by prescan; nothing to do.")
@@ -1873,7 +1954,8 @@ def main() -> None:
                                       timings_path=timings_path,
                                       min_intersection=args.verify_min_intersection,
                                       build_failed=build_failed,
-                                      num_cams=num_cams)
+                                      num_cams=num_cams,
+                                      threshold_2cam=args.verify_threshold_2cam)
                 if verified is not None:
                     movies = verified
 

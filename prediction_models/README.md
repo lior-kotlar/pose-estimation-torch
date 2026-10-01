@@ -77,6 +77,14 @@ A 3-camera movie with no matching ALL_CAMS member still predicts — on the
 per-cam members alone. If *no* member matches, prediction stops with an error
 rather than silently producing nothing.
 
+## Staging candidates
+
+Models not yet deployed are registered into `prediction_models_candidates/`
+(`register_prediction_model.py --prediction-models-dir prediction_models_candidates`)
+and predicted with `predict_configurations/config_candidates.json`, e.g. for the
+simulated 2-camera movies (PIPELINE.md 2c). That folder is git-ignored local
+state; a member is deployed by registering it here.
+
 The weights are **git-ignored**; only `model.json` (and this README) are tracked,
 so the set of models and their types is versioned while the large binaries live
 on the lab filesystem.

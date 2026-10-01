@@ -1,0 +1,18 @@
+{
+    "_comment": "config1.json pointed at prediction_models_candidates/: the staged, not-yet-deployed members, for pilots and comparisons (e.g. the 2-camera movies cut by make_camera_subset_movies.py). Production predictions use config1.json.",
+    "data directory": "inference_datasets/test/mov4",
+    "output directory": "predict_output",
+    "calibration path": "auto",
+    "wings detector path": "wings_detetction/yolo_weights_6_1_24.pt",
+    "prediction models directory": "prediction_models_candidates",
+    "max ensemble models": 3,
+    "number of cameras": "auto",
+    "body parts to predict": "WINGS_AND_BODY",
+    "mask increase initial": 1,
+    "mask increase reprojected": 1,
+    "is video": 1,
+    "batch size": 8,
+    "IMAGE HEIGHT": 800,
+    "IMAGE WIDTH": 1280,
+    "align right left": 0
+}
