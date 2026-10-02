@@ -12,10 +12,10 @@
 # usage: sbatch -J <JOB_NAME> <THIS_SBATCH_FILE_PATH> <PYTHON_SCRIPT_PATH> [ARGS...]
 #
 # Examples:
-#   sbatch -J train_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 sbatch_configurable.sh \
+#   sbatch -J train_jsd -p salmon,catfish --gres=gpu:1 --cpus-per-task=16 --time=1-00:00:00 sbatch_configurable.sh \
 #       code/training_code/train.py train_configurations/config_per_cam_jsd.json
 #   # continue a stopped run from its folder (see README 7.4):
-#   sbatch -J resume_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 sbatch_configurable.sh \
+#   sbatch -J resume_jsd -p salmon,catfish --gres=gpu:1 --cpus-per-task=16 --time=1-00:00:00 sbatch_configurable.sh \
 #       code/training_code/train.py --resume "train_output/debug_outputs/<run folder>"
 #   sbatch -J process_exp sbatch_configurable.sh code/process_experiment.py \
 #       inference_datasets/test/2023 \

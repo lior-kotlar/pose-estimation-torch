@@ -401,10 +401,10 @@ One config per model in `train_configurations/`. The fields you typically set:
 | `data path` | labelled training dataset `.h5` |
 | `split file` | the frozen split above — **required**; training checks it was made for `data path` |
 | `base output directory` | where the run folder is created (`train_output/...`) |
-| `epochs` | the run's total number of epochs (the cosine learning-rate curve spans exactly these) |
+| `training steps` | the run's length in weight updates (one per batch): 7000 for every model, so a model with few samples per epoch (the 4-camera ones: 18 batches) is not trained less than one with many (per-camera: 70). `train.py` turns it into whole epochs, which the cosine learning-rate curve spans exactly. Runs made before it hold `epochs` instead |
 | `batch size` | mini-batch size |
 | `loss function` | `MSE`, `KL`, `softargmax`, or `JSD` |
-| `learning rate` | initial LR, decayed by cosine annealing down to `reduce lr min lr` at the last epoch |
+| `learning rate` | initial LR, decayed by cosine annealing down to `min learning rate` at the last epoch |
 | `number of base filters`, `number of encoder decoder blocks`, `convolution kernel size`, `dilation rate`, `dropout ratio` | network shape |
 | `camera fusion`, `number of cameras` | multi-view models only: how cameras are merged, and 3 or 2 for the 3- and 2-camera models |
 | `required camera` | `"bottom"` keeps the bottom camera in every camera subset, in slot 0 (the 2-camera models); found from the dataset's `camera_centers` |
@@ -419,13 +419,18 @@ The run folder is auto-named `<model_type>_<run_tag>_<date>` (e.g.
 Through the generic launcher (never on the login or interactive node):
 
 ```bash
-sbatch -J train_per_cam_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 \
+sbatch -J train_per_cam_jsd -p salmon,catfish --gres=gpu:1 --cpus-per-task=16 --time=1-00:00:00 \
     sbatch_files/sbatch_configurable.sh \
     code/training_code/train.py train_configurations/config_per_cam_jsd.json
 ```
 
-Ask for enough time that the run never has to be resumed: a 100-epoch run takes
-roughly half a day to a day and a half depending on the GPU. Watch it with
+The speed is set by the CPUs, not the GPU: augmenting a batch (scipy rotate,
+zoom and shift) takes seconds, the GPU step a fraction of a second, so an L4
+(catfish) trains as fast as an L40S (salmon). `train.py` augments on every CPU
+the job has but one, and the time falls in proportion (7 workers: 7.3x faster
+than none). With 16 CPUs a 7000-step run takes about 1 h (per-camera) to 5 h
+(4-camera, whose batch of 4 cameras takes longest). Ask for a day so the run
+never has to be resumed. Watch it with
 `tail -f logs/train_per_cam_jsd_*.out`. A training that crashes ends the job as
 FAILED, so `sacct` tells you.
 
@@ -439,7 +444,7 @@ few minutes after preprocessing.
 If a run stops early (node failure, time limit), continue it from its folder:
 
 ```bash
-sbatch -J resume_per_cam_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:00:00 \
+sbatch -J resume_per_cam_jsd -p salmon,catfish --gres=gpu:1 --cpus-per-task=16 --time=1-00:00:00 \
     sbatch_files/sbatch_configurable.sh \
     code/training_code/train.py --resume "train_output/debug_outputs/<run folder>"
 ```
@@ -447,8 +452,8 @@ sbatch -J resume_per_cam_jsd -p salmon,dogfish,catfish --gres=gpu:1 --time=3-00:
 Nothing to edit: the run folder holds the exact config it started with, the last
 checkpoint (`weights/last_checkpoint.pth`: model, optimizer, learning-rate
 schedule, epoch) and the samples it trained on (`train_val_split.npz`). The
-resume reloads all three and continues to the planned last epoch — `epochs` is
-always the total, so the learning-rate curve ends exactly where it would have.
+resume reloads all three and continues to the planned last epoch — the epoch
+count is always the run's total, so the learning-rate curve ends exactly where it would have.
 The history keeps one row per epoch, and the code the resume runs is saved beside
 the original as `training code (resumed <date>)`. Resuming a run that already
 finished does nothing.
@@ -462,19 +467,25 @@ name says what it changes relative to that base:
 | config | what it is |
 |--------|------------|
 | `per_cam_base` | one camera, one wing per sample; 64 filters, dilation 2, MSE — the per-camera reference |
+| `per_cam_dil3` | the base with dilation 3 |
 | `per_cam_small_dil3` | 32 filters (a quarter of the parameters), dilation 3, dropout 0.4 |
 | `per_cam_jsd` | the base trained with JSD loss instead of MSE |
+| `per_cam_jsd_dil3` | JSD loss and dilation 3 |
 | `per_cam_unet` | the base plus skip connections (a U-Net) |
 | `all_cams_4cam_base` | all 4 cameras in one sample, merged by concatenation, dilation 2 — the multi-view reference |
 | `all_cams_4cam_dil3` | the 4-camera base with dilation 3 |
 | `all_cams_4cam_maxfusion` | the 4-camera base with cameras merged by an element-wise max (camera-order independent) |
-| `all_cams_3cam_base`, `_dil3`, `_maxfusion` | the same three for 3-camera movies, trained on every 3-of-4 camera subset |
-| `all_cams_2cam_base`, `_dil3`, `_maxfusion` | the same three for a bottom camera plus one side camera, trained on the 3 (bottom, side) pairs |
+| `all_cams_4cam_jsd` | the 4-camera dil3 model trained with JSD loss |
+| `all_cams_3cam_base`, `_dil3`, `_maxfusion`, `_jsd` | the same four for 3-camera movies, trained on every 3-of-4 camera subset |
+| `all_cams_2cam_base`, `_dil3`, `_maxfusion`, `_jsd` | the same four for a bottom camera plus one side camera, trained on the 3 (bottom, side) pairs |
 
 Per-camera models run on any rig; `4cam` models only on 4-camera movies and
-`3cam` models only on 3-camera ones. `2cam` models run on any movie that has a
-bottom camera — once per (bottom, side) pair, the bottom camera's confmaps
-averaged over the pairs — and never on the old 3-camera rig, which has none.
+`3cam` models only on 3-camera ones. `2cam` models run on 2-camera (bottom +
+side) movies, and on a 4-camera movie too when their `model.json` chooses them
+for it (once per (bottom, side) pair). Each kind of movie gets its own ensemble
+this way: a `model.json` may list the movies it is chosen for under
+`"movie cameras"` (`register_prediction_model.py --movie-cameras 2 4`; see
+`prediction_models/README.md`).
 
 **The bottom camera** is the one ~55° from every other camera, as seen from the
 arena centre, while the side cameras are ~90° from each other

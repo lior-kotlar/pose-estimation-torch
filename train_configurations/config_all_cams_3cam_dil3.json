@@ -1,9 +1,9 @@
 {
-    "// MODEL //": "3-camera multi-view with dilation 3. 3 of the 4 cameras per sample, one sample per 3-camera subset (4 per wing per frame), so the model is not tied to one camera layout; stands in for the old 3-camera rig, which has no labelled frames of its own. 40 epochs because each epoch holds 4x the samples.",
+    "// MODEL //": "3-camera multi-view with dilation 3. 3 of the 4 cameras per sample, one sample per 3-camera subset (4 per wing per frame), so the model is not tied to one camera layout; stands in for the old 3-camera rig, which has no labelled frames of its own.",
     "// ORIGIN //": "Recipe of the deployed prediction_models/all_cams_3cam_dil3, from train_output/debug_outputs/ALL_CAMS_PER_WING_3CAM_DIL3_Aug 20/configuration.json.",
     "// training parameters //": 0,
     "batch size": 16,
-    "epochs": 40,
+    "training steps": 7000,
     "loss function": "MSE",
     "learning rate": 0.001,
     "optimizer epsilon": 1e-07,
@@ -36,7 +36,7 @@
     "// saving configurations //": 0,
     "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs",
     "// callbacks parameters //": 0,
-    "reduce lr min lr": 1e-10,
+    "min learning rate": 1e-10,
     "save every": 1,
     "split file": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.split_v1.npz"
 }

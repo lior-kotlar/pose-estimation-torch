@@ -3,7 +3,7 @@
     "// ORIGIN //": "Recipe of the deployed prediction_models/all_cams_dil3, from train_output/debug_outputs/ALL_CAMS_PER_WING_DIL3_Jul 05_01/configuration.json.",
     "// training parameters //": 0,
     "batch size": 16,
-    "epochs": 100,
+    "training steps": 7000,
     "loss function": "MSE",
     "learning rate": 0.001,
     "optimizer epsilon": 1e-07,
@@ -34,7 +34,7 @@
     "// saving configurations //": 0,
     "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs",
     "// callbacks parameters //": 0,
-    "reduce lr min lr": 1e-10,
+    "min learning rate": 1e-10,
     "save every": 1,
     "split file": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.split_v1.npz"
 }

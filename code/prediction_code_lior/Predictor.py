@@ -90,9 +90,10 @@ class Predictor2D:
         self.use_reprojected_masks = predict_config.get_predictor_data()
 
         self.config_as_dict = predict_config.get_full_config_as_dict()
-        # A bottom + side member (the 2-camera models) runs once per
-        # (bottom, side) pair of the movie, bottom camera in slot 0 as in its
-        # training, instead of once on every camera.
+        # A bottom + side member (the 2-camera models) runs on (bottom, side)
+        # pairs, bottom camera in slot 0 as in its training: once on a
+        # 2-camera movie, once per pair on a movie with more cameras when its
+        # model.json chooses it for those (model_accepts_movie).
         self.bottom_pairs, self.bottom_camera = predict_config.get_bottom_pairs_plan()
 
         self.software = 'pytorch'

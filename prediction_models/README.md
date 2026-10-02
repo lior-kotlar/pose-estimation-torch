@@ -20,6 +20,7 @@ prediction_models/
     "model type": "PER_WING_ALL_CAMS",   // or "PER_WING_PER_CAM" (only these work with torch)
     "num cameras": 4,                     // 4 | 3 | 2 | "any" — see below
     "bottom camera": "required",          // only on the 2-camera bottom + side models
+    "movie cameras": [2, 4],              // optional: the movies it is chosen for — see below
     "enabled": true,                      // set false to bench a model without deleting it
     "predict again 3D consistency": 0,
     "use reprojected masks": 0,
@@ -42,19 +43,20 @@ box (`cropzone.shape[1]`) and keeps only the members that fit:
 | `4` | 4-camera movies only | every `PER_WING_ALL_CAMS` trained on 4 cameras |
 | `3` | 3-camera movies only | a `PER_WING_ALL_CAMS` trained on 3 |
 | `"any"` (or absent) | any camera count | every `PER_WING_PER_CAM` |
-| `2` + `"bottom camera": "required"` | any movie with a bottom camera | a `PER_WING_ALL_CAMS` trained on (bottom, side) pairs |
+| `2` + `"bottom camera": "required"` | movies with a bottom camera: 2-camera ones, and more-camera ones when `"movie cameras"` lists them | a `PER_WING_ALL_CAMS` trained on (bottom, side) pairs |
 
 ### `"bottom camera": "required"` — the 2-camera models
 
 These take two cameras, and the bottom camera is always in slot 0, as it was in
-training. On a movie with N cameras, one of them the bottom camera, the model runs
-N−1 times, once on each (bottom, side) pair:
+training. On a 2-camera (bottom + side) movie they run once. A movie with more
+cameras runs them only when their `"movie cameras"` lists it; then they run
+once per (bottom, side) pair:
 
 - each side camera gets its points from its own run;
 - the bottom camera's confmaps are averaged over the runs before the peak is taken.
 
-The member's output has the same shape as any other member's, so triangulation
-and the ensemble treat it the same way. A true 2-camera movie is a single run.
+The output has the same shape as any other member's, so triangulation and the
+ensemble treat it the same way.
 
 The movie's bottom camera comes from `calibration.h5`. Prep's `--bottom-cam`
 writes it there; when it is absent, prediction works it out from the camera
@@ -76,6 +78,18 @@ the training config's `number of cameras`, or `--num-cams`).
 A 3-camera movie with no matching ALL_CAMS member still predicts — on the
 per-cam members alone. If *no* member matches, prediction stops with an error
 rather than silently producing nothing.
+
+## `movie cameras` — a different ensemble for each kind of movie
+
+`num cameras` says which movies a model *can* run on. The optional
+`"movie cameras"` says which ones it is *chosen* for: the camera counts of those
+movies, e.g. `[2, 3]` for a per-camera model used on 2- and 3-camera movies but
+not 4-camera ones, or `[2, 4]` for a 2-camera model used on 4-camera movies too.
+So one folder holds every ensemble. Without the field a model runs on every
+movie it can, except that a bottom + side model stays on 2-camera movies.
+Prediction logs which members it kept for a movie and why it skipped the others.
+`register_prediction_model.py --movie-cameras 2 4` writes it, and refuses a
+camera count the weights cannot run on.
 
 ## Staging candidates
 

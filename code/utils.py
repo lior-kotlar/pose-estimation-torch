@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from sympy import re
 matplotlib.use("Agg")
+import math
 import os
 import shutil
 import json
@@ -33,13 +34,21 @@ class TrainConfig:
             config = json.load(CF)
             # training configuration
             self.config = config
-            self.num_epochs = config['epochs']
+            # Run length. "training steps" = weight updates (batches), the same
+            # number for every model whatever its sample count; train.py turns
+            # it into whole epochs once the training samples are known.
+            # "epochs" is only in the saved configs of runs made before it.
+            self.training_steps = config.get("training steps")
+            self.num_epochs = config.get("epochs")
+            if (self.training_steps is None) == (self.num_epochs is None):
+                raise ValueError(f"{config_path}: give exactly one of \"training steps\" and \"epochs\"")
             self.loss_function_as_string = config["loss function"]
             self.learning_rate = config["learning rate"]
             self.optimizer_as_string = config["optimizer"]
             self.optimizer_epsilon = config["optimizer epsilon"]
             self.weight_initialization_method = config["weight initialization method"]
-            self.reduce_lr_min_lr = config["reduce lr min lr"]
+            # The floor the cosine learning-rate curve decays to at the last epoch.
+            self.min_learning_rate = config["min learning rate"]
             self.base_output_directory = config["base output directory"]
             self.how_many_visualizations = config.get("how many visualizations", 10)
             # None = every batch; set only by train.py --debug.
@@ -115,8 +124,12 @@ class TrainConfig:
     def get_run_tag(self):
         return self.run_tag
 
-    def get_num_epochs(self):
-        return self.num_epochs
+    def get_num_epochs(self, batches_per_epoch):
+        """The run's total epochs: enough whole epochs to make "training steps"
+        weight updates, or the old "epochs" setting as it stands."""
+        if self.training_steps is None:
+            return self.num_epochs
+        return math.ceil(self.training_steps / batches_per_epoch)
 
     def get_single_time_channel(self):
         return self.single_time_channel
@@ -126,11 +139,13 @@ class TrainConfig:
         a few short epochs into a run folder tagged DEBUG. The saved
         configuration.json records the shortened epoch count and says so."""
         self.num_epochs = epochs
+        self.training_steps = None
         self.max_batches_per_epoch = batches_per_epoch
         self.how_many_visualizations = 1
         self.run_tag = f"{self.run_tag}_DEBUG" if self.run_tag else "DEBUG"
+        config = {k: v for k, v in self.config.items() if k != "training steps"}
         self.config = {"// DEBUG RUN //": f"train.py --debug: {epochs} epochs of {batches_per_epoch} batches, not a real model",
-                       **self.config, "epochs": epochs, "run tag": self.run_tag}
+                       **config, "epochs": epochs, "run tag": self.run_tag}
     
     def get_mask_dilation(self):
         return self.mask_dilation
@@ -213,17 +228,27 @@ def model_requires_bottom_camera(model_config):
 
 
 def model_accepts_movie(model_config, num_cams, bottom_cam):
-    """Can this ensemble member run on this movie?
+    """Is this ensemble member chosen for this movie?
 
-    A member that needs the bottom camera (the 2-camera bottom + side models)
-    runs once per (bottom, side) pair, so it fits any movie that HAS a bottom
-    camera and at least its own camera count -- a 4-camera movie as well as a
-    2-camera one -- and no movie without one, such as the old 3-camera rig,
-    which is the side triad alone. Every other member keeps the plain
-    camera-count rule."""
+    Its model.json's "movie cameras", when given, lists the camera counts of
+    the movies it is chosen for, so one models folder holds a different
+    ensemble for each kind of movie (e.g. a 2-camera member chosen for
+    4-camera movies too: [2, 4]).
+
+    Within that, the weights decide: a per-camera member runs on any movie, an
+    ALL_CAMS member only on its own camera count, and a bottom + side member
+    (the 2-camera models) only on a movie with a bottom camera -- so never on
+    the old 3-camera rig, the side triad alone. A bottom + side member listed
+    for a movie with more cameras runs once per (bottom, side) pair; without
+    "movie cameras" it stays on 2-camera movies."""
+    movie_cams = model_config.get("movie cameras")
+    if movie_cams is not None and int(num_cams) not in {int(c) for c in movie_cams}:
+        return False
     if model_requires_bottom_camera(model_config):
-        return (bottom_cam is not None
-                and int(num_cams) >= int(model_config["num cameras"]))
+        if bottom_cam is None:
+            return False
+        own = int(model_config["num cameras"])
+        return int(num_cams) >= own if movie_cams is not None else int(num_cams) == own
     return model_accepts_num_cams(model_config, num_cams)
 
 
@@ -433,9 +458,11 @@ class PredictConfig:
                 # Absent => "any", so every model.json written before this
                 # existed keeps working.
                 "num cameras": meta.get("num cameras", ANY_NUM_CAMS),
-                # "required" = the model's camera slot 0 is the bottom camera;
-                # it runs once per (bottom, side) pair of the movie.
+                # "required" = the model's camera slot 0 is the bottom camera.
                 "bottom camera": meta.get("bottom camera"),
+                # The camera counts of the movies this member is chosen for
+                # (model_accepts_movie); absent = every movie it fits.
+                "movie cameras": meta.get("movie cameras"),
             })
         if not model_config_list:
             raise ValueError(f"No enabled prediction models found in {pred_models_dir}")
@@ -558,14 +585,18 @@ class PredictConfig:
         """(kept, [(name, why-skipped)]) for logging which members will run."""
         kept, skipped = [], []
         for m in self.model_config_list:
+            movie_cams = m.get("movie cameras")
             if model_accepts_movie(m, num_cams, bottom_cam):
                 kept.append(m)
+            elif movie_cams is not None and int(num_cams) not in {int(c) for c in movie_cams}:
+                skipped.append((m.get("name", m["model type"]),
+                                f"chosen for {'/'.join(map(str, movie_cams))}-camera movies only"))
             elif model_requires_bottom_camera(m) and bottom_cam is None:
                 skipped.append((m.get("name", m["model type"]),
                                 "needs a bottom camera"))
             elif model_requires_bottom_camera(m):
                 skipped.append((m.get("name", m["model type"]),
-                                f"needs at least {m['num cameras']} cameras"))
+                                f"runs only on {m['num cameras']}-camera movies"))
             else:
                 skipped.append((m.get("name", m["model type"]),
                                 f"needs {m['num cameras']} cameras"))

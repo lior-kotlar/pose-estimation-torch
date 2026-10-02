@@ -1,9 +1,9 @@
 {
-    "// MODEL //": "2-camera multi-view (bottom camera + one side camera), dilation 3, trained with Jensen-Shannon (JSD) loss instead of MSE -- the per_cam_jsd recipe applied to the best 2-camera model. Every sample holds the bottom camera in slot 0 plus one of the three side cameras (3 per wing per frame). Epochs doubled like per_cam_jsd's over per_cam_base: 106 = 2 x 53.",
-    "// ORIGIN //": "config_all_cams_2cam_dil3.json with the loss and epochs of config_per_cam_jsd.json relative to config_per_cam_base.json.",
+    "// MODEL //": "2-camera multi-view (bottom camera + one side camera), dilation 3, trained with Jensen-Shannon (JSD) loss instead of MSE -- the per_cam_jsd recipe applied to the best 2-camera model. Every sample holds the bottom camera in slot 0 plus one of the three side cameras (3 per wing per frame).",
+    "// ORIGIN //": "config_all_cams_2cam_dil3.json with the loss of config_per_cam_jsd.json.",
     "// training parameters //": 0,
     "batch size": 16,
-    "epochs": 106,
+    "training steps": 7000,
     "loss function": "JSD",
     "learning rate": 0.001,
     "optimizer epsilon": 1e-07,
@@ -37,7 +37,7 @@
     "// saving configurations //": 0,
     "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs",
     "// callbacks parameters //": 0,
-    "reduce lr min lr": 1e-10,
+    "min learning rate": 1e-10,
     "save every": 1,
     "split file": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.split_v1.npz"
 }

@@ -1,9 +1,9 @@
 {
-    "// MODEL //": "2-camera multi-view (bottom camera + one side camera) with the cameras merged by an element-wise max. Every sample holds the bottom camera in slot 0 plus one of the three side cameras, one sample per side camera (3 per wing per frame); the bottom camera is found from the dataset's camera positions. For rigs with a bottom camera and one side camera; on a 4-camera movie it runs once per (bottom, side) pair. 53 epochs because each epoch holds 3x the samples: 3 x 53 matches the 3-camera models' 4 x 40 frame-passes.",
-    "// ORIGIN //": "Recipe of config_all_cams_3cam_maxfusion.json with 2 cameras, the bottom one required, and the epochs rescaled.",
+    "// MODEL //": "2-camera multi-view (bottom camera + one side camera) with the cameras merged by an element-wise max. Every sample holds the bottom camera in slot 0 plus one of the three side cameras, one sample per side camera (3 per wing per frame); the bottom camera is found from the dataset's camera positions. For rigs with a bottom camera and one side camera; on a 4-camera movie it runs once per (bottom, side) pair.",
+    "// ORIGIN //": "Recipe of config_all_cams_3cam_maxfusion.json with 2 cameras, the bottom one required.",
     "// training parameters //": 0,
     "batch size": 16,
-    "epochs": 53,
+    "training steps": 7000,
     "loss function": "MSE",
     "learning rate": 0.001,
     "optimizer epsilon": 1e-07,
@@ -37,7 +37,7 @@
     "// saving configurations //": 0,
     "base output directory": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/train_output/debug_outputs",
     "// callbacks parameters //": 0,
-    "reduce lr min lr": 1e-10,
+    "min learning rate": 1e-10,
     "save every": 1,
     "split file": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.split_v1.npz"
 }

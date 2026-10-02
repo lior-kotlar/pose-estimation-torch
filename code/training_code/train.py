@@ -1,4 +1,5 @@
 import argparse
+import math
 import json
 import os
 import shutil
@@ -40,7 +41,6 @@ class Trainer:
         self.preprocessor = Preprocessor.Preprocessor(self.general_configuration)
         self.best_val_loss = float("inf")
         self.start_epoch = 0
-        self.num_epochs = self.general_configuration.get_num_epochs()
         self.checkpoint_load_path = resume_checkpoint
 
         # Do preprocessing according to the model type
@@ -66,7 +66,16 @@ class Trainer:
             lr=self.general_configuration.learning_rate,
             eps=self.general_configuration.optimizer_epsilon
             )
-        
+
+        self.train_box, self.train_confmap, self.val_box, self.val_confmap = self.train_val_split()
+        # One weight update per batch; the last, partial batch counts too.
+        batches_per_epoch = math.ceil(len(self.train_box) / self.general_configuration.batch_size)
+        self.num_epochs = self.general_configuration.get_num_epochs(batches_per_epoch)
+        if self.general_configuration.max_batches_per_epoch is not None:
+            batches_per_epoch = min(batches_per_epoch, self.general_configuration.max_batches_per_epoch)
+        print(f"[Trainer] {self.num_epochs} epochs of {batches_per_epoch} batches = "
+              f"{self.num_epochs * batches_per_epoch} weight updates", flush=True)
+
         # Cosine annealing: smoothly decay the LR from its initial value down
         # to eta_min over the whole run, following a half-cosine curve. Unlike
         # ReduceLROnPlateau this is schedule-based rather than tied to the
@@ -76,13 +85,12 @@ class Trainer:
         self.lr_scheduler = lr_scheduler.CosineAnnealingLR(
             self.optimizer,
             T_max=self.num_epochs,
-            eta_min=self.general_configuration.reduce_lr_min_lr
+            eta_min=self.general_configuration.min_learning_rate
         )
 
         if self.checkpoint_load_path:
             self._load_checkpoint(self.checkpoint_load_path)
 
-        self.train_box, self.train_confmap, self.val_box, self.val_confmap = self.train_val_split()
         viz_sample_list = (self.val_box[:self.general_configuration.how_many_visualizations], self.val_confmap[:self.general_configuration.how_many_visualizations])
 
         # show_interest_points_with_index(viz_sample_list[0], viz_sample_list[1], save_directory='.', filename="viz_sample_points.png")
@@ -257,7 +265,12 @@ class Trainer:
         val_set = Datasets.Dataset(self.val_box, self.val_confmap)
         # Training samples come in a new order every epoch, so batches are
         # regrouped each time; validation order does not matter.
-        train_loader = Datasets.prepare_dataloader(train_set, self.general_configuration.batch_size, shuffle=True)
+        # Augmentation (scipy, on the CPU) is what limits the speed, so it runs
+        # on every CPU the job was given but the one feeding the GPU.
+        num_workers = max(len(os.sched_getaffinity(0)) - 1, 0)
+        print(f"[Trainer] augmenting in {num_workers} worker processes", flush=True)
+        train_loader = Datasets.prepare_dataloader(train_set, self.general_configuration.batch_size, shuffle=True,
+                                                   num_workers=num_workers)
         val_loader = Datasets.prepare_dataloader(val_set, self.general_configuration.batch_size, shuffle=False)
 
         if self.start_epoch >= self.num_epochs:
@@ -267,8 +280,8 @@ class Trainer:
         training_start_time = time.time()
         self.callbacks.on_train_start(start_epoch=self.start_epoch)
 
-        # "epochs" in the config is the run's TOTAL, and the cosine schedule
-        # spans exactly that many, so a resumed run continues to the same end.
+        # num_epochs is the run's TOTAL, and the cosine schedule spans exactly
+        # that many, so a resumed run continues to the same end.
         for epoch in range(self.start_epoch, self.num_epochs):
             self.do_one_epoch(epoch_number=epoch, train_loader=train_loader, val_loader=val_loader)
             if self.general_configuration.save_every > 0 and \

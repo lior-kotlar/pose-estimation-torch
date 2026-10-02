@@ -1,6 +1,6 @@
 {
-    "// MODEL //": "Per-camera U-Net: the baseline recipe plus skip connections, no normalization.",
-    "// ORIGIN //": "Recipe of the deployed prediction_models/per_cam_unet, from train_output/debug_outputs/MODEL_PER_CAM_PER_WING_UNET_Jul 02/configuration.json.",
+    "// MODEL //": "Per-camera baseline with dilation 3: a wider view for the same number of parameters. Unlike per_cam_small_dil3 it keeps the baseline's 64 filters and dropout 0.5, so dilation is the only change.",
+    "// ORIGIN //": "config_per_cam_base.json with the dilation of the multi-view DIL3 models, the best of their families.",
     "// training parameters //": 0,
     "batch size": 16,
     "training steps": 7000,
@@ -11,15 +11,13 @@
     "how many visualizations": 10,
     "// Network parameters //": 0,
     "dropout ratio": 0.5,
-    "dilation rate": 2,
-    "normalization": "none",
+    "dilation rate": 3,
     "optimizer": "Adam",
     "number of base filters": 64,
     "number of encoder decoder blocks": 2,
     "convolution kernel size": 3,
     "// preprocess parameters //": 0,
-    "model type": "MODEL_PER_CAM_PER_WING_UNET",
-    "run tag": "",
+    "model type": "MODEL_PER_CAM_PER_WING",
     "data path": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.h5",
     "mask dilation": 1,
     "single time channel": 0,
@@ -37,5 +35,6 @@
     "// callbacks parameters //": 0,
     "min learning rate": 1e-10,
     "save every": 1,
-    "split file": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.split_v1.npz"
+    "split file": "/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/training_datasets/random_trainset_201_frames_18_joints.split_v1.npz",
+    "run tag": "DIL3"
 }

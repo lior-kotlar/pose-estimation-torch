@@ -123,6 +123,10 @@ def main():
                          "fixed number of camera streams; per-cam models are "
                          f"always registered as '{ANY_NUM_CAMS}'. Defaults to "
                          "the training config's 'number of cameras', then 4.")
+    ap.add_argument("--movie-cameras", type=int, nargs="+", default=None, metavar="N",
+                    help="the camera counts of the movies this model is chosen for "
+                         "(e.g. 2 4), so each kind of movie gets its own ensemble; "
+                         "default: every movie the model can run on")
     ap.add_argument("--disabled", action="store_true",
                     help="write the model with enabled=false (staged, not used yet)")
     ap.add_argument("--force", action="store_true", help="overwrite an existing model folder")
@@ -136,7 +140,6 @@ def main():
     dest_dir = os.path.join(args.prediction_models_dir, args.name)
     if os.path.exists(dest_dir) and not args.force:
         sys.exit(f"error: {dest_dir} already exists (use --force to overwrite)")
-    os.makedirs(dest_dir, exist_ok=True)
 
     if model_type in FIXED_CAM_PREDICT_TYPES:
         num_cams = (args.num_cams
@@ -153,12 +156,23 @@ def main():
     needs_bottom = (model_type in FIXED_CAM_PREDICT_TYPES
                     and _read_train_config_field(args.from_dir, "required camera") == "bottom")
 
+    movie_cams = sorted(set(args.movie_cameras)) if args.movie_cameras else None
+    if movie_cams and model_type in FIXED_CAM_PREDICT_TYPES:
+        # The weights fuse num_cams streams: a movie with fewer cameras cannot
+        # feed them, and only a bottom + side model runs on more (per pair).
+        bad = [c for c in movie_cams if c < num_cams or (c > num_cams and not needs_bottom)]
+        if bad:
+            sys.exit(f"error: --movie-cameras {bad}: a {num_cams}-camera "
+                     f"{'bottom + side ' if needs_bottom else ''}model cannot run on those movies")
+
+    os.makedirs(dest_dir, exist_ok=True)
     shutil.copy2(weights_path, os.path.join(dest_dir, WEIGHTS_FILE))
     meta = {
         "model type": model_type,
         "num cameras": num_cams,
         "enabled": not args.disabled,
         **({"bottom camera": "required"} if needs_bottom else {}),
+        **({"movie cameras": movie_cams} if movie_cams else {}),
         "predict again 3D consistency": 0,
         "use reprojected masks": 0,
         "source": source_note,
@@ -168,7 +182,8 @@ def main():
 
     print(f"registered '{args.name}': type={model_type}, "
           f"num cameras={num_cams}, enabled={not args.disabled}"
-          + (", bottom camera required" if needs_bottom else ""))
+          + (", bottom camera required" if needs_bottom else "")
+          + (f", chosen for {movie_cams}-camera movies" if movie_cams else ""))
     print(f"  weights <- {weights_path}")
     print(f"  wrote   -> {dest_dir}/")
 

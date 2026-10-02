@@ -197,10 +197,14 @@ class Augmentor():
             scaled_sample, scaled_label = self.center_example(scaled_sample, scaled_label, scale_factor)
             return scaled_sample, scaled_label
         
-def prepare_dataloader(dataset, batch_size, shuffle):
+def prepare_dataloader(dataset, batch_size, shuffle, num_workers=0):
+    """num_workers > 0 augments batches in that many background processes
+    (torch gives each its own numpy seed), kept alive between epochs."""
     return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         pin_memory=True,
-        shuffle=shuffle
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0
     )
