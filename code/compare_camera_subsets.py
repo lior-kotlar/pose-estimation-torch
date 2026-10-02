@@ -25,14 +25,28 @@ For each (movie, pair):
   angles     |difference| of wing phi/theta/psi and body yaw/pitch/roll, deg
   rigidity   the pipeline's own self-consistency score (compare_ensembles),
              for the pair and the reference
+  body       the fly's median tail-to-head length against the reference's
+             (check_body_length.py's test)
   coverage   frames the analysis left NaN
-plus how far the pairs land from each other, and which ensemble members each
-subset's selector picked.
+plus how far the pairs land from each other, which ensemble members each
+subset's selector picked, and two questions about the pairs:
 
-Writes <out>/per_movie.csv, summary.json, report.md and
-fig_pairs_vs_reference.png (median and p95 per joint group and per angle).
+  members    does the ensemble beat its members? Each member's own smoothed 3D
+             points against the reference, beside the ensemble's (both before
+             the analysis, so on the same footing)
+  geometry   is the body worst when its axis lies near the plane through the
+             two cameras (the epipolar plane, where two views pin depth along
+             the axis least)? Head/tail error binned by that angle.
 
-    .env/bin/python code/compare_camera_subsets.py inference_datasets/simulated/shalev/21to40
+--reference-run picks which 4-camera prediction stands in for the truth, e.g.
+the deployed models' (independent of the pairs' models) instead of the
+all_cams subset's own run.
+
+Writes <out>/per_movie.csv, summary.json, report.md, fig_pairs_vs_reference.png
+(median and p95 per joint group and per angle) and fig_body_vs_axis_angle.png.
+
+    .env/bin/python code/compare_camera_subsets.py inference_datasets/simulated/roni \
+        [--reference-run predict_output/sim_roni_all_cams_deployed]
 """
 
 import argparse
@@ -67,6 +81,9 @@ ANGLES = {"phi L": "wings_phi_left", "theta L": "wings_theta_left",
           "theta R": "wings_theta_right", "psi R": "wings_psi_right",
           "yaw": "yaw_angle", "pitch": "pitch_angle", "roll": "roll_angle"}
 FAR_MM = 0.5                       # "a point this far off is a miss"
+HEAD_TAIL = [16, 17]
+MEMBER_POINTS = "points_3D_smoothed.npy"   # a member's own smoothed 3D points
+AXIS_ANGLE_BINS = [0, 10, 20, 40, 90]      # deg between body axis and epipolar plane
 # Figure: categorical slots 1-3 in fixed order (validated: CVD dE >= 9.2);
 # slot 3 sits under 3:1 on the surface, so every series is also labelled.
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
@@ -112,10 +129,16 @@ def load_run(pred_dir):
     with h5py.File(analysis, "r") as f:
         run = {"frames": f["frame_index"][:], "points": f["points_3D"][:],
                "angles": {k: f[v][:] for k, v in ANGLES.items() if v in f}}
+    run["body_mm"] = float(np.nanmedian(np.linalg.norm(
+        run["points"][:, HEAD_TAIL[1]] - run["points"][:, HEAD_TAIL[0]], axis=-1))) * 1000
     run["rigidity"] = float("nan")
     smoothed = os.path.join(pred_dir, SMOOTHED_NAME)
     if os.path.isfile(smoothed):
-        run["rigidity"] = rigidity(np.load(smoothed))[0]
+        run["ensemble_points"] = np.load(smoothed)
+        run["rigidity"] = rigidity(run["ensemble_points"])[0]
+    run["members"] = {os.path.basename(d): np.load(os.path.join(d, MEMBER_POINTS))
+                      for d in sorted(glob.glob(os.path.join(pred_dir, "*")))
+                      if os.path.isfile(os.path.join(d, MEMBER_POINTS))}
     raw = os.path.join(pred_dir, RAW_NAME)
     if os.path.isfile(raw):
         run["rigidity_raw"] = rigidity(np.load(raw))[0]
@@ -168,6 +191,63 @@ def compare(pair, ref):
     return out
 
 
+def lab_camera_centers(calibration):
+    """Camera centres in the frame the 3D points live in: Triangulator
+    rotates every triangulated point by rotation_matrix."""
+    with h5py.File(calibration, "r") as f:
+        R = f["rotation_matrix"][:].T
+        centers = f["camera_centers"][:].T
+    return (R @ centers.T).T
+
+
+def axis_angle_to_epipolar_plane(points, centers):
+    """Per frame, degrees between the body axis (tail -> head) and the plane
+    through the body centre and the two cameras: 0 = the axis lies in it,
+    where two views pin depth along the axis least."""
+    tail, head = points[:, HEAD_TAIL[0]], points[:, HEAD_TAIL[1]]
+    centre = (tail + head) / 2
+    axis = head - tail
+    axis /= np.linalg.norm(axis, axis=-1, keepdims=True)
+    normal = np.cross(centers[0] - centre, centers[1] - centre)
+    normal /= np.linalg.norm(normal, axis=-1, keepdims=True)
+    return np.degrees(np.arcsin(np.clip(np.abs(np.sum(axis * normal, axis=-1)), 0, 1)))
+
+
+def body_geometry(pair, ref, centers):
+    """Per frame: axis angle (from the reference's body), head/tail error
+    and |body length error| of the pair, in mm."""
+    ip, ir = aligned(pair, ref)
+    p, r = pair["points"][ip], ref["points"][ir]
+    err = np.linalg.norm(p[:, HEAD_TAIL] - r[:, HEAD_TAIL], axis=-1).mean(axis=1) * 1000
+    length = lambda x: np.linalg.norm(x[:, HEAD_TAIL[1]] - x[:, HEAD_TAIL[0]], axis=-1)
+    return {"angle": axis_angle_to_epipolar_plane(r, centers), "head_tail_mm": err,
+            "length_err_mm": np.abs(length(p) - length(r)) * 1000}
+
+
+# Left wing + hinge <-> right wing + hinge, for comparing points whose wing
+# labels the analysis has not reconciled yet.
+WING_EXCHANGE = list(range(8, 16)) + list(range(0, 8)) + HEAD_TAIL
+
+
+def member_distances(pair, ref):
+    """{member or 'ensemble': per-frame mean 3D distance (mm) to the
+    reference}, on the points before the analysis -- the only form a member's
+    output has. Both cover the cut's box frames, so they align by index. Wing
+    labels are not reconciled before the analysis, so each frame is scored
+    the way round that fits: a swap is the analysis's to fix, not an error of
+    the geometry."""
+    gt = ref.get("ensemble_points")
+    if gt is None or pair.get("ensemble_points") is None:
+        return {}
+    out = {}
+    for name, pts in [("ensemble", pair["ensemble_points"])] + list(pair["members"].items()):
+        if pts.shape == gt.shape:
+            keep = np.linalg.norm(pts - gt, axis=-1).mean(axis=1)
+            exchanged = np.linalg.norm(pts[:, WING_EXCHANGE] - gt, axis=-1).mean(axis=1)
+            out[name] = np.fmin(keep, exchanged) * 1000
+    return out
+
+
 def stats(values):
     v = np.asarray(values, dtype=float).ravel()
     v = v[~np.isnan(v)]
@@ -206,12 +286,12 @@ def fmt(x, nd=3):
 
 
 def write_report(path, experiment, pooled, per_movie, between, selection,
-                 missing, pairs):
+                 missing, pairs, reference_label, members, geometry):
     L = [f"# Simulated 2-camera rig vs the 4-camera reference: {experiment}", "",
          "Each (bottom, side) pair was cut from the same frames as the all_cams "
          "reference and predicted as a 2-camera movie. Distances are to the "
-         "4-camera ensemble, which is not ground truth (about 0.09 mm itself on "
-         "held-out frames).", ""]
+         f"4-camera ensemble `{reference_label}`, which is not ground truth "
+         "(about 0.09 mm itself on held-out frames).", ""]
     if missing:
         L += ["Not predicted yet (left out): " + ", ".join(missing), ""]
     L += ["## 3D distance to the reference, all movies pooled (mm)", "",
@@ -237,17 +317,49 @@ def write_report(path, experiment, pooled, per_movie, between, selection,
             for k in ANGLES) + " |")
     L += ["", "## Per movie", "",
           "| movie | pair | frames | all median mm | all p95 mm | swapped | NaN "
-          "frames | rigidity pair | rigidity reference |",
-          "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+          "frames | rigidity pair | rigidity reference | body mm (ref) | body off % "
+          "| axis angle deg |",
+          "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     for row in per_movie:
         L.append(f"| {row['movie']} | {row['pair']} | {row['n_frames']} | "
                  f"{fmt(row['all_median_mm'])} | {fmt(row['all_p95_mm'])} | "
                  f"{row['swapped_frames']} | {row['nan_frames']} | "
                  f"{fmt(row['rigidity_pair'] * 1e6, 1)} | "
-                 f"{fmt(row['rigidity_ref'] * 1e6, 1)} |")
+                 f"{fmt(row['rigidity_ref'] * 1e6, 1)} | "
+                 f"{fmt(row['body_mm_pair'], 2)} ({fmt(row['body_mm_ref'], 2)}) | "
+                 f"{row['body_dev_pct']:+.1f} | {fmt(row['axis_angle_median'], 0)} |")
     L += ["", "Rigidity is the pipeline's own score (mean std of the wing edge "
           "lengths, µm; lower is steadier), which the ensemble selector "
-          "minimises -- necessary, not sufficient.", ""]
+          "minimises -- necessary, not sufficient. Body: the fly's median "
+          "tail-to-head length, against the reference's for the same movie "
+          "(check_body_length.py flags beyond 6 %). Axis angle: median angle "
+          "between the body axis and the plane through the two cameras.", ""]
+    if members:
+        names = ["ensemble"] + sorted({n for m in members.values() for n in m} - {"ensemble"})
+        L += ["## Does the ensemble beat its members? (mm, mean over joints, "
+              "median / p95, all movies pooled)", "",
+              "Each member's own smoothed 3D points against the reference, and the "
+              "ensemble's, both before the analysis step.", "",
+              "| | " + " | ".join(pairs) + " |", "|---|" + "---:|" * len(pairs)]
+        for n in names:
+            L.append(f"| {n} | " + " | ".join(
+                f"{fmt(members[p][n]['median'])} / {fmt(members[p][n]['p95'])}"
+                if n in members.get(p, {}) else "–" for p in pairs) + " |")
+        L.append("")
+    if geometry:
+        L += ["## Is the body worst when its axis lies near the cameras' plane?", "",
+              "Angle between the body axis (from the reference) and the plane "
+              "through the body and the pair's two cameras. Head/tail: mean 3D "
+              "error of the two body points; length: |error| of the body "
+              "length. All pairs and movies pooled.", "",
+              "| axis angle | share of frames | head/tail median mm | head/tail p95 mm "
+              "| length error median mm | length error p95 mm |",
+              "|---|---:|---:|---:|---:|---:|"]
+        for row in geometry:
+            L.append(f"| {row['bin']} | {fmt(row['share_pct'], 1)}% | "
+                     f"{fmt(row['head_tail']['median'])} | {fmt(row['head_tail']['p95'])} | "
+                     f"{fmt(row['length']['median'])} | {fmt(row['length']['p95'])} |")
+        L.append("")
     if between:
         L += ["## The pairs against each other, all movies pooled (mm, all joints)",
               "", "| pairs | median | p95 |", "|---|---:|---:|"]
@@ -255,14 +367,14 @@ def write_report(path, experiment, pooled, per_movie, between, selection,
             L.append(f"| {a} vs {b} | {fmt(s['median'])} | {fmt(s['p95'])} |")
         L.append("")
     if selection:
-        members = sorted({m for sel in selection.values() for m in sel})
+        picked = sorted({m for sel in selection.values() for m in sel})
         L += ["## Which members the ensemble picked (share of frames, averaged "
               "over movies and joint groups)", "",
-              "| subset | " + " | ".join(members) + " |",
-              "|---|" + "---:|" * len(members)]
+              "| subset | " + " | ".join(picked) + " |",
+              "|---|" + "---:|" * len(picked)]
         for subset, sel in selection.items():
             L.append(f"| {subset} | " + " | ".join(
-                fmt(sel.get(m), 2) if m in sel else "–" for m in members) + " |")
+                fmt(sel.get(m), 2) if m in sel else "–" for m in picked) + " |")
         L.append("")
     with open(path, "w") as f:
         f.write("\n".join(L))
@@ -315,6 +427,44 @@ def make_figure(path, experiment, pooled, pairs):
     plt.close(fig)
 
 
+def make_geometry_figure(path, geometry_by_pair, pairs):
+    """Head/tail error by axis-angle bin: per pair a dot at the median and a
+    line up to the p95."""
+    bins = [f"{a}-{b}" for a, b in zip(AXIS_ANGLE_BINS[:-1], AXIS_ANGLE_BINS[1:])]
+    fig, ax = plt.subplots(figsize=(7.5, 4.6), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    width = 0.8 / max(len(pairs), 1)
+    for i, pair in enumerate(pairs[:len(SERIES_COLORS)]):
+        labelled = False                # a pair may have no frames in a bin
+        for j, st in enumerate(geometry_by_pair[pair]):
+            if st["n"] == 0:
+                continue
+            x = j + (i - (len(pairs) - 1) / 2) * width
+            ax.plot([x, x], [st["median"], st["p95"]], color=SERIES_COLORS[i], lw=2,
+                    solid_capstyle="round", zorder=2)
+            ax.plot(x, st["median"], "o", ms=8, color=SERIES_COLORS[i], mec=SURFACE,
+                    mew=2, zorder=3, label=None if labelled else pair)
+            labelled = True
+    ax.set_xticks(range(len(bins)))
+    ax.set_xticklabels([f"{b} deg" for b in bins], color=INK, fontsize=9)
+    ax.set_xlabel("angle between the body axis and the plane through the two cameras",
+                  color=INK_2, fontsize=9)
+    ax.set_title("Head/tail 3D error vs body orientation (mm)", color=INK,
+                 fontsize=11, loc="left")
+    ax.set_ylim(bottom=0)
+    ax.grid(axis="y", color=GRID, lw=0.8)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors=INK_2, length=0)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.legend(frameon=False, fontsize=9, labelcolor=INK,
+              title="pair (dot = median, line to p95)", title_fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -322,6 +472,10 @@ def main():
                                     "inference_datasets/simulated/shalev/21to40")
     ap.add_argument("--predict-output", default=os.path.join(REPO_ROOT, "predict_output"))
     ap.add_argument("--out", help="default: comparison_data/sim_<experiment>")
+    ap.add_argument("--reference-run",
+                    help="a predict run dir holding the 4-camera prediction of the "
+                         "same cut movies, to stand in for the truth instead of "
+                         "the all_cams subset's own run")
     args = ap.parse_args()
 
     cut_dir = os.path.abspath(args.cut_dir)
@@ -334,15 +488,31 @@ def main():
     runs, missing = {}, []
     for movie, subsets in sorted(movies.items()):
         for subset, movie_dir in sorted(subsets.items()):
+            if subset == REFERENCE_SUBSET and args.reference_run:
+                continue                    # the reference comes from there
             run = load_run(prediction_dir(args.predict_output, experiment,
                                           subset, movie_dir))
             if run is None:
                 missing.append(f"{movie}/{subset}")
             else:
                 runs[(movie, subset)] = run
+    reference_label = run_name(experiment, REFERENCE_SUBSET)
+    if args.reference_run:
+        reference_label = os.path.basename(os.path.normpath(args.reference_run))
+        for movie, subsets in movies.items():
+            if REFERENCE_SUBSET in subsets:
+                h5 = find_movie_h5(subsets[REFERENCE_SUBSET])
+                run = load_run(os.path.join(args.reference_run,
+                                            os.path.splitext(os.path.basename(h5))[0]))
+                if run is None:
+                    missing.append(f"{movie}/{reference_label}")
+                else:
+                    runs[(movie, REFERENCE_SUBSET)] = run
 
     pairs = sorted({s for (_, s) in runs if s != REFERENCE_SUBSET})
     per_pair, per_movie, between_frames = {p: [] for p in pairs}, [], {}
+    member_frames = {p: {} for p in pairs}
+    geometry_frames = {p: [] for p in pairs}
     for movie in sorted(movies):
         ref = runs.get((movie, REFERENCE_SUBSET))
         if ref is None:
@@ -352,6 +522,13 @@ def main():
             c = compare(runs[(movie, pair)], ref)
             per_pair[pair].append(c)
             s = summarize([c])
+            for name, d in member_distances(runs[(movie, pair)], ref).items():
+                member_frames[pair].setdefault(name, []).append(d)
+            centers = lab_camera_centers(os.path.join(
+                os.path.dirname(movies[movie][pair]), "calibration.h5"))
+            geo = body_geometry(runs[(movie, pair)], ref, centers)
+            geometry_frames[pair].append(geo)
+            body_pair, body_ref = runs[(movie, pair)]["body_mm"], ref["body_mm"]
             per_movie.append({
                 "movie": movie, "pair": pair, "n_frames": c["n_frames"],
                 "all_median_mm": s["groups"]["all"]["median"],
@@ -363,7 +540,10 @@ def main():
                 "swapped_frames": s["swapped_frames"], "nan_frames": c["nan_frames"],
                 "ref_nan_frames": c["ref_nan_frames"],
                 "rigidity_pair": runs[(movie, pair)]["rigidity"],
-                "rigidity_ref": ref["rigidity"]})
+                "rigidity_ref": ref["rigidity"],
+                "body_mm_pair": body_pair, "body_mm_ref": body_ref,
+                "body_dev_pct": 100.0 * (body_pair - body_ref) / body_ref,
+                "axis_angle_median": float(np.nanmedian(geo["angle"]))})
         for i, a in enumerate(here):
             for b in here[i + 1:]:
                 ia, ib = aligned(runs[(movie, a)], runs[(movie, b)])
@@ -377,14 +557,31 @@ def main():
                  + (f" (missing: {', '.join(missing)})" if missing else ""))
     pooled = {p: summarize(per_pair[p]) for p in pairs}
     between = {k: stats(np.concatenate(v)) for k, v in between_frames.items()}
+    members = {p: {n: stats(np.concatenate(v)) for n, v in member_frames[p].items()}
+               for p in pairs if member_frames[p]}
+    edges = list(zip(AXIS_ANGLE_BINS[:-1], AXIS_ANGLE_BINS[1:]))
+
+    def binned(geos, key):
+        angle = np.concatenate([g["angle"] for g in geos])
+        value = np.concatenate([g[key] for g in geos])
+        return angle, value, [stats(value[(angle >= a) & (angle < b)]) for a, b in edges]
+
+    all_geo = [g for p in pairs for g in geometry_frames[p]]
+    angle, _, head_tail = binned(all_geo, "head_tail_mm")
+    _, _, length = binned(all_geo, "length_err_mm")
+    geometry = [{"bin": f"{a}-{b} deg",
+                 "share_pct": 100.0 * float(((angle >= a) & (angle < b)).mean()),
+                 "head_tail": head_tail[i], "length": length[i]}
+                for i, (a, b) in enumerate(edges)]
+    geometry_by_pair = {p: binned(geometry_frames[p], "head_tail_mm")[2] for p in pairs}
     selection = {}
     for subset in pairs + [REFERENCE_SUBSET]:
         sels = [r["selection"] for (m, s), r in runs.items()
                 if s == subset and "selection" in r]
         if sels:
-            members = sorted({k for sel in sels for k in sel})
+            picked = sorted({k for sel in sels for k in sel})
             selection[subset] = {k: float(np.mean([sel.get(k, 0.0) for sel in sels]))
-                                 for k in members}
+                                 for k in picked}
 
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "per_movie.csv"), "w", newline="") as f:
@@ -392,16 +589,20 @@ def main():
         w.writeheader()
         w.writerows(per_movie)
     with open(os.path.join(out, "summary.json"), "w") as f:
-        json.dump({"experiment": experiment, "reference": REFERENCE_SUBSET,
-                   "pooled": pooled, "missing": missing,
+        json.dump({"experiment": experiment, "reference": reference_label,
+                   "pooled": pooled, "missing": missing, "members": members,
+                   "body_vs_axis_angle": geometry,
                    "between_pairs": {f"{a} vs {b}": s for (a, b), s in between.items()},
                    "selection": selection}, f, indent=2)
     write_report(os.path.join(out, "report.md"), experiment, pooled, per_movie,
-                 between, selection, missing, pairs)
+                 between, selection, missing, pairs, reference_label, members,
+                 geometry)
     make_figure(os.path.join(out, "fig_pairs_vs_reference.png"), experiment,
                 pooled, pairs)
+    make_geometry_figure(os.path.join(out, "fig_body_vs_axis_angle.png"),
+                         geometry_by_pair, pairs)
     print(f"wrote {os.path.relpath(out, REPO_ROOT)}/ (per_movie.csv, summary.json, "
-          f"report.md, fig_pairs_vs_reference.png): {len(per_movie)} (movie, "
+          f"report.md, 2 figures): {len(per_movie)} (movie, "
           f"pair) comparisons"
           + (f"; not predicted yet: {', '.join(missing)}" if missing else ""))
 

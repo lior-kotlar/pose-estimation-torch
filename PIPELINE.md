@@ -413,9 +413,10 @@ To re-run only failed tasks: `sbatch --array=12,45,108%16 ...`.
 
 ### 2c. 2-camera movies, and simulating them from 4-camera ones
 
-The 2-camera models take the bottom camera plus one side camera. They run on a
-real 2-camera rig's movies, and on every (bottom, side) pair of a 4-camera
-movie as ensemble members.
+The 2-camera models take the bottom camera plus one side camera. They run on
+2-camera movies -- a real 2-camera rig's, or the simulated ones below -- and on
+a 4-camera movie when their `model.json` chooses them for it (`"movie cameras"`,
+see `prediction_models/README.md`), once per (bottom, side) pair.
 
 **A real 2-camera rig** goes through prep like any other, declared:
 
@@ -483,9 +484,29 @@ and `per_movie.csv`. It reports:
 - how far the pairs land from each other;
 - which ensemble members each subset used.
 
-The reference is the 4-camera ensemble, not ground truth. The `sim_` outputs
-are for evaluation only and are never delivered. A source without a bottom
-camera (the old side-camera rig) is refused.
+The reference is the 4-camera ensemble, not ground truth. Which 4-camera
+prediction stands in for the truth is chosen with `--reference-run`:
+
+- the default is `all_cams`'s own run, which shares models with the pairs and
+  so flatters them;
+- the deployed models' prediction of the same `all_cams` movies is independent
+  of the pairs.
+
+The report adds two analyses:
+
+- each ensemble member scored alone, beside the ensemble;
+- the body error binned by the angle between the body axis and the cameras'
+  plane.
+
+The `sim_` outputs are for evaluation only and are never delivered. A source
+without a bottom camera (the old side-camera rig) is refused.
+
+**What the Roni pilot showed** (4 movies × 3 pairs):
+
+- **Points:** the pairs landed 0.06-0.09 mm (median) from the 4-camera result.
+- **Body orientation:** two of the twelve runs had the body tilted 4-8° for the
+  whole flight, with the fly about 10% short.
+- **The check:** `check_body_length.py` flags exactly those two runs.
 
 ---
 
@@ -589,6 +610,12 @@ sbatch --array=1-$(wc -l < <manifest>) sbatch_files/round_array.sh <manifest> \
 # connection to open). Written automatically by predict; run it standalone to
 # rebuild one, or a whole run at once.
 .env/bin/python code/plot_flight_viewer.py <dir>
+
+# Is the fly the right length? A movie whose tail-to-head length is far from
+# the other movies' (or from a reference run's same movie) had its body axis
+# put in the wrong place, usually for the whole flight. Reads only the analysis
+# h5s; exits 1 when it flags a movie.
+.env/bin/python code/check_body_length.py predict_output/<run> [--reference-run predict_output/<other run>]
 
 # Shrink an h5 to its first N frames (fast iteration)
 .env/bin/python code/truncate_h5_movie.py <movie.h5> 1500
