@@ -500,12 +500,14 @@ pair, all 4 cameras, the side triad), with `code/evaluate_on_heldout.py`. After 
 prediction ensemble with one command:
 
 ```bash
-python code/register_prediction_model.py --name per_cam_jsd \
-    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_Sep 27"
+python code/register_prediction_model.py --name per_cam_jsd_v2 \
+    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_JSD_Sep 29" --movie-cameras 2 3 4
 ```
 
 This copies its `best_model.pt` into `prediction_models/<name>/` and writes a
-`model.json` (inferring the served type from the train config). Training in
+`model.json` (inferring the served type from the train config). `--movie-cameras`
+names the kinds of movie it is chosen for; `prediction_models/README.md` lists the
+deployed set. Training in
 `train_output/` never affects prediction until you register a model this way.
 
 ---

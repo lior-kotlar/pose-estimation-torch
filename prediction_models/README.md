@@ -103,12 +103,29 @@ The weights are **git-ignored**; only `model.json` (and this README) are tracked
 so the set of models and their types is versioned while the large binaries live
 on the lab filesystem.
 
+## The deployed set, and the retired one
+
+Since 2026-10-02 this folder holds the 16 `*_v2` members: models trained on the
+frozen train/val/test split, each for 7000 steps, and scored on its test frames
+(README section 7). Their `"movie cameras"` give every kind of movie 8 members:
+
+| movie | members |
+|---|---|
+| 4-camera | `per_cam_jsd_dil3_v2`, `per_cam_jsd_v2`, `all_cams_4cam_{dil3,maxfusion,base,jsd}_v2`, `all_cams_2cam_{dil3,jsd}_v2` |
+| 3-camera | `per_cam_{jsd_dil3,jsd,dil3,unet}_v2`, `all_cams_3cam_{dil3,maxfusion,jsd,base}_v2` |
+| 2-camera | `per_cam_{jsd_dil3,jsd,dil3,unet}_v2`, `all_cams_2cam_{jsd,dil3,maxfusion,base}_v2` |
+
+The members they replaced are in `prediction_models_retired/`, under the names
+the movies predicted before then hold in their member folders (several of those
+names, e.g. `per_cam_dil3`, meant a different model than the same name without
+`_v2` would now). Nothing reads that folder for prediction.
+
 ## Add a model (graduate a trained model)
 
 ```bash
 # infer the type from a finished training run:
-python code/register_prediction_model.py --name per_cam_dil3 \
-    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_DIL3_Jul 02"
+python code/register_prediction_model.py --name per_cam_dil3_v2 \
+    --from "train_output/debug_outputs/MODEL_PER_CAM_PER_WING_DIL3_Sep 30" --movie-cameras 2 3
 
 # or specify weights + type explicitly:
 python code/register_prediction_model.py --name my_model \
@@ -135,5 +152,6 @@ sbatch predict_array.sh <manifest> predict_configurations/config1.json
 ```
 
 `config1.json` carries `"prediction models directory": "prediction_models"` and
-`"max ensemble models"` (caps the selector's per-window model-subset search, which
-grows ~2^M in the number of members).
+`"max ensemble models"`: the most members the selector combines at once (3), so
+its per-window search grows with the number of members M as C(M,1)+C(M,2)+C(M,3)
+-- 92 subsets for the 8 members a movie gets -- rather than 2^M.

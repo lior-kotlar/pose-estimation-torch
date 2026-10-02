@@ -1,0 +1,11 @@
+{
+    "model type": "PER_WING_ALL_CAMS",
+    "num cameras": 3,
+    "enabled": true,
+    "movie cameras": [
+        3
+    ],
+    "predict again 3D consistency": 0,
+    "use reprojected masks": 0,
+    "source": "train_output/debug_outputs/ALL_CAMS_PER_WING_3CAM_BASE_Sep 28"
+}
