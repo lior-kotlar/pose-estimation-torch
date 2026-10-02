@@ -230,7 +230,7 @@ prediction_models_retired/**/*.pt
 # staged, not-yet-deployed members (register_prediction_model.py
 # --prediction-models-dir); deploying into prediction_models/ is what is tracked
 prediction_models_candidates/
-comparison_data/manipulated_05_12_22.hdf5
+model_evaluation/hull_comparison/manipulated_05_12_22.hdf5
 manifests/
 .claudeignore
 # Paper figures are their own private git repository (see paper_figures/README.md),

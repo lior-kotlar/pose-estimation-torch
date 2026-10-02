@@ -53,7 +53,7 @@ of it, so the eval input cannot drift from the training input.
 
     sbatch -J eval_heldout -p salmon,dogfish,catfish --gres=gpu:1 --time=4:00:00 \\
         sbatch_files/sbatch_configurable.sh code/evaluate_on_heldout.py \\
-        --models "train_output/debug_outputs/<run>" ... --out comparison_data/heldout_2cam
+        --models "train_output/debug_outputs/<run>" ... --out model_evaluation/heldout_test_frames
 
 Needs a batch node's memory (the Preprocessor loads the whole labelled set).
 """

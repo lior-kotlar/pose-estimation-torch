@@ -496,8 +496,10 @@ and a 2-camera rig must name it there, because with two cameras the positions
 can't tell which one is below.
 
 Score models on the split's 41 test frames, per camera setting (a bottom + side
-pair, all 4 cameras, the side triad), with `code/evaluate_on_heldout.py`. After training one, graduate it into the
-prediction ensemble with one command:
+pair, all 4 cameras, the side triad), with `code/evaluate_on_heldout.py`. The
+scores of the deployed models, and the tests that chose the ensembles, are in
+`model_evaluation/` (its README says what each folder holds). After training one,
+graduate it into the prediction ensemble with one command:
 
 ```bash
 python code/register_prediction_model.py --name per_cam_jsd_v2 \

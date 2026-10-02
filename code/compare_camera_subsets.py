@@ -471,7 +471,7 @@ def main():
     ap.add_argument("cut_dir", help="one experiment's cut subsets, e.g. "
                                     "inference_datasets/simulated/shalev/21to40")
     ap.add_argument("--predict-output", default=os.path.join(REPO_ROOT, "predict_output"))
-    ap.add_argument("--out", help="default: comparison_data/sim_<experiment>")
+    ap.add_argument("--out", help="default: model_evaluation/simulated_2camera_movies_<experiment>")
     ap.add_argument("--reference-run",
                     help="a predict run dir holding the 4-camera prediction of the "
                          "same cut movies, to stand in for the truth instead of "
@@ -482,8 +482,8 @@ def main():
     movies, experiment = find_movies(cut_dir)
     if not movies:
         sys.exit(f"no cut movies under {cut_dir}")
-    out = args.out or os.path.join(REPO_ROOT, "comparison_data",
-                                   run_name(experiment, "").rstrip("_"))
+    out = args.out or os.path.join(REPO_ROOT, "model_evaluation", "simulated_2camera_movies_"
+                                   + experiment.replace(os.sep, "_"))
 
     runs, missing = {}, []
     for movie, subsets in sorted(movies.items()):

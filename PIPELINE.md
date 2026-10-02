@@ -474,7 +474,7 @@ PREDICT_SBATCH_ARGS="-p catfish,salmon --gres=gpu:1 --mem=96g --cpus-per-task=12
 ```
 
 Predictions land in `predict_output/sim_<experiment>_<subset>/`. The comparison
-goes to `comparison_data/sim_<experiment>/`, with `report.md`, `summary.json`
+goes to `model_evaluation/simulated_2camera_movies_<experiment>/`, with `report.md`, `summary.json`
 and `per_movie.csv`. It reports:
 
 - 3D distance per joint group;

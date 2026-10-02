@@ -15,7 +15,7 @@ import math
 from prediction_code_lior.extract_flight_data import FlightAnalysis
 from scipy.interpolate import CubicSpline
 
-COMPARISON_DATA_DIRECTORY = os.path.abspath("./comparison_data/comparison_output")
+COMPARISON_DATA_DIRECTORY = os.path.abspath("./model_evaluation/hull_comparison")
 
 def row_wize_dot(arr1, arr2):
     dot = np.sum(arr1 * arr2, axis=1)
@@ -869,7 +869,7 @@ def smoothness_score(array):
 
 def compare_psi_smoothness(data_dir):
     
-    Hull_hdf5_path = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/comparison_data/manipulated_05_12_22.hdf5"
+    Hull_hdf5_path = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/model_evaluation/hull_comparison/manipulated_05_12_22.hdf5"
     all_psi_wingbits_my = []
     all_psi_wingbits_Hull = []
     all_phi_wingbit = []
@@ -1380,7 +1380,7 @@ if __name__ == "__main__":
         exit(1)
     compare_psi_smoothness(sys.argv[1])
     # my_data_dir = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/predict_output/debug_outputs/movie_1_10_4898_ds_3tc_7tj"
-    # hull_hdf5_path = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/comparison_data/manipulated_05_12_22.hdf5"
+    # hull_hdf5_path = fr"/cs/labs/tsevi/lior.kotlar/pose-estimation-torch/model_evaluation/hull_comparison/manipulated_05_12_22.hdf5"
     # movie_id = "movie_1_10_4898_ds_3tc_7tj"
     # extract_and_compare_roni_psi_single(my_data_dir, hull_hdf5_path, movie_id)
 
