@@ -1041,6 +1041,10 @@ class Visualizer:
         frames_from_box = frames_from_box_and_reprojected_points[: -first_analized_frame] if first_analized_frame > 0 else frames_from_box_and_reprojected_points
         box = 1 - box[frames_from_box][:, channel_1]
         box = add_nan_frames(box, first_analized_frame)
+        # Only the frames being drawn are loaded, so a frame's image sits at its offset from
+        # the first of them: the frame itself for a whole movie, not for a piece of one
+        # (code/render_video_pieces.py). save_frames must therefore be contiguous.
+        box_start = int(frames_from_box[0]) if len(frames_from_box) else 0
         # Assuming points is your (N, M, 3) array
         points = Visualizer.get_data_from_h5(h5_path_movie_path, 'points_3D')
         num_frames = len(points)
@@ -1240,7 +1244,7 @@ class Visualizer:
                 analysis_frame = frame + first_analized_frame
                 frame_in_box = analysis_frame + first_analized_frame
                 ax.cla()
-                image = box[analysis_frame, i].T
+                image = box[analysis_frame - box_start, i].T
                 head_tail_pnts = points_2D[analysis_frame, i, [-2, -1], :]
                 cm = np.mean(head_tail_pnts, axis=0)
                 shift_yx = np.array([192/2 - cm[1], 192/2 - cm[0]])
