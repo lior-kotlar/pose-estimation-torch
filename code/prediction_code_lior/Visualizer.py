@@ -1252,7 +1252,9 @@ class Visualizer:
                 ax.imshow(image, cmap='gray', vmin=0, vmax=1)
                 for j in range(num_points):
                     if j not in [7, 15]:
-                        point = points_2D[analysis_frame, i, j, :]
+                        # a copy: shifting the array itself would shift these points again
+                        # whenever a frame is drawn twice (an animation draws its first frame twice)
+                        point = points_2D[analysis_frame, i, j, :].copy()
                         point[0] += shift_yx[1]
                         point[1] += shift_yx[0]
                         ax.scatter(point[0],  point[1], color=color_array[j], s=9)
