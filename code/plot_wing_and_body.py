@@ -169,7 +169,8 @@ def perturbation_info(h5):
 
     None means the h5 records no declaration at all -- which is different from
     a declaration saying this movie is an unperturbed CONTROL (status
-    "control"), and different again from one saying the status is not known.
+    "control") or from an experiment with no pulse at all (status "none"), and
+    different again from one saying the status is not known.
 
     Older h5s carry only the original datasets; their values are back-filled
     here so a file written before the four-state contract still reads correctly.
@@ -442,6 +443,8 @@ def pert_window_text(pert, frame_rate=None, short=False):
     status = pert.get("status", "unknown")
     if status == "control":
         return "CONTROL - declared unperturbed"
+    if status == "none":
+        return ""                   # no pulse in the experiment: no pulse line; the lighting line says what happened
     if status != "perturbed":
         return "PERTURBATION STATUS UNKNOWN"
 

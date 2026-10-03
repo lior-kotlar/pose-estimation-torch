@@ -917,6 +917,8 @@ class Visualizer:
         running or has ended -- neither is known."""
         if pert.get("status") == "control":
             return "CONTROL (no perturbation)"
+        if pert.get("status") == "none":
+            return None                 # no pulse in the experiment: no line at all
         if pert.get("status") != "perturbed" or pert.get("onset_frame") is None:
             return "PERTURBATION STATUS UNKNOWN"
         onset = pert["onset_frame"]
@@ -1281,8 +1283,10 @@ class Visualizer:
                 if perturbation is not None:
                     if _pert_banner:
                         lines.insert(0, _pert_banner)
-                    lines.append(Visualizer._perturbation_label(
-                        disp_frame, perturbation, frame_rate))
+                    pulse_line = Visualizer._perturbation_label(
+                        disp_frame, perturbation, frame_rate)
+                    if pulse_line:
+                        lines.append(pulse_line)
                     # The lighting line -- and the counter box itself turns dark on
                     # every dark frame, so the light-off is visible at a glance.
                     light_line, is_dark = Visualizer._lighting_label(

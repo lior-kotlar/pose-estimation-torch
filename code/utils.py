@@ -1128,12 +1128,18 @@ PERT_AFTER = 2
 # PERT_UNKNOWN: "we know there was no perturbation" is a positive fact and a
 # usable experimental control, while "unknown" is an absence of knowledge.
 PERT_CONTROL = 3
+# A movie from an experiment with NO magnetic pulse at all (no magnet, no coil),
+# e.g. a darkening-only experiment. Also a positive fact, but NOT a control: the
+# flies may be manipulated (amitai_dark: left haltere cut), so they must never be
+# called "control". Products show no pulse line for it; the lighting line says
+# what happened.
+PERT_NONE = 4
 PERT_STATE_NAMES = {PERT_UNKNOWN: "unknown", PERT_BEFORE: "before",
                     PERT_DURING: "during", PERT_AFTER: "after",
-                    PERT_CONTROL: "control"}
+                    PERT_CONTROL: "control", PERT_NONE: "none"}
 
-# The three per-movie statuses a declaration can assign.
-PERT_STATUSES = ("perturbed", "control", "unknown")
+# The four per-movie statuses a declaration can assign.
+PERT_STATUSES = ("perturbed", "control", "unknown", "none")
 
 # Applied when a movie is known to be perturbed but the log never recorded how
 # long the pulse lasted. Source: Noam Tsory's MSc thesis, section 4.1.3, which
@@ -1208,7 +1214,7 @@ def load_perturbation(movie_path, frame_rate=None):
 
     Returns None only when no perturbation.json applies (absent, or unreadable).
     Whenever a declaration is found a dict comes back -- including for a movie
-    the declaration marks as a CONTROL or as UNKNOWN. That is what lets one
+    the declaration marks as a CONTROL, as NONE (no pulse) or as UNKNOWN. That is what lets one
     experiment hold both perturbed and unperturbed movies: `pert is not None`
     means "declared", and `pert_is_perturbed(pert)` means "perturbed".
 
@@ -1455,9 +1461,10 @@ def perturbation_frame_labels(frame_numbers, pert, trigger_relative=True):
     DURING is the half-open interval [onset, end): `end_frame` is the first
     frame that is AFTER the perturbation. Every product must agree on this.
 
-    A movie declared CONTROL is labelled PERT_CONTROL throughout, and one
-    declared UNKNOWN is PERT_UNKNOWN throughout -- neither has a window, so
-    neither has boundaries to index.
+    A movie declared CONTROL is labelled PERT_CONTROL throughout, one declared
+    NONE (no pulse in the experiment) PERT_NONE, and one declared UNKNOWN is
+    PERT_UNKNOWN throughout -- none of them has a window, so none has
+    boundaries to index.
 
     `trigger_relative=False` says the caller could not establish the trigger, so
     these frame numbers are box indices and the window cannot be located in
@@ -1472,6 +1479,8 @@ def perturbation_frame_labels(frame_numbers, pert, trigger_relative=True):
     f = np.asarray(frame_numbers)
     if pert.get("status") == "control":
         return np.full(f.shape, PERT_CONTROL, dtype=np.int8), -1, -1
+    if pert.get("status") == "none":
+        return np.full(f.shape, PERT_NONE, dtype=np.int8), -1, -1
     if (not trigger_relative or pert.get("status") != "perturbed"
             or pert.get("onset_frame") is None):
         return np.full(f.shape, PERT_UNKNOWN, dtype=np.int8), -1, -1

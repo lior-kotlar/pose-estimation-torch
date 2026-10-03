@@ -1246,7 +1246,7 @@ def report_perturbation_coverage(movies: list, dry_run: bool) -> None:
         return
     print("\n===== PERTURBATION COVERAGE =====")
     n_have = n_unreadable = 0
-    n_control = n_status_unknown = n_undeclared = 0
+    n_control = n_none = n_status_unknown = n_undeclared = 0
     late, early = [], []
     onsets = {}                      # onset -> count, so a per-part file reports both
     regimes = {}                     # lighting regime -> count
@@ -1267,6 +1267,9 @@ def report_perturbation_coverage(movies: list, dry_run: bool) -> None:
         regimes[regime] = regimes.get(regime, 0) + 1
         if pert["status"] == "control":
             n_control += 1
+            continue
+        if pert["status"] == "none":
+            n_none += 1
             continue
         if pert["status"] != "perturbed" or pert["onset_frame"] is None:
             n_status_unknown += 1
@@ -1293,6 +1296,8 @@ def report_perturbation_coverage(movies: list, dry_run: bool) -> None:
     print(f"  declared perturbed : {n_have + len(late) + len(early)} movie(s)")
     if n_control:
         print(f"  declared CONTROL   : {n_control} movie(s) (no perturbation)")
+    if n_none:
+        print(f"  declared NO PULSE  : {n_none} movie(s) (no magnetic pulse in the experiment)")
     if n_status_unknown:
         print(f"  status UNKNOWN     : {n_status_unknown} movie(s)")
     if n_undeclared:
@@ -1734,7 +1739,7 @@ def main() -> None:
                         "Left at 'unknown' the products SAY so rather than "
                         "implying a type that was never recorded.")
     p.add_argument("--perturbation-status", default="perturbed",
-                   choices=("perturbed", "control", "unknown"),
+                   choices=("perturbed", "control", "unknown", "none"),
                    help="the experiment-level default status (default: "
                         "perturbed). Per-movie exceptions go in the movies "
                         "block -- see --perturbation-control-movies.")

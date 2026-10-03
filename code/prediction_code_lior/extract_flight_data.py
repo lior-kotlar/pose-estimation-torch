@@ -2325,6 +2325,7 @@ def write_perturbation_datasets(hdf, frame_index, pert, trigger_relative=True):
       no `perturbation_declared`            nothing was declared for this movie
       declared=1, perturbation=1, status=perturbed   it was perturbed
       declared=1, perturbation=0, status=control     declared UNPERTURBED (a control)
+      declared=1, perturbation=0, status=none        no pulse in the experiment (not a control)
       declared=1, perturbation=0, status=unknown     declared, status not known
     `perturbation` stays a strict 0/1 "there is a window to draw here", because
     every downstream reader branches on its truthiness; the three-way
@@ -2332,7 +2333,7 @@ def write_perturbation_datasets(hdf, frame_index, pert, trigger_relative=True):
 
     Datasets written (frames trigger-relative unless the name says `_index`):
       perturbation_declared      1 -- a declaration applied to this movie
-      perturbation_status        b"perturbed" / b"control" / b"unknown"
+      perturbation_status        b"perturbed" / b"control" / b"none" / b"unknown"
       perturbation               1 only when there is a window
       perturbation_type          e.g. b"roll"; b"unknown" when never stated
       perturbation_type_known    0 when the declaration never named a type
@@ -2350,7 +2351,7 @@ def write_perturbation_datasets(hdf, frame_index, pert, trigger_relative=True):
                                  in these rows and every state is `unknown`
       perturbation_source        b"..." path of the declaration that was applied
       perturbation_movie_key     b"movN" which per-movie entry matched
-      perturbation_state         per frame; see utils.PERT_* (-1 unknown, 3 control)
+      perturbation_state         per frame; see utils.PERT_* (-1 unknown, 3 control, 4 none)
     """
     state, start_idx, end_idx = perturbation_frame_labels(
         frame_index, pert, trigger_relative=trigger_relative)

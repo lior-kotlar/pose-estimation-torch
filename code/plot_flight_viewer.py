@@ -981,8 +981,8 @@ function sceneUpdate(i){
 function pertLine(f){
   const p = P.pert;
   if (!p) return "";
-  if (!p.perturbed) return p.status === "control"
-      ? "CONTROL (no perturbation)" : "PERTURBATION STATUS UNKNOWN";
+  if (!p.perturbed) return p.status === "control" ? "CONTROL (no perturbation)"
+      : p.status === "none" ? "" : "PERTURBATION STATUS UNKNOWN";   /* none: no pulse, no line */
   const rate = P.frame_rate, ms = d => rate ? (d / rate * 1000).toFixed(2) : String(d);
   const tail = p.duration_source === "assumed" ? "  (end assumed)" : "";
   if (f < p.onset) return "PRE  -" + ms(p.onset - f) + " ms";

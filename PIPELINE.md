@@ -232,8 +232,8 @@ Every predicted movie then gets, in its `*_analysis_smoothed.h5`:
 | dataset | meaning |
 |---|---|
 | `perturbation_declared` | 1 — a declaration applied to this movie. **Its absence is how "nothing was declared" is expressed** |
-| `perturbation_status` | `perturbed` / `control` / `unknown` |
-| `perturbation` | 1 only when there is a window to draw; 0 for control and unknown |
+| `perturbation_status` | `perturbed` / `control` / `none` / `unknown` |
+| `perturbation` | 1 only when there is a window to draw; 0 for control, none and unknown |
 | `perturbation_type`, `perturbation_type_known` | e.g. `roll`; `_known` is 0 when the log never named a type |
 | `perturbation_start_frame` | onset, trigger-relative — always known when perturbed |
 | `perturbation_start_index` | row holding the onset, or `-1` if outside this movie |
@@ -245,7 +245,7 @@ Every predicted movie then gets, in its `*_analysis_smoothed.h5`:
 | `perturbation_duration_note` | the declaration's own provenance sentence |
 | `perturbation_frames_trigger_relative` | 0 when the trigger could not be established |
 | `perturbation_source`, `perturbation_movie_key` | which file and which per-movie entry applied |
-| `perturbation_state` | per frame: 0 before, 1 during, 2 after, 3 control, **-1 unknown** |
+| `perturbation_state` | per frame: 0 before, 1 during, 2 after, 3 control, 4 none, **-1 unknown** |
 
 **The four states a reader must be able to tell apart**
 
@@ -254,6 +254,7 @@ Every predicted movie then gets, in its `*_analysis_smoothed.h5`:
 | no `perturbation_declared` | nothing was declared for this movie |
 | `declared=1, perturbation=1, status=perturbed` | it was perturbed |
 | `declared=1, perturbation=0, status=control` | declared **unperturbed** — an experimental control |
+| `declared=1, perturbation=0, status=none` | the experiment has **no pulse at all** (no magnet, no coil) — not a control; products show no pulse line |
 | `declared=1, perturbation=0, status=unknown` | declared, but the status itself is not known |
 
 **Mixed experiments.** One experiment can hold both perturbed and unperturbed
