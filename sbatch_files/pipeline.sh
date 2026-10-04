@@ -28,6 +28,21 @@
 # The -J value becomes both the prep job name (used by logs/%x_%j.out) and
 # the predict-array job name (used to derive the parent run directory).
 #
+# Optional environment, for a caller that submits experiments side by side
+# (the PC's predict round, code/local_reanalysis_server.py); unset, nothing
+# changes:
+#   PIPELINE_RUN_NAME       the run name, when -J has to be something else
+#                           (e.g. one shared name, so --dependency=singleton
+#                           runs these preps one at a time: MATLAB builds
+#                           stall each other)
+#   PIPELINE_MANIFEST       where prep writes the good-movie manifest (the
+#                           default, good_movies_<basename>.txt, is shared by
+#                           every experiment's `1to20` batch)
+#   PIPELINE_ARRAY_ID_FILE  a file to write the predict array's job id into
+#   POSE_PROJECT            the checkout to run (default: the lab's copy)
+# Anything else in the environment (PREDICT_SBATCH_ARGS, DROP_BOX_CACHE,
+# RENDER_BOX_DIR...) reaches the predict array, since sbatch passes it on.
+#
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err
 #SBATCH -p glacier
@@ -63,11 +78,14 @@ usage() {
 [ ! -f "$EASYWAND"   ] && { echo "easyWand mat not found: $EASYWAND" >&2; exit 1; }
 [ ! -f "$PRED_CONFIG" ] && { echo "predict config not found: $PRED_CONFIG" >&2; exit 1; }
 
-cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch
+# POSE_PROJECT runs another checkout of the project (e.g. a branch's worktree);
+# unset, it is the lab's copy as always.
+cd "${POSE_PROJECT:-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch}"
 source .env/bin/activate
 
-RUN_NAME="${SLURM_JOB_NAME:-pipeline}"
+RUN_NAME="${PIPELINE_RUN_NAME:-${SLURM_JOB_NAME:-pipeline}}"
 EXP_NAME=$(basename "$INPUT_DIR")
+MANIFEST="${PIPELINE_MANIFEST:-manifests/good_movies_${EXP_NAME}.txt}"
 TIMINGS_PATH="$(realpath "$INPUT_DIR")/pipeline_timings.csv"
 
 echo "==========================================="
@@ -88,6 +106,9 @@ case "${CAM,,}" in
     none|noflip|skip|-) echo "  flip: SKIPPED (cam='$CAM')"; PREP_ARGS+=(--skip-flip) ;;
     *)                  PREP_ARGS+=(--cam "$CAM") ;;
 esac
+if [ -n "${PIPELINE_MANIFEST:-}" ]; then
+    PREP_ARGS+=(--manifest "$MANIFEST")
+fi
 PREP_ARGS+=("${EXTRA_PREP_ARGS[@]}")
 # An `if` rather than `[ ... ] && echo ...`: under `set -e` the one-liner form
 # survives an empty array only by the &&-list exemption, and would abort the
@@ -98,7 +119,6 @@ fi
 python -u code/process_experiment.py "$INPUT_DIR" "${PREP_ARGS[@]}"
 
 # Step 2 — submit the predict array if a manifest with content exists.
-MANIFEST="manifests/good_movies_${EXP_NAME}.txt"
 if [ ! -s "$MANIFEST" ]; then
     echo "Manifest $MANIFEST missing or empty; no predict step to launch."
     exit 0
@@ -115,8 +135,12 @@ read -r -a PREDICT_ARGS <<< "${PREDICT_SBATCH_ARGS:-}"
 if [ ${#PREDICT_ARGS[@]} -gt 0 ]; then
     echo "  predict sbatch overrides: ${PREDICT_ARGS[*]}"
 fi
-sbatch -J "$RUN_NAME" \
+ARRAY_ID=$(sbatch --parsable -J "$RUN_NAME" \
        --array=0-$((N-1))%${ARRAY_CONCURRENCY} \
        "${PREDICT_ARGS[@]}" \
        sbatch_files/predict_array.sh \
-       "$MANIFEST" "$PRED_CONFIG" "$TIMINGS_PATH"
+       "$MANIFEST" "$PRED_CONFIG" "$TIMINGS_PATH" | cut -d';' -f1)
+echo "Submitted batch job $ARRAY_ID"
+if [ -n "${PIPELINE_ARRAY_ID_FILE:-}" ]; then
+    echo "$ARRAY_ID" > "$PIPELINE_ARRAY_ID_FILE"
+fi

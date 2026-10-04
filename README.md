@@ -586,6 +586,15 @@ questions, `code/cluster_round.py` runs a round of work on the cluster, `code/da
 finds a movie's source data wherever it now lives, and `code/cluster_link.py` is the ssh transport
 they share.
 
+**Predicting raw movies kept on a PC.** The same tool preps and predicts an experiment whose raw
+`*_sparse.mat` files are on the PC: drag the folder onto `local_reanalysis/predict.bat` and it works
+out the experiment's easyWand and mirror camera from the mats (saved as `prep.json`), sends each
+movie cut down to the frames prep reads, runs the ordinary prep + predict on the cluster, and brings
+every movie's results home as soon as it is done. See [LOCAL_PREDICT.md](LOCAL_PREDICT.md).
+`code/predict_prep.py` looks at the movies, `code/sparse_trim.py` cuts them down (and
+`code/check_sparse_trim.py` proves a cut movie preps exactly like the original),
+`code/local_predict.py` runs the round and `code/local_predict_server.py` is its cluster side.
+
 ---
 
 ## 9. Tips & troubleshooting

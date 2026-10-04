@@ -88,7 +88,10 @@ class PredictingManager:
         for dir in dir_list:
             files = os.listdir(dir)
             for file in files:
-                if file.startswith('mov') and file.endswith('.h5'):
+                # a render-only copy of a box (dataset_paths.RENDER_SUFFIX) holds images for
+                # one channel in three, and must never be predicted as if it were a box
+                if (file.startswith('mov') and file.endswith('.h5')
+                        and not file.endswith('_render.h5')):
                     file_path =  os.path.join(dir, file)
                     if os.path.isfile(file_path):
                         movie_list.append(file_path)

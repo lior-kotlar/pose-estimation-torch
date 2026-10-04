@@ -79,6 +79,24 @@ import scipy.ndimage as ndi
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# How many frames per camera the check reads, spread evenly over the movie, and how many movies
+# prep runs it on. A PC that blanks frames before an upload (code/sparse_trim.py) keeps exactly
+# these frames, so the check reads the same pixels from a blanked mat as from the original.
+PREP_SAMPLES = 100
+MIRROR_CHECK_MOVIES = 3     # enough to average out one odd movie; ~5-8 s each
+
+
+def sample_frame_indices(n_frames, n_samples=PREP_SAMPLES):
+    """The 0-based frames of one camera's mat the check reads."""
+    stride = max(1, n_frames // max(n_samples, 1))
+    return list(range(0, n_frames, stride))
+
+
+def sample_movies(movies):
+    """The movies prep runs the check on, spread across the list rather than taken from the
+    front."""
+    return movies[::max(1, len(movies) // MIRROR_CHECK_MOVIES)][:MIRROR_CHECK_MOVIES]
+
 
 # ---------------------------------------------------------------------------
 # Calibration
@@ -172,8 +190,7 @@ def collect_from_movie(movie_dir, n_samples, min_pixels, image_height):
             refs = f["frames/indIm"][0]
             n = len(refs)
             n_frames = n if n_frames is None else min(n_frames, n)
-            stride = max(1, n // max(n_samples, 1))
-            idx = list(range(0, n, stride))
+            idx = sample_frame_indices(n, n_samples)
             pts = {}
             for i in idx:
                 d = f[refs[i]]
@@ -400,7 +417,7 @@ def frame_height(movie_dir):
 
 
 def detect_mirror_cam(movie_dirs, easywand=None, calibration=None,
-                      samples=100, min_pixels=50, image_height=None,
+                      samples=PREP_SAMPLES, min_pixels=50, image_height=None,
                       clean_px=DEFAULT_CLEAN_PX, margin=DEFAULT_MARGIN,
                       verbose=True):
     """Which camera (if any) needs the vertical flip, as a verdict dict.

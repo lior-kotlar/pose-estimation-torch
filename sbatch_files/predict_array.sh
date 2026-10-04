@@ -48,7 +48,9 @@ if [ -z "$BASE_CONFIG" ];    then echo "Base config path required (arg 2)"  >&2;
 if [ ! -f "$MANIFEST" ];     then echo "Manifest not found: $MANIFEST"      >&2; exit 1; fi
 if [ ! -f "$BASE_CONFIG" ];  then echo "Base config not found: $BASE_CONFIG" >&2; exit 1; fi
 
-cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch
+# POSE_PROJECT runs another checkout of the project (e.g. a branch's worktree);
+# unset, it is the lab's copy as always.
+cd "${POSE_PROJECT:-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch}"
 source .env/bin/activate
 
 # Pick this task's movie from the manifest (1-indexed via sed).
@@ -101,6 +103,16 @@ print('wrote', '$TMP_CONFIG  (run name: $RUN_NAME, calib:', calib, ', timings:',
 # tailing the log while the array is running).
 python -u code/prediction_code_lior/predict.py "$TMP_CONFIG"
 rc=$?
+
+# Opt-in (RENDER_BOX_DIR=<dir>): leave a render-only copy of the movie's box
+# there, <stem>_render.h5 -- only the channels the overlay video reads (see
+# code/dataset_paths.py reduce_box). The PC that sent the movie takes it home,
+# so it can re-render the video later without the full box. A failure is
+# reported and never fails the prediction.
+if [ -n "${RENDER_BOX_DIR:-}" ]; then
+    python code/dataset_paths.py reduce-movie "$MOVIE_DIR" "$RENDER_BOX_DIR" \
+        || echo "WARNING: could not write the render box for $MOV_NAME"
+fi
 
 # Opt-in (DROP_BOX_CACHE=1): delete this movie's saved_box_dir once its
 # prediction has succeeded. It is a pure cache -- predict rebuilds it from the

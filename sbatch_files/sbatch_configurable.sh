@@ -33,7 +33,9 @@ if [ -z "$SCRIPT_PATH" ]; then
 fi
 
 echo "started"
-cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch
+# POSE_PROJECT runs another checkout of the project (e.g. a branch's worktree);
+# unset, it is the lab's copy as always.
+cd "${POSE_PROJECT:-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch}"
 source .env/bin/activate
 
 echo "Job started on $(hostname)"

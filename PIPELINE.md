@@ -114,6 +114,9 @@ Two environment variables tune the predict array without editing any script
 |---|---|
 | `PREDICT_SBATCH_ARGS` | extra `sbatch` options for the predict array, e.g. `"-p catfish,salmon --gres=gpu:1 --mem=96g --cpus-per-task=12"`. `predict_array.sh`'s own defaults (256 GB, 32 CPUs, an L40S on salmon) are sized for full 5500-frame movies and can queue behind a deep salmon backlog; measured peak RSS is ~8.4 MB per frame + ~3 GB, so 96 GB covers any 5527-frame movie. |
 | `DROP_BOX_CACHE=1` | each predict task deletes its movie's `saved_box_dir` after a **successful** prediction. It is a regenerable cache and ~236 kB/frame — over half of the ~413 kB/frame a predicted movie costs in total (built h5 ~85, cache ~236, `predict_output` ~92). |
+| `RENDER_BOX_DIR=<dir>` | each predict task also writes `<dir>/<movie>_render.h5`: the box reduced to the channels the overlay video reads (`code/dataset_paths.py reduce-movie`). Predict never reads a `*_render.h5`. |
+| `PIPELINE_RUN_NAME`, `PIPELINE_MANIFEST`, `PIPELINE_ARRAY_ID_FILE` | the run name when `-J` is something else; where prep writes the manifest (the default `good_movies_<basename>.txt` is shared by every experiment's `1to20` batch); a file to record the predict array's job id in. Used by the PC's predict rounds (section 2d), which submit every prep as `-J pose_prep --dependency=singleton` so they run one at a time. |
+| `POSE_PROJECT` | the checkout the scripts `cd` into (default: the lab's copy) — e.g. a branch's worktree. |
 
 Prep itself needs little memory (peak ~1.8 GB) but can run long: builds are
 serial across experiments (concurrent prep jobs stall each other on MATLAB), so
@@ -168,6 +171,8 @@ Useful flags (see `--help` for the full list):
 | `--perturbation-onset-frame N` | trigger-relative onset (default 0) |
 | `--perturbation-duration-ms X` | omit when the log never recorded it |
 | `--dry-run` | print what would happen, change nothing |
+| `--manifest PATH` | write the good-movie manifest here instead of `manifests/good_movies_<basename>.txt` |
+| `--status-json PATH` | also write each movie's outcome (prescan verdict and build range, verify, in the manifest or not) and the mirror check's verdict as JSON, even when prep stops early |
 
 Outputs of prep:
 - one `<movie>_raw_fr30_skip1.mp4` per movie dir, beside its mats (the raw
@@ -508,6 +513,39 @@ without a bottom camera (the old side-camera rig) is refused.
 - **Body orientation:** two of the twelve runs had the body tilted 4-8° for the
   whole flight, with the fly about 10% short.
 - **The check:** `check_body_length.py` flags exactly those two runs.
+
+### 2d. From a PC: `predict.bat`
+
+Raw movies kept on a PC go through the same two layers without being copied here by hand:
+`local_reanalysis/predict.bat` (guide: [LOCAL_PREDICT.md](LOCAL_PREDICT.md)) uploads each movie
+into a round folder, `realign_jobs/predict_<PC>_<time>/inference_datasets/<experiment>/`, runs
+`pipeline.sh` on it, and brings the predictions home. Three things differ from a manual run:
+
+- **The mats arrive blanked.** The PC runs the prescan itself and keeps, per camera, only the
+  frames the build reads (`scan_sparse_movies.build_read_range`) and the mirror check's sample
+  (`find_mirror_cam.sample_frame_indices`); every other frame is an empty frame
+  (`code/sparse_trim.py`). Each movie carries `trim.json`, and prep drops a movie as
+  `TRIM_MISMATCH` if its build range would read a blanked frame, and stops if the mirror check
+  would. `code/check_sparse_trim.py` runs prep on full and blanked copies of the same movies and
+  requires identical boxes, prescan, mirror verdict, calibration and verify -- it passed on a
+  3-camera Tsory movie (ex201224 12ms mov2), a 4-camera Shalev movie (1to20/mov1) and a heavily
+  blanked 4-camera Amitai movie (62to81/mov74: 949 of 4974 frames kept, 96 -> 34 MB) before the
+  PC route was used. The raw movie made
+  from blanked mats shows only the kept frames.
+- **Predictions are written into the round** (`predict_output/<run>/` inside it) and a render-only
+  box beside them (`RENDER_BOX_DIR`); each movie is deleted once the PC has it, the round when
+  everything is home. Their records name the round's path until `reanalyse.bat` re-analyses them
+  on the PC.
+- **A keeper job looks after each round** (`keep_predictions_<run>`, 1 CPU on glacier,
+  `code/local_predict_server.py predict-keep`), so the PC may be switched off once the upload is
+  done: every 5 minutes it retries a failed GPU task once and resubmits a prep that never started,
+  and when nothing more can happen it has slurm email the owner through a no-op job named
+  `predictions_<run>_ready` (or `..._needs_the_PC`). Its time limit ends before the next announced
+  maintenance reservation, and it hands over to a successor before running out.
+- **Preps run one at a time** across rounds (`pose_prep`, `--dependency=singleton`). A manual
+  `pipeline.sh` started at the same time is not in that queue -- submit it as
+  `PIPELINE_RUN_NAME=<run> sbatch -J pose_prep --dependency=singleton sbatch_files/pipeline.sh ...`
+  to join it.
 
 ---
 

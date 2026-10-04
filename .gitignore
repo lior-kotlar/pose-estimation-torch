@@ -213,6 +213,7 @@ collected_h5/
 # written by code/local_reanalysis.py when run from a checkout
 local_reanalysis_settings.json
 declarations_cache/
+.prescan_cache.json
 reports/
 realign_jobs/
 .dataset_index.json

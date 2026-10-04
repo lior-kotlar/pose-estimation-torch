@@ -37,6 +37,9 @@ slurm for, and what a finished movie hands back.
 submit and clean touch only a job folder the caller owns; every path they build is checked to
 stay inside realign_jobs/JOB. Nothing here re-analyses anything: the PC does that, with the
 declarations and path maps it already has.
+
+The predict-* verbs run a PC's prep + predict round (code/local_predict.py) and live in
+code/local_predict_server.py, which this script hands them to.
 """
 import argparse
 import hashlib
@@ -249,14 +252,15 @@ def job_movies(inputs, kind="realign"):
     return sorted(movies)
 
 
-def slurm(*command):
-    """A slurm command, from the PATH or from the place moriah keeps it."""
+def slurm(*command, env=None):
+    """A slurm command, from the PATH or from the place moriah keeps it. `env` replaces the
+    environment it runs in (sbatch hands its environment on to the job)."""
     name = command[0]
     program = shutil.which(name) or os.path.join(SLURM_BIN, name)
     if not os.path.isfile(program):
         raise ValueError("%s was not found on the server, so the job could not be handled here "
                          "(looked on the PATH and in %s)" % (name, SLURM_BIN))
-    environment = dict(os.environ)
+    environment = dict(os.environ if env is None else env)
     if not environment.get("SLURM_CONF") and os.path.isfile(SLURM_CONF):
         environment["SLURM_CONF"] = SLURM_CONF     # without it slurm cannot find the cluster
     done = subprocess.run([program] + list(command[1:]), cwd=PROJECT, env=environment,
@@ -440,13 +444,21 @@ def main():
         verb = sub.add_parser(name)
         verb.add_argument("--job", required=True)
         verb.add_argument("--kind", choices=sorted(KINDS), default="realign")
+    import local_predict_server as predict
+    predict.add_verbs(sub)
     args = parser.parse_args()
     if args.command == "declarations":
         return declarations()
     if args.command == "receive":
         return receive(args.dest)
-    if args.command == "round-fetch":
+    if args.command == "predict-keep":
+        # a long-running job of its own, not a question: its log is the output
+        return predict.predict_keep(args.job, args.interval)
+    if args.command in ("round-fetch", "predict-fetch"):
         try:
+            if args.command == "predict-fetch":
+                return predict.predict_fetch(args.job, predict.split(args.movies),
+                                             predict.split(args.units))
             return round_fetch(args.job, args.kind)
         except Exception as e:
             # stdout is the tar itself, so the reason goes to stderr and the PC sees an empty
@@ -456,6 +468,7 @@ def main():
     handlers = {"round-submit": lambda: round_submit(args.job, args.kind, args.throttle),
                 "round-status": lambda: round_status(args.job, args.kind),
                 "round-clean": lambda: round_clean(args.job)}
+    handlers.update(predict.handlers(args))
     if args.command in handlers:
         try:
             print(json.dumps(handlers[args.command]()))

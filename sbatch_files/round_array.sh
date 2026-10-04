@@ -19,7 +19,9 @@ set -eo pipefail
 MANIFEST="${1:?manifest required (arg 1)}"
 ENTRY="${2:?python entry point required (arg 2)}"
 shift 2
-cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch
+# POSE_PROJECT runs another checkout of the project (e.g. a branch's worktree);
+# unset, it is the lab's copy as always.
+cd "${POSE_PROJECT:-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch}"
 MOVIE=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$MANIFEST" | cut -f1)
 echo "task $SLURM_ARRAY_TASK_ID: $(basename "$ENTRY") on $MOVIE at $(hostname), $(nproc) cpus"
 MPLBACKEND=Agg .env/bin/python "$ENTRY" "$MOVIE" "$@"

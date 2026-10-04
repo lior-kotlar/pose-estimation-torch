@@ -21,6 +21,10 @@ date — so asking for one can pull in the others, in that order.
 
 Before doing anything it prints what it found, so you always see the size of the job first.
 
+**Movies not predicted yet?** If you have an experiment's raw movies (the `*_sparse.mat` files) on
+this PC, `predict.bat` preps and predicts them on the cluster and brings the results home, with the
+same setup. See [LOCAL_PREDICT.md](LOCAL_PREDICT.md).
+
 ---
 
 ## What you need
@@ -53,7 +57,7 @@ Open **Command Prompt** (Start menu → type `cmd`). Paste these four lines, rep
 
 ```bat
 mkdir C:\pose-reanalysis
-ssh YOUR_USERNAME@moriah-gw-01.cs.huji.ac.il "SLURM_CONF=/vol/slurm/moriah/slurm.conf /vol/slurm/moriah/bindir/bin/srun --ntasks=1 --mem=2g --time=0:10:00 --gres=gpu:0 --chdir=/tmp --job-name=pose_setup git -C /cs/labs/tsevi/lior.kotlar/pose-estimation-torch -c safe.directory='*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md" > C:\pose-reanalysis\download.tar
+ssh YOUR_USERNAME@moriah-gw-01.cs.huji.ac.il "SLURM_CONF=/vol/slurm/moriah/slurm.conf /vol/slurm/moriah/bindir/bin/srun --ntasks=1 --mem=2g --time=0:10:00 --gres=gpu:0 --chdir=/tmp --job-name=pose_setup git -C /cs/labs/tsevi/lior.kotlar/pose-estimation-torch -c safe.directory='*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md LOCAL_PREDICT.md" > C:\pose-reanalysis\download.tar
 tar -xf C:\pose-reanalysis\download.tar -C C:\pose-reanalysis
 del C:\pose-reanalysis\download.tar
 ```
@@ -68,10 +72,11 @@ neither on hand. You may see
 `srun: job 123456 queued and waiting for resources` for a moment; that is the wait for a free
 node, and the download carries on by itself.
 
-Afterwards `C:\pose-reanalysis` contains `code`, `local_reanalysis`, `LOCAL_REANALYSIS.md` and
-`requirements-analysis.txt`. In `local_reanalysis` you will find the files you double-click or drag
-folders onto: `setup.bat`, `reanalyse.bat` (the everyday one), `check.bat`, `realign.bat`,
-`render.bat`, `reanalyse_including_bad.bat` and `update.bat`.
+Afterwards `C:\pose-reanalysis` contains `code`, `local_reanalysis`, `LOCAL_REANALYSIS.md`,
+`LOCAL_PREDICT.md` and `requirements-analysis.txt`. In `local_reanalysis` you will find the files
+you double-click or drag folders onto: `setup.bat`, `reanalyse.bat` (the everyday one), `check.bat`,
+`realign.bat`, `render.bat`, `reanalyse_including_bad.bat` and `update.bat`, plus `predict.bat` and
+`predict_check.bat` for raw movies ([LOCAL_PREDICT.md](LOCAL_PREDICT.md)).
 
 ### 3. Run the setup
 
@@ -236,6 +241,9 @@ the one thing a movie folder does not contain, so this is the only stage that ne
 folder (setup asks for it once). The renderer reads one time-channel per camera out of nine, so
 only those are sent: about 60 MB a movie instead of 185 MB. The finished mp4 comes back and the old
 one is kept beside it.
+
+A movie predicted with `predict.bat` came home with exactly those channels already, as
+`<movie>_render.h5` beside its mats; it is found and sent as it is.
 
 A movie whose box h5 cannot be found is reported and skipped; nothing about it is changed:
 
@@ -409,6 +417,7 @@ for it and the short questions are simply handed to slurm again.
 | `jobs` | movies at once (0 = half the processor threads; each movie needs about 1.5 GB of memory) |
 | `dataset_root` | the folder holding each experiment's source data — the box h5 files and `calibration.h5`. Only rendering needs it; empty means the tool tries only the paths recorded when the movie was predicted |
 | `srun_flags` | what the cluster's scheduler is asked for when it runs a command for this PC. Emptying it would run commands on the login gateway instead, which the lab does not allow |
+| `predict_output`, `predict_config`, `upload_chunk_mb`, `fetch_chunk_mb`, `server_reserve_gb` | used by `predict.bat`; see [LOCAL_PREDICT.md](LOCAL_PREDICT.md) |
 
 **The same steps on the cluster.**
 

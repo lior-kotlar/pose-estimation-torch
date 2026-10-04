@@ -19,11 +19,20 @@ and every one of those is found by dirname() of the box path (utils.resolve_cali
 load_cam_validity, get_trigger_frame_info, resolve_perturbation_path). So resolving the box
 resolves all of them.
 
+A movie predicted from a PC (local_predict.py) comes home with only a render-only copy of its box,
+`<stem>_render.h5` beside where the full box would be: resolve() falls back to it, so the movie's
+video can still be rebuilt, while predict skips such files (they hold no images for most channels).
+
 The path functions are standard library only, so anything can import them cheaply; reduce_box
 needs h5py and numpy and imports them when it is called.
+
+    python code/dataset_paths.py reduce SRC_BOX DST_BOX
+    python code/dataset_paths.py reduce-movie MOVIE_DIR OUT_DIR   # -> OUT_DIR/<stem>_render.h5
 """
+import glob
 import json
 import os
+import sys
 
 # the folder that holds every experiment's source data, and the segment both recorded forms share
 DATASETS_SEGMENT = 'inference_datasets'
@@ -86,31 +95,61 @@ def below_datasets(recorded, segment=DATASETS_SEGMENT):
     return os.path.join(*rest) if rest else None
 
 
+# the name a render-only box goes by, beside where its full box would be
+RENDER_SUFFIX = '_render.h5'
+
+
+def render_box_name(box_path):
+    """mov_2_448_2330_ds_3tc_7tj.h5 -> mov_2_448_2330_ds_3tc_7tj_render.h5"""
+    return box_path[:-len('.h5')] + RENDER_SUFFIX
+
+
+def is_render_box(path):
+    return path.lower().endswith(RENDER_SUFFIX)
+
+
+def _existing(path):
+    """`path` when it is a file; for a box h5 that is not, its render-only sibling when that is."""
+    if os.path.isfile(path):
+        return path
+    if path.lower().endswith('.h5') and not is_render_box(path):
+        sibling = render_box_name(path)
+        if os.path.isfile(sibling):
+            return sibling
+    return None
+
+
 def resolve(recorded, roots=(), index=None):
     """Where a recorded source path is on this machine, or None.
 
     Tried in order: the path as recorded, which is what keeps the cluster working unchanged; the
     part below inference_datasets joined to each root, which covers both recorded forms in one
     rule; then the index, for a local layout that does not mirror the cluster's. An ambiguous
-    index match resolves to nothing rather than to a guess."""
+    index match resolves to nothing rather than to a guess. At every step a box h5 that is not
+    there is also looked for as its render-only copy (RENDER_SUFFIX), after the box itself."""
     if not recorded:
         return None
-    if os.path.isfile(recorded):
-        return recorded
+    found = _existing(recorded)
+    if found:
+        return found
     rest = below_datasets(recorded)
     for root in roots:
         if rest:
-            candidate = os.path.join(root, rest)
-            if os.path.isfile(candidate):
-                return candidate
+            found = _existing(os.path.join(root, rest))
+            if found:
+                return found
         # a root given as the experiment folder itself, rather than the datasets folder
-        candidate = os.path.join(root, *split_path(recorded)[-TAIL_DEPTH:])
-        if os.path.isfile(candidate):
-            return candidate
-    if index:
-        found = best_match(recorded, index.get(index_key(recorded)) or [])
-        if found and os.path.isfile(found):
+        found = _existing(os.path.join(root, *split_path(recorded)[-TAIL_DEPTH:]))
+        if found:
             return found
+    if index:
+        names = [index_key(recorded)]
+        if names[0].endswith('.h5') and not is_render_box(names[0]):
+            names.append(index_key(render_box_name(recorded)))
+        for name in names:
+            found = best_match(recorded, index.get(name) or [])
+            if found and os.path.isfile(found):
+                return found
     return None
 
 
@@ -233,3 +272,42 @@ def reduced_channels(box_path):
     with h5py.File(box_path, 'r') as f:
         value = f[BOX].attrs.get(REDUCED_ATTR)
     return None if value is None else [int(v) for v in value]
+
+
+def movie_box(movie_dir):
+    """The full box h5 prep built in a movie folder, or None (render-only copies never count)."""
+    found = sorted(path for path in glob.glob(os.path.join(movie_dir, 'mov_*_ds_*tc_*tj.h5'))
+                   if not is_render_box(path))
+    return found[0] if found else None
+
+
+def reduce_movie(movie_dir, out_dir):
+    """Write <out_dir>/<stem>_render.h5 from the movie's box; returns its path. Lands under a
+    temporary name first, so a half-written copy never passes for a finished one."""
+    box = movie_box(movie_dir)
+    if box is None:
+        raise FileNotFoundError(f'no box h5 in {movie_dir}')
+    os.makedirs(out_dir, exist_ok=True)
+    target = os.path.join(out_dir, os.path.basename(render_box_name(box)))
+    staged = target + '.partial'
+    keep, before, after = reduce_box(box, staged)
+    os.replace(staged, target)
+    print(f'render box {os.path.basename(target)}: channels {keep}, '
+          f'{before / 1e6:.0f} -> {after / 1e6:.0f} MB', flush=True)
+    return target
+
+
+def main(argv):
+    if len(argv) == 3 and argv[0] == 'reduce':
+        keep, before, after = reduce_box(argv[1], argv[2])
+        print(f'channels {keep}: {before / 1e6:.0f} -> {after / 1e6:.0f} MB')
+        return 0
+    if len(argv) == 3 and argv[0] == 'reduce-movie':
+        reduce_movie(argv[1], argv[2])
+        return 0
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

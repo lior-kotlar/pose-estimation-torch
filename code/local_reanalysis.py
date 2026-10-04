@@ -6,6 +6,9 @@ files in local_reanalysis/:
     python code/local_reanalysis.py setup             once per PC: username, datasets folder, key
     python code/local_reanalysis.py run [FOLDER ...]  do what each movie needs, collect, upload
     python code/local_reanalysis.py update            download the latest committed code
+    python code/local_reanalysis.py predict [FOLDER]  prep and predict raw movies kept on this PC,
+                                                      on the cluster (code/local_predict.py,
+                                                      LOCAL_PREDICT.md)
 
 A run takes one or more folders -- a single experiment, or a folder holding many -- surveys every
 movie in them (code/movie_survey.py), and does only the stages that have work in them:
@@ -69,7 +72,8 @@ DECLARATIONS_CACHE = os.path.join(HOME, 'declarations_cache')
 REPORTS_DIR = os.path.join(HOME, 'reports')
 BUNDLE_COMMIT = os.path.join(HOME, 'BUNDLE_COMMIT')
 # What `update` downloads: the committed versions of these paths in the cluster's project.
-BUNDLE_PATHS = ('code', 'local_reanalysis', 'requirements-analysis.txt', 'LOCAL_REANALYSIS.md')
+BUNDLE_PATHS = ('code', 'local_reanalysis', 'requirements-analysis.txt', 'LOCAL_REANALYSIS.md',
+                'LOCAL_PREDICT.md')
 
 DEFAULT_SETTINGS = {
     'server_user': '',
@@ -94,6 +98,17 @@ DEFAULT_SETTINGS = {
     # which places it on a compute node. Emptying this runs them on the login host instead.
     'srun_flags': '--ntasks=1 --cpus-per-task=1 --mem=4g --time=2:00:00 --gres=gpu:0 '
                   '--chdir=/tmp --job-name=pose_pc',
+    # predict.bat (code/local_predict.py): where predictions of raw movies sent from this PC go
+    # (empty: predict_output next to the code), the server's predict config, and how much goes
+    # over one connection at a time -- each is one srun step, which slurm caps at 2 hours
+    'predict_output': '',
+    'predict_config': 'config1.json',
+    'upload_chunk_mb': 2000,
+    'fetch_chunk_mb': 2000,
+    # the cluster's disk is shared by the lab: a round never fills it past this much free space
+    'server_reserve_gb': 30,
+    # a predict round's keeper on the cluster has slurm email the owner when the round is done
+    'email_when_done': True,
 }
 UPLOAD_LEDGER = '.uploaded.json'
 # where the rounds this PC has going are written down, so one can be picked up again
@@ -681,7 +696,11 @@ def prepare_video(settings, state, jobs_dir, rows):
         os.makedirs(source_dir, exist_ok=True)
         box = row['source']
         reduced = os.path.join(source_dir, os.path.basename(box))
-        if not os.path.isfile(reduced):
+        if dataset_paths.is_render_box(box):
+            # a movie predicted from this PC came home with only these channels already
+            # (local_predict.py); it goes as it is
+            reduced = box
+        elif not os.path.isfile(reduced):
             print(f"  [{number}/{len(rows)}] shrinking {os.path.basename(movie_dir)}'s images",
                   flush=True)
             _, before, after = dataset_paths.reduce_box(box, reduced)
@@ -1044,8 +1063,10 @@ def main():
                                  'not collected). Each goes under its experiment\'s <bad '
                                  'folder>/ subfolder, never among its usable movies')
     sub.add_parser('update', help='download the latest committed code from the server')
+    import local_predict
+    local_predict.add_parser(sub)
     args = parser.parse_args()
-    handlers = {'setup': setup, 'run': run, 'update': update}
+    handlers = {'setup': setup, 'run': run, 'update': update, 'predict': local_predict.predict}
     if args.command not in handlers:
         parser.print_help()
         return 2

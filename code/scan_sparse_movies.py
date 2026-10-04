@@ -117,6 +117,42 @@ DEFAULT_MIN_CAMS_IN_FRAME = 3
 # one pair anyway, so there the rule is simply that both see the whole fly.
 MIN_USABLE_CAMS_IN_FRAME = 3
 
+# The MATLAB builder reads `(start_ind - time_jump):(end_ind + time_jump)` out of every camera's
+# mat for its time-channel windows (CreateDatasetHDF5_from_list_fixed.m, time_jump = 7), so the
+# build range is clamped to leave that much padding at both ends.
+MATLAB_TIME_JUMP_MARGIN = 7
+
+# Fewest frames with all cams tracking the fly for a movie to be worth processing. Applied twice
+# by prep: to the raw sparse mats here (so a hopeless movie is never built) and by verify to the
+# h5 the build actually produced (so a build that died partway is caught).
+DEFAULT_MIN_INTERSECTION = 500
+
+# The prescan's thresholds as prep applies them by default. One copy, read by prep's command line
+# and by the PC that works out prep's build range before an upload (code/predict_prep.py): the two
+# must agree to the frame, or the PC keeps the wrong frames of the mats it sends.
+PRESCAN_DEFAULTS = {
+    "min_intersection": DEFAULT_MIN_INTERSECTION,
+    "pixel_threshold": 50,
+    "blob_ratio": 0.30,
+    "blob_distance": 100.0,
+    "min_edge_margin": DEFAULT_MIN_EDGE_MARGIN,
+    "min_cams_in_frame": DEFAULT_MIN_CAMS_IN_FRAME,
+}
+
+
+def build_range(good_start: int, good_end: int, n_frames: int) -> "tuple | None":
+    """The frames BUILD extracts, as (start_ind, end_ind) in MATLAB's 1-based inclusive
+    convention, from the prescan's longest run [good_start, good_end) -- or None when nothing is
+    left once the builder's padding is reserved at both ends."""
+    start_ind = max(good_start + 1, MATLAB_TIME_JUMP_MARGIN + 1)
+    end_ind = min(good_end, n_frames - MATLAB_TIME_JUMP_MARGIN)
+    return (start_ind, end_ind) if start_ind <= end_ind else None
+
+
+def build_read_range(start_ind: int, end_ind: int) -> tuple:
+    """The raw frames the builder reads for that range: 0-based, both ends inclusive."""
+    return (start_ind - MATLAB_TIME_JUMP_MARGIN - 1, end_ind + MATLAB_TIME_JUMP_MARGIN - 1)
+
 
 def resolve_min_cams_in_frame(min_cams_in_frame, n_cams: int) -> int:
     """Effective K for `n_cams` cameras: falsy/negative => every camera, else

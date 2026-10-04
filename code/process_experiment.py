@@ -163,8 +163,12 @@ from flip_sparse_cam_mat import flip_sparse_cam_mat
 from pipeline_timing import record as record_timing
 from scan_sparse_movies import (DEFAULT_MIN_CAMS_IN_FRAME,
                                 DEFAULT_MIN_EDGE_MARGIN,
+                                DEFAULT_MIN_INTERSECTION,
+                                MATLAB_TIME_JUMP_MARGIN,
                                 MIN_USABLE_CAMS_IN_FRAME,
+                                PRESCAN_DEFAULTS,
                                 accepted_cam_counts,
+                                build_range,
                                 resolve_min_cams_in_frame,
                                 scan_experiment)
 from verify_calibration import (
@@ -176,7 +180,27 @@ from utils import (PERTURBATION_FILE, PERT_DEFAULT_DURATION_MS,
                    LIGHTING_REGIMES, LIGHT_DEFAULT_RELIGHT_MS,
                    get_trigger_frame_info, load_perturbation,
                    declare_bottom_camera)
-from find_mirror_cam import detect_mirror_cam, print_hypothesis_table
+from find_mirror_cam import (PREP_SAMPLES, detect_mirror_cam,
+                             print_hypothesis_table, sample_movies)
+from sparse_trim import sample_problem, trim_problem
+
+
+# Per-movie outcome of this run, for a caller that has to act on it rather than read the report
+# (the PC's predict round, code/local_reanalysis_server.py, tells each movie's fate from it).
+# Filled in as the stages run; --status-json writes it even when the run stops early.
+STATUS = {"movies": {}}
+
+
+def note_movie(movie_dir: str, **fields) -> None:
+    STATUS["movies"].setdefault(os.path.basename(movie_dir.rstrip(os.sep)), {}).update(fields)
+
+
+def write_status(path: str) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    staged = path + ".partial"
+    with open(staged, "w") as f:
+        json.dump(STATUS, f, indent=1, default=str)
+    os.replace(staged, path)
 
 
 def _timings_path(input_dir):
@@ -506,9 +530,6 @@ def run_clean(input_dir: str, mode: str, movies: list, dry_run: bool) -> None:
 # ---------------------------------------------------------------------------
 # Flip step
 # ---------------------------------------------------------------------------
-MIRROR_CHECK_MOVIES = 3     # enough to average out one odd movie; ~5-8 s each
-
-
 def run_mirror_check(movies: list, easywand: "str | None", requested_cam,
                      dry_run: bool) -> "str | None":
     """Decide, or verify, which camera needs the vertical flip.
@@ -529,12 +550,27 @@ def run_mirror_check(movies: list, easywand: "str | None", requested_cam,
     if not easywand:
         print("  skipped: no --easywand to check the cameras against")
         return requested_cam if requested_cam != AUTO_CAM else None
-    sample = movies[::max(1, len(movies) // MIRROR_CHECK_MOVIES)][:MIRROR_CHECK_MOVIES]
-    verdict = detect_mirror_cam([d for d, _ in sample], easywand=easywand)
+    sample = sample_movies(movies)
+    # A movie blanked on a PC before upload (code/sparse_trim.py) kept the frames this check
+    # reads; one that did not would be judged on missing data, so stop rather than guess.
+    for movie_dir, _ in sample:
+        problem = sample_problem(movie_dir, PREP_SAMPLES)
+        if problem:
+            sys.exit(f"MIRROR CHECK cannot run on {os.path.basename(movie_dir)}: {problem}")
+    verdict = detect_mirror_cam([d for d, _ in sample], easywand=easywand,
+                                samples=PREP_SAMPLES)
     if verdict is None:
         print("  skipped: no usable measurements (could not read the mats?)")
         return requested_cam if requested_cam != AUTO_CAM else None
     print_hypothesis_table(verdict)
+    STATUS["mirror"] = {
+        "movies": [os.path.basename(d) for d, _ in sample],
+        "conclusive": bool(verdict["conclusive"]),
+        "flip": list(verdict["flip"]), "worst": verdict["worst"],
+        "runner_up": verdict["runner_up"], "cam_names": verdict["cam_names"],
+        "results": [[list(s), [float(m) for m in med], float(w)]
+                    for s, med, w in verdict["results"]],
+    }
 
     asked = None if requested_cam in (None, AUTO_CAM) else requested_cam
     is_auto = requested_cam == AUTO_CAM
@@ -902,17 +938,10 @@ def run_build(input_dir: str, mode: str, movies: list,
 # ---------------------------------------------------------------------------
 # Prescan + manifest helpers
 # ---------------------------------------------------------------------------
-# The MATLAB builder needs `time_jump` frames of padding before start_ind and
-# after end_ind for its time-channel windows; keep this in sync with the
-# script's `time_jump` (=7).
-MATLAB_TIME_JUMP_MARGIN = 7
-
-# Fewest frames with all 4 cams tracking the fly for a movie to be worth
-# processing. Applied twice: by the prescan to the raw sparse mats (so we never
-# build a hopeless movie) and by verify to the h5 the build actually produced
-# (so a build that died partway is caught rather than passed on with a fraction
-# of its frames).
-DEFAULT_MIN_INTERSECTION = 500
+# MATLAB_TIME_JUMP_MARGIN (the builder's padding) and DEFAULT_MIN_INTERSECTION
+# (the fewest tracked frames worth building) live in scan_sparse_movies, beside
+# the rest of the prescan's rules, so a PC predicting prep's build range before
+# an upload reads the same numbers.
 
 
 def run_prescan(input_dir: str, movies: list,
@@ -955,16 +984,29 @@ def run_prescan(input_dir: str, movies: list,
     movie_ranges = {}
     scan_results = {}
     for r in results:
+        note_movie(r["movie_dir"], prescan=r["verdict"],
+                   **({"error": r["error"]} if r.get("error") else
+                      {"good_start": r["good_start"], "good_end": r["good_end"],
+                       "n_frames": r["n_frames"]}))
         if r["verdict"] != "OK":
             continue
         scan_results[r["movie_dir"]] = r
-        # 0-based [good_start, good_end) -> 1-based inclusive [start, end].
-        # Clamp to leave time-jump padding both ends (MATLAB indexes
-        # `(start_ind - time_jump):(end_ind + time_jump)` from the raw mat).
-        start_ind = max(r["good_start"] + 1, MATLAB_TIME_JUMP_MARGIN + 1)
-        end_ind = min(r["good_end"], r["n_frames"] - MATLAB_TIME_JUMP_MARGIN)
-        if start_ind <= end_ind:
-            movie_ranges[r["movie_dir"]] = (start_ind, end_ind)
+        # 0-based [good_start, good_end) -> 1-based inclusive [start, end],
+        # clamped to leave the builder's time-jump padding at both ends.
+        rng = build_range(r["good_start"], r["good_end"], r["n_frames"])
+        if rng is None:
+            continue
+        # A movie blanked on a PC before upload holds only the frames that PC
+        # expected this range to read. Should the two ever disagree, building
+        # would read empty frames as "no fly" -- drop the movie instead.
+        problem = trim_problem(r["movie_dir"], *rng)
+        if problem:
+            print(f"  [mov{r['movie_num']}] TRIM_MISMATCH -- {problem}; dropping")
+            note_movie(r["movie_dir"], prescan="TRIM_MISMATCH", reason=problem)
+            filtered = [(d, n) for d, n in filtered if d != r["movie_dir"]]
+            continue
+        movie_ranges[r["movie_dir"]] = rng
+        note_movie(r["movie_dir"], start_ind=rng[0], end_ind=rng[1])
     return filtered, movie_ranges, scan_results
 
 
@@ -1327,18 +1369,24 @@ def report_perturbation_coverage(movies: list, dry_run: bool) -> None:
 
 
 def write_good_movies_manifest(input_dir: str, movies: list,
-                               dry_run: bool) -> "str | None":
-    """Write manifests/good_movies_<experiment>.txt — one movie directory per
-    line, ready for `sbatch --array=...% predict_array.sh <manifest>`.
-    Skips directories that don't yet have a built h5 (so BAD movies that
-    were filtered out don't end up in the manifest)."""
+                               dry_run: bool,
+                               manifest_path: "str | None" = None) -> "str | None":
+    """Write manifests/good_movies_<experiment>.txt (or `manifest_path`) — one
+    movie directory per line, ready for `sbatch --array=...% predict_array.sh
+    <manifest>`. Skips directories that don't yet have a built h5 (so BAD
+    movies that were filtered out don't end up in the manifest).
+
+    The default name is the input dir's basename, which batch folders such as
+    `1to20` share across experiments; a caller that runs experiments side by
+    side passes a path of its own."""
     if dry_run:
         print("\n(dry-run: would write manifest of good movies)")
         return None
-    manifest_dir = os.path.join(REPO_ROOT, "manifests")
-    os.makedirs(manifest_dir, exist_ok=True)
-    exp_name = os.path.basename(input_dir.rstrip(os.sep))
-    manifest_path = os.path.join(manifest_dir, f"good_movies_{exp_name}.txt")
+    if manifest_path is None:
+        exp_name = os.path.basename(input_dir.rstrip(os.sep))
+        manifest_path = os.path.join(REPO_ROOT, "manifests",
+                                     f"good_movies_{exp_name}.txt")
+    os.makedirs(os.path.dirname(os.path.abspath(manifest_path)), exist_ok=True)
     kept_dirs = []
     missing = []
     for movie_dir, mn in movies:
@@ -1349,6 +1397,9 @@ def write_good_movies_manifest(input_dir: str, movies: list,
     with open(manifest_path, "w") as f:
         for d in kept_dirs:
             f.write(d + "\n")
+    STATUS["manifest"] = manifest_path
+    for d in kept_dirs:
+        note_movie(d, in_manifest=True)
     print(f"\nWrote manifest: {manifest_path}  ({len(kept_dirs)} movies)")
     if missing:
         print(f"  (skipped {len(missing)} movie(s) with no built h5: "
@@ -1539,6 +1590,7 @@ def run_verify(input_dir: str, mode: str, movies: list,
     build_failed_dirs = {d for d, _ in (build_failed or [])}
     for movie_dir, mn in movies:
         if movie_dir in build_failed_dirs:
+            note_movie(movie_dir, verify="BUILD_FAILED")
             n_incomplete += 1
             print(f"  [mov{mn}] BUILD_FAILED — MATLAB exited non-zero during "
                   f"BUILD; any h5 on disk is partial; skipping")
@@ -1547,6 +1599,7 @@ def run_verify(input_dir: str, mode: str, movies: list,
         h5 = find_movie_h5(movie_dir)
         if h5 is None:
             print(f"  [mov{mn}] no dataset h5 found; skipping")
+            note_movie(movie_dir, verify="NO_H5")
             n_missing += 1
             continue
         t0 = time.time()
@@ -1556,6 +1609,8 @@ def run_verify(input_dir: str, mode: str, movies: list,
                                                  threshold_2cam=threshold_2cam)
         t1 = time.time()
         n_inter = info["n_intersection"] if (info and "n_intersection" in info) else None
+        note_movie(movie_dir, verify=status, box=os.path.basename(h5),
+                   medians=medians, intersection=n_inter)
         record_timing(timings_path, f"mov{mn}", "verify", t0, t1,
                       n_frames=n_inter)
         if status == "ERR":
@@ -1675,14 +1730,17 @@ def main() -> None:
                    default=DEFAULT_MIN_INTERSECTION,
                    help="movies with fewer than N frames where all 4 cams "
                         "see the fly are flagged BAD and skipped (default: 500)")
-    p.add_argument("--prescan-pixel-threshold", type=int, default=50,
+    p.add_argument("--prescan-pixel-threshold", type=int,
+                   default=PRESCAN_DEFAULTS["pixel_threshold"],
                    help="per-frame non-zero pixel count above which a cam is "
                         "considered to 'see the fly' (default: 50)")
-    p.add_argument("--prescan-blob-ratio", type=float, default=0.30,
+    p.add_argument("--prescan-blob-ratio", type=float,
+                   default=PRESCAN_DEFAULTS["blob_ratio"],
                    help="prescan: a 2nd connected blob counts as a separate "
                         "fly when its size >= ratio * largest blob (default: "
                         "0.30)")
-    p.add_argument("--prescan-blob-distance", type=float, default=100.0,
+    p.add_argument("--prescan-blob-distance", type=float,
+                   default=PRESCAN_DEFAULTS["blob_distance"],
                    help="prescan: a 2nd blob counts as a separate fly only if "
                         "its centroid is at least this many px from the "
                         "largest blob's centroid (default: 100)")
@@ -1791,9 +1849,22 @@ def main() -> None:
                         "hand-authored declaration (per-movie windows, "
                         "provenance) is never clobbered by the CLI's simpler "
                         "one.")
+    p.add_argument("--manifest", default=None,
+                   help="where to write the good-movie manifest (default: "
+                        "manifests/good_movies_<basename of input_dir>.txt, "
+                        "which batch folders of different experiments share)")
+    p.add_argument("--status-json", default=None,
+                   help="also write each movie's outcome (prescan, build "
+                        "range, verify, manifest) and the mirror check's "
+                        "verdict as JSON here -- written even when the run "
+                        "stops early, for a caller that acts on it")
     p.add_argument("--dry-run", action="store_true",
                    help="print what each step would do, do nothing")
     args = p.parse_args()
+    if args.status_json:
+        STATUS.update(path=os.path.abspath(args.status_json),
+                      input_dir=os.path.abspath(args.input_dir),
+                      argv=sys.argv, finished=False)
 
     if not os.path.isdir(args.input_dir):
         sys.exit(f"input_dir is not a directory: {args.input_dir}")
@@ -1977,7 +2048,8 @@ def main() -> None:
             # writer independently checks find_movie_h5 per movie, so it only
             # lists movies that actually have a built h5.
             if mode == "multi":
-                write_good_movies_manifest(input_dir, movies, args.dry_run)
+                write_good_movies_manifest(input_dir, movies, args.dry_run,
+                                           manifest_path=args.manifest)
 
     _write_report(input_dir, report_buf, args.dry_run)
 
@@ -1996,5 +2068,24 @@ def _write_report(input_dir: str, report_buf: io.StringIO,
     print(f"\nReport appended to: {report_path}")
 
 
+def run() -> None:
+    """main(), plus the --status-json record of how it ended -- including the
+    refusals that stop prep with sys.exit part-way."""
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            STATUS["stopped"] = str(e.code)
+        raise
+    except BaseException as e:
+        STATUS["stopped"] = f"{type(e).__name__}: {e}"
+        raise
+    else:
+        STATUS["finished"] = True
+    finally:
+        if STATUS.get("path"):
+            write_status(STATUS["path"])
+
+
 if __name__ == "__main__":
-    main()
+    run()

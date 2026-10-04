@@ -96,11 +96,17 @@ def upload_round(settings, state, files_for):
 
     files_for(movie_dir) yields (name under the movie, path on this PC) -- the kind decides what
     that is: a realignment sends the ensemble members, a render sends a shrunk box and the h5."""
-    destination = job_inputs(settings, state['job'])
-    pending = {}
+    files = {}
     for key, movie_dir in sorted(state['movies'].items()):
         for name, source in files_for(movie_dir):
-            pending[f'{key}/{name}'] = (source, sha256(source))
+            files[f'{key}/{name}'] = source
+    send_files(settings, job_inputs(settings, state['job']), files)
+
+
+def send_files(settings, destination, files):
+    """Send {name on the cluster: path on this PC} to `destination` as one tar stream, which the
+    server checks file by file before installing any of it. Returns the server's answer."""
+    pending = {rel: (source, sha256(source)) for rel, source in files.items()}
     size = sum(os.path.getsize(source) for source, _ in pending.values())
     print(f"sending {len(pending)} file(s), {size / 1e6:.0f} MB, to "
           f"{settings['server_host']}:{destination}", flush=True)
@@ -126,6 +132,7 @@ def upload_round(settings, state, files_for):
                       "touched; run the same command again to start over")
     answer = server_answer(proc, 'the server did not accept the files')
     print(f"the server has every file: {count(answer['results'].values())}")
+    return answer
 
 
 def wait_for_job(settings, state, poll_seconds):
@@ -181,11 +188,20 @@ def safe_key(relpath, movies):
 def fetch_results(settings, jobs_dir, state):
     """Download what the cluster made into a staging folder here; returns the relative paths."""
     staging = os.path.join(jobs_dir, state['job'], 'incoming')
+    return staging, fetch_tar(settings, ['round-fetch', '--job', state['job'],
+                                         '--kind', state['kind']],
+                              staging, lambda rel: safe_key(rel, state['movies']))
+
+
+def fetch_tar(settings, verb, staging, allowed):
+    """Run a helper verb whose stdout is a gzipped tar (MANIFEST.json first), unpack it into an
+    emptied `staging` folder and check every file against the manifest. `allowed(relpath)` says
+    which names this PC asked for. Returns the relative paths; nothing outside staging is
+    touched, so a cut or damaged download leaves the PC as it was."""
     if os.path.isdir(staging):
         shutil.rmtree(staging)
     os.makedirs(staging)
-    proc = remote(settings, helper_command(settings, 'round-fetch', '--job', state['job'],
-                                           '--kind', state['kind']), stdout=subprocess.PIPE)
+    proc = remote(settings, helper_command(settings, *verb), stdout=subprocess.PIPE)
     manifest, received = None, []
     try:
         with tarfile.open(fileobj=proc.stdout, mode='r|gz') as tar:
@@ -195,7 +211,7 @@ def fetch_results(settings, jobs_dir, state):
                     continue
                 if not member.isfile() or manifest is None or member.name not in manifest:
                     continue
-                if not safe_key(member.name, state['movies']):
+                if not allowed(member.name) or '..' in member.name.split('/'):
                     raise Problem(f"the server offered a file this PC did not ask for "
                                   f"({member.name!r}); nothing was touched")
                 target = os.path.join(staging, *member.name.split('/'))
@@ -218,7 +234,7 @@ def fetch_results(settings, jobs_dir, state):
             raise Problem(f"{rel} arrived damaged; nothing on this PC was touched. Run the same "
                           "command again to download it afresh")
     print(f"{len(received)} file(s) downloaded and checked")
-    return staging, sorted(manifest)
+    return sorted(manifest)
 
 
 def job_inputs(settings, job):
