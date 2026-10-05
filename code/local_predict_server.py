@@ -59,6 +59,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tarfile
@@ -111,8 +112,9 @@ MAX_RESUBMITS = 3
 KEEPER_FILE = "keeper.json"
 CLEARING = ".clearing"
 KEEP_INTERVAL = 300
-KEEPER_SBATCH = ["--partition=glacier", "--gres=gpu:0", "--mem=1g", "--cpus-per-task=1",
-                 "--mail-type=NONE"]
+# submitted with --wrap rather than through sbatch_configurable.sh, whose #SBATCH mail lines win
+# over a command-line --mail-type=NONE: the keeper itself must never email -- only notify() does
+KEEPER_SBATCH = ["--partition=glacier", "--gres=gpu:0", "--mem=1g", "--cpus-per-task=1"]
 KEEPER_MAX_MINUTES = 6 * 24 * 60
 # hand over to a successor this long before the keeper's own time runs out
 HANDOVER_SECONDS = 900
@@ -918,10 +920,12 @@ def predict_keeper(job, mail=True, successor=False):
                     for k, r in status["movies"].items()):
                 return {"ok": True, "keeper_job_id": None, "not_needed": True}
         name = ("keep_predictions_" + round_name(path, job))[:60]
+        command = "cd %s && exec .env/bin/python -u code/local_reanalysis_server.py predict-keep " \
+                  "--job %s" % (shlex.quote(PROJECT), shlex.quote(job))
         out = base.slurm("sbatch", "--parsable", "-J", name, *KEEPER_SBATCH, *keeper_time(),
-                         SBATCH_CONFIGURABLE, "code/local_reanalysis_server.py",
-                         "predict-keep", "--job", job,
-                         env=dict(slurm_environment(), POSE_PROJECT=PROJECT))
+                         "--output", os.path.join(PROJECT, "logs", "%x_%j.out"),
+                         "--error", os.path.join(PROJECT, "logs", "%x_%j.err"),
+                         "--wrap", command, env=slurm_environment())
         job_id = out.strip().splitlines()[-1].split(";")[0]
         try:
             os.remove(os.path.join(path, CLEARING))
