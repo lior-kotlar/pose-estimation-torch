@@ -194,7 +194,7 @@ def survey(settings, roots, args, out_root, interactive):
     cache = pp.PrescanCache(PRESCAN_CACHE)
     workers = max(1, min(4, int(settings.get('jobs') or 0) or (os.cpu_count() or 2) // 2))
     index = predicted_index(out_root)
-    dataset_root = (settings.get('dataset_root') or '').strip()
+    dataset_root = lr.dataset_roots(settings)
     plan = {'experiments': {}, 'movies': []}
     for exp_dir, exp_units in sorted(by_experiment.items()):
         declaration = None if args.redeclare else pp.load_declaration(exp_dir)
@@ -680,7 +680,8 @@ def watch(settings, state, args):
         def waits_for_retry(key):
             row = rows.get(key, {})
             if row.get('state') == 'failed':
-                return bool(row.get('task')) and row.get('retries', 0) < RETRIES
+                return (bool(row.get('task') or row.get('no_array'))
+                        and row.get('retries', 0) < RETRIES)
             if row.get('state') == 'prep_crashed' and row.get('instant'):
                 unit = key.split('/')[0]
                 return units.get(unit, {}).get('prep_resubmits', 0) < 3

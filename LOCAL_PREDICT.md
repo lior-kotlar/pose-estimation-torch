@@ -44,10 +44,20 @@ To put them somewhere else:
 
 3. Save the file.
 
-### A3. Keep your raw data in this layout
+### A3. Tell the tool where your raw data lives
+
+In the same file, the `dataset_root` line names the folder (or folders) holding your
+experiments. To give several, separate them with `;`, for example the cluster's old datasets and
+the raw movies you predict from this PC:
+
+```json
+"dataset_root": "E:\\Lior\\inference_datasets;E:\\Lior\\pose_estimation_prediction_input",
+```
+
+### A4. Keep your raw data in this layout
 
 ```
-E:\Lior\inference_datasets\                     <- the "datasets folder" from setup (A1)
+E:\Lior\inference_datasets\                     <- a folder named in dataset_root (A3)
     roni_dark\
         2023_08_07_5ms\                         <- one experiment
             10_8_23_allmovs_easyWandData.mat    <- its easyWand calibration
@@ -62,9 +72,11 @@ E:\Lior\inference_datasets\                     <- the "datasets folder" from se
 - The experiment's **easyWand** `.mat` must be in the experiment folder, a batch folder, or one
   or two folders above it.
 - **Folder names** may only use letters, digits, `.`, `-` and `_`. No spaces.
-- **Keep experiments inside the datasets folder.** The path below it, here
-  `roni_dark/2023_08_07_5ms`, becomes the experiment's name in every result. A folder outside the
-  datasets folder still works, but is named `local_only/<folder name>`.
+- **Keep experiments inside a folder named in `dataset_root`.** The path below it, here
+  `roni_dark/2023_08_07_5ms`, becomes the experiment's name in every result, and the run name
+  (`roni_dark_2023_08_07_5ms`). Lay experiments out the way they are on the cluster, and the names
+  match your earlier predictions. A folder outside every `dataset_root` folder still works, but is
+  named `local_only/<folder name>`.
 
 ---
 
@@ -153,6 +165,7 @@ that fails. When everything is done, slurm sends you an email whose subject name
 - **`predictions_<run name>_ready`**: everything that could be predicted is done. Drag the same
   folder onto `predict.bat` to bring the results home.
 - **`predictions_<run name>_needs_the_PC`**: a preparation job crashed, or something got stuck.
+  You get this one only while your PC is off. A PC that is on fixes these by itself.
   Drag the same folder onto `predict.bat`. It sends again whatever needs it, and brings home the
   rest.
 
@@ -333,7 +346,7 @@ nothing runs on the login gateway.
 | setting | meaning |
 |---|---|
 | `predict_output` | where predictions go (empty: `C:\pose-reanalysis\predict_output`) |
-| `dataset_root` | the datasets folder from setup (A3) |
+| `dataset_root` | the folder(s) holding your experiments, separated by `;` (A3) |
 | `predict_config` | which models the cluster uses (default `config1.json`: the deployed ones) |
 | `upload_chunk_mb`, `fetch_chunk_mb` | how much goes over one connection (default 2000 MB) |
 | `server_reserve_gb` | free space always left on the cluster's disk (default 30) |

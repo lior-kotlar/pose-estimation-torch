@@ -87,18 +87,23 @@ def experiment_dir(unit_dir):
     return os.path.dirname(unit_dir) if BATCH_DIR.match(os.path.basename(unit_dir)) else unit_dir
 
 
-def staged_path(unit_dir, dataset_root):
+def staged_path(unit_dir, dataset_roots):
     """The unit's path on the cluster below inference_datasets/, as a list of components.
 
-    Below dataset_root when the unit is there; below the last `inference_datasets` folder of its
-    path otherwise; local_only/<experiment>[/<batch>] for a folder that is in neither."""
+    Below the dataset root holding the unit (the innermost, when roots nest); below the last
+    `inference_datasets` folder of its path otherwise; local_only/<experiment>[/<batch>] for a
+    folder that is in neither. `dataset_roots` is a list of folders (or one, or None)."""
     unit_dir = os.path.abspath(unit_dir)
+    if isinstance(dataset_roots, str):
+        dataset_roots = [dataset_roots]
     parts = None
-    if dataset_root:
-        root = os.path.abspath(dataset_root)
-        rel = os.path.relpath(unit_dir, root)
+    for root in sorted((os.path.abspath(r) for r in dataset_roots or () if r), key=len,
+                       reverse=True):
+        rel = os.path.relpath(unit_dir, root) if os.path.splitdrive(unit_dir)[0].lower() == \
+            os.path.splitdrive(root)[0].lower() else '..'
         if not rel.startswith('..') and rel != '.':
             parts = rel.replace('\\', '/').split('/')
+            break
     if parts is None:
         pieces = unit_dir.replace('\\', '/').split('/')
         lowered = [p.lower() for p in pieces]

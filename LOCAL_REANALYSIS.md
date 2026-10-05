@@ -415,7 +415,7 @@ for it and the short questions are simply handed to slurm again.
 | `upload` | whether this PC publishes to the server at all, and so whether it may repair movies on the cluster. Setup sets it to `false` for an account that cannot write `upload_to` |
 | `collected_h5` | where the PC keeps collected files (empty = `C:\pose-reanalysis\collected_h5`) |
 | `jobs` | movies at once (0 = half the processor threads; each movie needs about 1.5 GB of memory) |
-| `dataset_root` | the folder holding each experiment's source data — the box h5 files and `calibration.h5`. Only rendering needs it; empty means the tool tries only the paths recorded when the movie was predicted |
+| `dataset_root` | the folder holding each experiment's source data — the box h5 files and `calibration.h5`; several folders separated by `;`. Rendering needs it (and `predict.bat`, to name experiments); empty means the tool tries only the paths recorded when the movie was predicted |
 | `srun_flags` | what the cluster's scheduler is asked for when it runs a command for this PC. Emptying it would run commands on the login gateway instead, which the lab does not allow |
 | `predict_output`, `predict_config`, `upload_chunk_mb`, `fetch_chunk_mb`, `server_reserve_gb` | used by `predict.bat`; see [LOCAL_PREDICT.md](LOCAL_PREDICT.md) |
 

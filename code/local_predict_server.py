@@ -118,6 +118,10 @@ KEEPER_MAX_MINUTES = 6 * 24 * 60
 HANDOVER_SECONDS = 900
 SBATCH_CONFIGURABLE = os.path.join(PROJECT, "sbatch_files", "sbatch_configurable.sh")
 LOCK = ".lock"
+# touched whenever a PC asks how the round is going: a PC that is watching mends a crashed prep
+# itself, so the keeper does not email it that the round needs it
+PC_SEEN = ".pc_seen"
+PC_PRESENT_SECONDS = 900
 SETTLED = ("predicted", "rejected", "prep_failed", "prep_stopped", "released", "missing")
 
 
@@ -243,11 +247,23 @@ def unit_paths(job_path, unit):
     }
 
 
+def slurm_environment():
+    """This environment, with slurm reachable: the PATH a PC's ssh session arrives with on the
+    gateway lacks slurm's commands, and a job inherits it -- pipeline.sh, which submits the predict
+    array itself, would find no sbatch."""
+    env = dict(os.environ)
+    if base.SLURM_BIN not in env.get("PATH", "").split(os.pathsep):
+        env["PATH"] = os.pathsep.join(p for p in (env.get("PATH"), base.SLURM_BIN) if p)
+    if not env.get("SLURM_CONF") and os.path.isfile(base.SLURM_CONF):
+        env["SLURM_CONF"] = base.SLURM_CONF
+    return env
+
+
 def predict_environment(job_path, unit, spec):
     """What a unit's prep and predict jobs need in their environment. sbatch passes it on, and
     pipeline.sh hands it to the predict array it submits."""
     paths = unit_paths(job_path, unit)
-    return dict(os.environ,
+    return dict(slurm_environment(),
                 POSE_PROJECT=PROJECT,
                 PIPELINE_RUN_NAME=spec["run_name"],
                 PIPELINE_MANIFEST=paths["manifest"],
@@ -472,7 +488,8 @@ def unit_report(path, unit, slurm):
             continue
         if movie_dir in lines:
             index = lines.index(movie_dir)
-            row["retries"] = sum(1 for a in state.get("attempts") or [] if index in a["indices"])
+            row["retries"] = sum(1 for a in state.get("attempts") or []
+                                 if index in a["indices"] and not a.get("initial"))
             task_id = None
             for attempt in array_ids:
                 if attempt["indices"] is None or index in attempt["indices"]:
@@ -481,7 +498,7 @@ def unit_report(path, unit, slurm):
             output = os.path.join(paths["output"], spec["run_name"], stem)
             analysed = os.path.isfile(os.path.join(output, stem + ANALYSIS_SUFFIX))
             if task_id is None:
-                row.update(state="failed",
+                row.update(state="failed", no_array=True,
                            reason="prep passed it, but no predict array was submitted")
             elif busy(task):
                 row["state"] = "predicting" if task["state"] == "RUNNING" else "queued"
@@ -531,6 +548,24 @@ def unit_report(path, unit, slurm):
             "prep_resubmits": len(state.get("lost_preps") or []),
             "prep_slurm": (prep or {}).get("state"), "run_name": spec["run_name"],
             "stopped": status.get("stopped"), "mirror": status.get("mirror")}, movies
+
+
+def note_pc(job):
+    """Remember that a PC just looked at the round (predict-status asked over ssh)."""
+    path = base.job_dir(job)
+    if os.path.isdir(path):
+        try:
+            with open(os.path.join(path, PC_SEEN), "w") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S\n"))
+        except OSError:
+            pass
+
+
+def pc_present(path):
+    try:
+        return time.time() - os.path.getmtime(os.path.join(path, PC_SEEN)) < PC_PRESENT_SECONDS
+    except OSError:
+        return False
 
 
 def predict_status(job):
@@ -583,14 +618,15 @@ def _retry(path, keys, max_retries):
         attempts = ([{"array_id": i, "indices": None} for i in manifest_lines(paths["array_id"])[:1]]
                     + (state.get("attempts") or []))
         slurm = slurm_states([a["array_id"] for a in attempts]) or {}
-        indices = []
+        indices, initial = [], True
         for name in names:
             key = "%s/%s" % (unit, name)
             movie_dir = os.path.join(spec["input_dir"], name)
             if movie_dir not in lines:
                 raise ValueError("%s was never passed on to prediction" % key)
             index = lines.index(movie_dir)
-            tries = sum(1 for a in state.get("attempts") or [] if index in a["indices"])
+            tries = sum(1 for a in state.get("attempts") or []
+                        if index in a["indices"] and not a.get("initial"))
             latest = None
             for attempt in attempts:
                 if attempt["indices"] is None or index in attempt["indices"]:
@@ -603,10 +639,14 @@ def _retry(path, keys, max_retries):
             if tries >= max_retries:
                 skipped[key] = "tried %d time(s) already" % (tries + 1)
                 continue
-            if task is None or busy(task) or (task["state"] == "COMPLETED" and analysed):
+            # no task at all is fine when no array was ever submitted for it (pipeline.sh could
+            # not); an array that slurm does not know yet, or a task still going, is not failed
+            if (latest is not None and task is None) or busy(task) or \
+                    (task is not None and task["state"] == "COMPLETED" and analysed):
                 skipped[key] = "its task is not a failed one"
                 continue
             indices.append(index)
+            initial = initial and latest is None
             # a re-run into a folder that holds a failed attempt's members would pool them
             if stem and os.path.isdir(partial):
                 aside = os.path.join(path, "failed_attempts", "%s_%s" % (stem, stamp))
@@ -624,7 +664,7 @@ def _retry(path, keys, max_retries):
             env=predict_environment(path, unit, spec))
         array_id = out.strip().splitlines()[-1].split(";")[0]
         state.setdefault("attempts", []).append(
-            {"array_id": array_id, "indices": sorted(indices),
+            {"array_id": array_id, "indices": sorted(indices), "initial": initial,
              "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")})
         save_json(paths["state"], state)
         submitted[unit] = array_id
@@ -881,7 +921,7 @@ def predict_keeper(job, mail=True, successor=False):
         out = base.slurm("sbatch", "--parsable", "-J", name, *KEEPER_SBATCH, *keeper_time(),
                          SBATCH_CONFIGURABLE, "code/local_reanalysis_server.py",
                          "predict-keep", "--job", job,
-                         env=dict(os.environ, POSE_PROJECT=PROJECT))
+                         env=dict(slurm_environment(), POSE_PROJECT=PROJECT))
         job_id = out.strip().splitlines()[-1].split(";")[0]
         try:
             os.remove(os.path.join(path, CLEARING))
@@ -913,8 +953,10 @@ def notify(path, job, needs_pc):
     address = owner_mail()
     if not record.get("mail", True) or not address:
         return
-    name = ("predictions_%s_%s" % (round_name(path, job),
-                                   "needs_the_PC" if needs_pc else "ready"))[:80]
+    rows = predict_status(job)["movies"] if os.path.isdir(path) else {}
+    done = sum(1 for r in rows.values() if r["state"] in ("predicted", "released"))
+    name = ("predictions_%s_%d_of_%d_%s" % (round_name(path, job), done, len(rows),
+                                            "needs_the_PC" if needs_pc else "ready"))[:90]
     try:
         base.slurm("sbatch", "-J", name, "--partition=glacier", "--gres=gpu:0", "--mem=100m",
                    "--cpus-per-task=1", "--time=5", "--output=/dev/null",
@@ -942,7 +984,8 @@ def settled(row, unit):
     if state in SETTLED:
         return True
     if state == "failed":
-        return row.get("retries", 0) >= MAX_RETRIES or not row.get("task")
+        return row.get("retries", 0) >= MAX_RETRIES or not (row.get("task")
+                                                              or row.get("no_array"))
     if state == "prep_crashed":
         return not row.get("instant") or unit.get("prep_resubmits", 0) >= MAX_RESUBMITS
     return False
@@ -953,7 +996,7 @@ def keep_once(job, status):
     rows, units = status["movies"], status["units"]
     done = []
     retry = sorted(k for k, r in rows.items()
-                   if r["state"] == "failed" and r.get("task")
+                   if r["state"] == "failed" and (r.get("task") or r.get("no_array"))
                    and r.get("retries", 0) < MAX_RETRIES)
     if retry:
         answer = predict_retry(job, retry)
@@ -1033,7 +1076,8 @@ def predict_keep(job, interval=KEEP_INTERVAL):
                               % ", ".join(needs_pc), flush=True)
                     write_keeper(path, finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
                                  needs_pc=needs_pc)
-                    if saw_work:
+                    # a watching PC mends a crashed prep itself; only an absent one is told
+                    if saw_work and not (needs_pc and pc_present(path)):
                         notify(path, job, bool(needs_pc))
                     return 0
                 idle += 1
@@ -1042,7 +1086,7 @@ def predict_keep(job, interval=KEEP_INTERVAL):
                           "will deal with them" % (time.strftime("%H:%M"), now), flush=True)
                     write_keeper(path, finished_at=time.strftime("%Y-%m-%d %H:%M:%S"),
                                  stuck=True)
-                    if saw_work:
+                    if saw_work and not pc_present(path):
                         notify(path, job, True)
                     return 0
             else:
@@ -1089,7 +1133,7 @@ def handlers(args):
     return {
         "predict-submit": lambda: predict_submit(args.job, args.unit, args.throttle,
                                                  args.again),
-        "predict-status": lambda: predict_status(args.job),
+        "predict-status": lambda: (note_pc(args.job), predict_status(args.job))[1],
         "predict-retry": lambda: predict_retry(args.job, split(args.movies)),
         "predict-reset": lambda: predict_reset(args.job, args.unit),
         "predict-release": lambda: predict_release(args.job, split(args.movies)),

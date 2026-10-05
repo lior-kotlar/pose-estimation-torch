@@ -233,11 +233,13 @@ def setup(args):
     settings['server_host'] = ask("Server address", settings['server_host'])
     print("\nWhere do you keep the source datasets -- the folder that holds each experiment's")
     print("movies as they came off the rig (the box h5 files and calibration.h5)? Needed only to")
-    print("rebuild a movie's video; leave empty if you do not have them here.")
+    print("rebuild a movie's video, and to name the experiments predict.bat sends; leave empty if")
+    print("you do not have them here. Several folders: separate them with ';'.")
     root = ask("Datasets folder (e.g. E:\\Lior\\inference_datasets)", settings['dataset_root'])
-    if root and not os.path.isdir(root):
-        print(f"  note: {root} is not a folder on this PC. Saving it anyway -- correct it in "
-              f"{os.path.basename(SETTINGS_PATH)} if it is wrong.")
+    for folder in dataset_roots({'dataset_root': root}):
+        if not os.path.isdir(folder):
+            print(f"  note: {folder} is not a folder on this PC. Saving it anyway -- correct it in "
+                  f"{os.path.basename(SETTINGS_PATH)} if it is wrong.")
     settings['dataset_root'] = root
     save_settings(settings)
     print(f"\nsaved {SETTINGS_PATH}")
@@ -600,8 +602,10 @@ def wanted_folders(args, what='re-analyse'):
 
 
 def dataset_roots(settings):
-    root = (settings.get('dataset_root') or '').strip()
-    return (root,) if root else ()
+    """The folders holding source datasets: dataset_root, which may name several separated by
+    ';' (e.g. the cluster's old datasets and the raw movies predicted from this PC)."""
+    return tuple(part.strip().strip('"') for part in (settings.get('dataset_root') or '').split(';')
+                 if part.strip())
 
 
 class Work:
