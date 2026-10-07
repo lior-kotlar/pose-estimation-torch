@@ -143,6 +143,7 @@ TIERS = ("index", "analysis", "showcase")
 # Per movie, by tier. Names are exact; GLOB_* are fnmatch-style patterns.
 MOVIE_FILES_INDEX = [
     "source.json",
+    "lean_run.json",
     ".realigned_ensemble.json",
     "ensemble_model_selection_summary.json",
     "ensemble_model_selection_summary.txt",
@@ -158,6 +159,7 @@ MOVIE_FILES_SHOWCASE = [
     "points_3D_ensemble_best_method.npy",
     "points_3D_smoothed_ensemble_best_method.npy",
     "all_frames_scores.json",
+    "all_frames_scores.json.gz",          # a lean run's (code/lean_run.py)
     "wing_angles.png",
     "body_angular_acceleration.png",
     "movie 2D and 3D.mp4",

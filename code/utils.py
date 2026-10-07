@@ -409,6 +409,13 @@ class PredictConfig:
             # searches over. The search is ~2^M in the number of members, so a
             # cap (e.g. 3) keeps a large ensemble tractable. None => no cap.
             self.max_ensemble_models = config.get('max ensemble models')
+            # Optional: keep the run lean (code/lean_run.py) -- no video, no HTML pages, one
+            # member's crop record, the scores compressed. Set by predict_array.sh from LEAN_RUN.
+            self.lean_run = bool(config.get('lean run', False))
+            # Optional: keep every ensemble member's own outputs once the movie is done; by
+            # default they are dropped but one crop record (code/lean_run.py). Set by
+            # predict_array.sh from KEEP_MEMBER_OUTPUTS.
+            self.keep_member_outputs = bool(config.get('keep member outputs', False))
 
             # Preferred: auto-discover the ensemble from a prediction_models/
             # directory (each subfolder is a self-contained model). Falls back
@@ -495,6 +502,12 @@ class PredictConfig:
 
     def get_max_ensemble_models(self):
         return self.max_ensemble_models
+
+    def get_lean_run(self):
+        return self.lean_run
+
+    def get_keep_member_outputs(self):
+        return self.keep_member_outputs
 
     def get_calibration_path(self):
         return self.calibration_data_path

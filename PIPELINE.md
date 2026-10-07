@@ -114,6 +114,8 @@ Two environment variables tune the predict array without editing any script
 |---|---|
 | `PREDICT_SBATCH_ARGS` | extra `sbatch` options for the predict array, e.g. `"-p catfish,salmon --gres=gpu:1 --mem=96g --cpus-per-task=12"`. `predict_array.sh`'s own defaults (256 GB, 32 CPUs, an L40S on salmon) are sized for full 5500-frame movies and can queue behind a deep salmon backlog; measured peak RSS is ~8.4 MB per frame + ~3 GB, so 96 GB covers any 5527-frame movie. |
 | `DROP_BOX_CACHE=1` | each predict task deletes its movie's `saved_box_dir` after a **successful** prediction. It is a regenerable cache and ~236 kB/frame — over half of the ~413 kB/frame a predicted movie costs in total (built h5 ~85, cache ~236, `predict_output` ~92). |
+| `KEEP_MEMBER_OUTPUTS=1` | keep every ensemble member's own outputs. By default, once a movie's ensemble and analysis are written, each member's `points_3D_all.npy`, `points_3D.npy` and `points_3D_smoothed.npy` and all but one member's `predicted_points_and_box.h5` are deleted (`code/lean_run.py`, recorded in `member_outputs.json`): about half of a run, read by nothing afterwards except `code/realign_ensemble.py`. |
+| `LEAN_RUN=1` | a lean run: as above, and no overlay video, no HTML pages, the scores compressed (`all_frames_scores.json.gz`), the box cache dropped -- about 20 kB/frame. Off by default. `code/reanalyse_movies.py <movie> --with-viewers --with-mp4` makes a lean movie's video and pages later. |
 
 Prep itself needs little memory (peak ~1.8 GB) but can run long: builds are
 serial across experiments (concurrent prep jobs stall each other on MATLAB), so
@@ -539,6 +541,14 @@ negative pitch. Analysis files written before this carry no `pitch_convention`
 dataset and hold the opposite sign. The plotting tools here flip those on read;
 the CSV and any other direct reader do not, so re-run `code/reanalyse_movies.py`
 on them.
+
+Full wingbeats (`left_full_wingbits`, `right_full_wingbits` in the h5) are cut where the wing
+is furthest back: each runs from one maximum of the stroke angle phi -- the dorsal reversal, where
+the downstroke begins -- to the next, so every wingbeat is a downstroke followed by an upstroke in
+every movie. Half-strokes before the first such point, and a last unpaired one, belong to no full
+wingbeat. The h5 records this as `wingbeat_anchor = dorsal reversal`; analyses written before
+2026-10 lack it and paired the half-strokes from whichever turning point came first, so in some
+movies their wingbeats ran from the forward reversal instead.
 
 Body roll -- `roll_angle` and `roll_dot` in the h5, `body_roll_deg` in the CSV --
 is measured only once per wingbeat (about every 73 frames): when both wings are

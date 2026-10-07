@@ -22,6 +22,7 @@ from extract_flight_data import FlightAnalysis
 from Visualizer import Visualizer
 from Triangulator import Triangulator
 from extract_flight_data import create_movie_analysis_h5, export_analysis_csv
+import lean_run
 
 
 def source_experiment(movie_path):
@@ -108,6 +109,15 @@ class PredictingManager:
     def predict_movies(self,
                        only_create_mp4=False):
         timings_path = self.config.get_pipeline_timings_path()
+        # Once a movie's ensemble and analysis are written, the members' own outputs are
+        # dropped, keeping one crop record (code/lean_run.py), unless the config keeps them.
+        # A lean run also makes no video and no HTML pages.
+        lean = self.config.get_lean_run()
+        keep_members = self.config.get_keep_member_outputs()
+        if lean:
+            print("lean run: no video, no HTML pages; one member's crop record kept", flush=True)
+        elif keep_members:
+            print("keeping every ensemble member's outputs", flush=True)
         for movie_path in self.movie_path_list:
             movie_run_directory_path = os.path.join(self.base_run_directory, os.path.basename(movie_path).replace('.h5',''))
             os.makedirs(movie_run_directory_path, exist_ok=True)
@@ -181,14 +191,16 @@ class PredictingManager:
             if not only_create_mp4:
                 print("Starting to predict ensemble")
                 best_points_3D, smoothed_3D = find_3D_points_from_ensemble(
-                    movie_run_directory_path, max_models=self.config.get_max_ensemble_models())
+                    movie_run_directory_path, max_models=self.config.get_max_ensemble_models(),
+                    lean=lean)
                 reprojected = triangulator.get_reprojections(best_points_3D, cropzone)
                 smoothed_reprojected = triangulator.get_reprojections(smoothed_3D, cropzone)
                 From2Dto3D.save_points_3D(movie_run_directory_path, reprojected, name="points_ensemble_reprojected.npy")
                 From2Dto3D.save_points_3D(movie_run_directory_path, smoothed_reprojected,
                                           name="points_ensemble_smoothed_reprojected_before_analysis.npy")
-                
-            self.create_movie_html(movie_run_directory_path, name="points_3D_smoothed_ensemble_best_method.npy")
+
+            if not lean:
+                self.create_movie_html(movie_run_directory_path, name="points_3D_smoothed_ensemble_best_method.npy")
             points_3D_path = os.path.join(movie_run_directory_path, 'points_3D_smoothed_ensemble_best_method.npy')
             reprojected_points_path = os.path.join(movie_run_directory_path, 'points_ensemble_smoothed_reprojected.npy')
             box_path = movie_path
@@ -232,7 +244,7 @@ class PredictingManager:
                 movie_hdf5_path, FA = create_movie_analysis_h5(
                     movie, movie_run_directory_path, points_3D_path, smooth=True,
                     trigger_offset=trig_off, frame_rate=frame_rate, source=source,
-                    perturbation=pert)
+                    perturbation=pert, pages=not lean)
                 # MATLAB-ready per-frame CSV (body angles, body location, wing
                 # angles) indexed by the trigger-relative frame number. Failure
                 # here must not abort the movie's prediction.
@@ -242,18 +254,20 @@ class PredictingManager:
                                         perturbation=pert)
                 except Exception as e:
                     print(f"analysis CSV export failed: {e}", flush=True)
-                Visualizer.plot_all_body_data(movie_hdf5_path)
+                if not lean:
+                    Visualizer.plot_all_body_data(movie_hdf5_path)
                 reprojected = triangulator.get_reprojections(FA.points_3D[FA.first_analysed_frame:], cropzone)
                 From2Dto3D.save_points_3D(movie_run_directory_path, reprojected,
                                           name="points_ensemble_smoothed_reprojected.npy")  # better 2D points
                 # Pass the resolved window rather than letting the mp4 re-read
                 # perturbation.json: otherwise the video and the analysis h5 can
                 # disagree whenever the declaration changed between them.
-                Visualizer.create_movie_mp4(movie_hdf5_path, save_frames=None, mode='SAVE',
-                                            reprojected_points_path=reprojected_points_path,
-                                            box_path=box_path, save_path=save_path, rotate=rotate,
-                                            trigger_offset=trig_off, frame_rate=frame_rate,
-                                            perturbation=pert)
+                if not lean:
+                    Visualizer.create_movie_mp4(movie_hdf5_path, save_frames=None, mode='SAVE',
+                                                reprojected_points_path=reprojected_points_path,
+                                                box_path=box_path, save_path=save_path, rotate=rotate,
+                                                trigger_offset=trig_off, frame_rate=frame_rate,
+                                                perturbation=pert)
             except Exception as e:
                 print(f"wasn't able to analyes the movie and reproject the points: {e}")
                 exit(1)
@@ -284,7 +298,7 @@ class PredictingManager:
             # returns None, so this only has to keep its timing row honest.
             try:
                 t_viewer_start = t_step_end
-                if make_flight_viewer(movie_hdf5_path):
+                if not lean and make_flight_viewer(movie_hdf5_path):
                     t_step_end = time.time()
                     record_timing(timings_path, movie_label, "viewer",
                                   t_viewer_start, t_step_end)
@@ -298,6 +312,13 @@ class PredictingManager:
             record_timing(timings_path, movie_label, "total",
                           earliest, t_step_end,
                           n_frames=n_movie_frames)
+            try:
+                if lean:
+                    lean_run.slim(movie_run_directory_path)
+                elif not keep_members:
+                    lean_run.slim_members(movie_run_directory_path)
+            except Exception as e:
+                print(f"could not drop the members' outputs: {e}", flush=True)
             print(f"Finished movie {movie_path}", flush=True)
                 
             
@@ -427,7 +448,7 @@ def predict_3D_points_all_pairs(base_path):
         big_array_all_points = np.concatenate(all_points_arrays, axis=2)
         return big_array_all_points, all_points_arrays, model_names
 
-def find_3D_points_from_ensemble(base_path, test=False, max_models=None):
+def find_3D_points_from_ensemble(base_path, test=False, max_models=None, lean=False):
     points_save_path = os.path.join(base_path, "points_3D_ensemble_best_method.npy")
     smoothed_save_path = os.path.join(base_path, "points_3D_smoothed_ensemble_best_method.npy")
     combinations_save_path = os.path.join(base_path, "all_models_combinations.npy")
@@ -446,7 +467,7 @@ def find_3D_points_from_ensemble(base_path, test=False, max_models=None):
             try:
                 all_models_combinations = np.load(combinations_save_path)
                 save_model_selection_report(base_path, all_models_combinations,
-                                            list_model_names(base_path))
+                                            list_model_names(base_path), lean=lean)
             except Exception as e:
                 print(f"could not (re)generate model-selection report from cache: {e}", flush=True)
         return best_points_3D, smoothed_3D
@@ -462,7 +483,7 @@ def find_3D_points_from_ensemble(base_path, test=False, max_models=None):
         save_name = os.path.join(base_path, "all_models_combinations.npy")
         np.save(save_name, all_models_combinations)
         save_model_selection_report(base_path, all_models_combinations, model_names,
-                                    all_frames_scores=all_frames_scores)
+                                    all_frames_scores=all_frames_scores, lean=lean)
     return best_points_3D, smoothed_3D
 
 @staticmethod
@@ -502,7 +523,7 @@ def _strip_frames_scores(all_frames_scores):
 
 
 def save_model_selection_report(base_path, all_models_combinations, model_names,
-                                all_frames_scores=None):
+                                all_frames_scores=None, lean=False):
     """Summarise how often each ensemble member was chosen by the selector.
 
     all_models_combinations has shape (num_groups, num_frames, num_models,
@@ -510,8 +531,8 @@ def save_model_selection_report(base_path, all_models_combinations, model_names,
     winning subset for that frame/joint-group. Writes:
       - model_index_legend.json         model index -> model directory name
       - ensemble_model_selection_summary.json / .txt  per-model usage stats
-      - model_selection_visualizations/  per-group plots
-      - all_frames_scores.json          (optional) full score margins
+      - model_selection_visualizations/  per-group plots (not in a lean run)
+      - all_frames_scores.json          (optional) full score margins; .json.gz in a lean run
     """
     all_models_combinations = np.asarray(all_models_combinations)
     num_groups, num_frames, num_models, num_candidates = all_models_combinations.shape
@@ -579,18 +600,23 @@ def save_model_selection_report(base_path, all_models_combinations, model_names,
                 row += "{:>14.3f}".format(frames_selected[g, m] / num_frames if num_frames else 0.0)
             f.write(row + "\n")
 
-    try:
-        vis_dir = os.path.join(base_path, "model_selection_visualizations")
-        Visualizer.visualize_models_selection(all_models_combinations,
-                                              output_dir=vis_dir,
-                                              model_labels=model_names)
-    except Exception as e:
-        print(f"model-selection visualization failed: {e}", flush=True)
+    if not lean:
+        try:
+            vis_dir = os.path.join(base_path, "model_selection_visualizations")
+            Visualizer.visualize_models_selection(all_models_combinations,
+                                                  output_dir=vis_dir,
+                                                  model_labels=model_names)
+        except Exception as e:
+            print(f"model-selection visualization failed: {e}", flush=True)
 
     if all_frames_scores is not None:
         try:
-            with open(os.path.join(base_path, "all_frames_scores.json"), "w") as f:
-                json.dump(_strip_frames_scores(all_frames_scores), f)
+            scores_path = os.path.join(base_path, "all_frames_scores.json")
+            if lean:
+                lean_run.write_scores(scores_path, _strip_frames_scores(all_frames_scores))
+            else:
+                with open(scores_path, "w") as f:
+                    json.dump(_strip_frames_scores(all_frames_scores), f)
         except Exception as e:
             print(f"saving all_frames_scores failed: {e}", flush=True)
 

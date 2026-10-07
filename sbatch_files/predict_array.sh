@@ -23,6 +23,12 @@
 # To re-run only specific tasks after a partial failure:
 #   sbatch --array=12,45,108%16 sbatch_files/predict_array.sh ...
 #
+# Once a movie is done its ensemble members' own outputs are dropped, all but one crop record
+# (code/lean_run.py); KEEP_MEMBER_OUTPUTS=1 keeps them. Lean runs (off by default) also make
+# no video and no HTML pages and compress the scores -- about 20 kB a frame instead of 134;
+# LEAN_RUN=1 also drops the movie's saved_box_dir cache, as DROP_BOX_CACHE=1 does:
+#   LEAN_RUN=1 sbatch --array=0-$((N-1))%32 sbatch_files/predict_array.sh <manifest> <config>
+#
 #SBATCH --job-name=predict_array
 #SBATCH -o logs/%x_%A_%a.out     # %A = array job id, %a = task id
 #SBATCH -e logs/%x_%A_%a.err
@@ -73,6 +79,8 @@ echo "GPU(s)      : ${CUDA_VISIBLE_DEVICES:-<none>}"
 echo "movie_dir   : $MOVIE_DIR"
 echo "base config : $BASE_CONFIG"
 echo "drop cache  : ${DROP_BOX_CACHE:-0}"
+echo "lean run    : ${LEAN_RUN:-0}"
+echo "keep members: ${KEEP_MEMBER_OUTPUTS:-0}"
 echo "==========================================="
 
 # Generate a per-task config that points 'data directory' at just this movie.
@@ -97,6 +105,10 @@ cfg['calibration path'] = calib
 timings = '$TIMINGS_PATH'
 if timings:
     cfg['pipeline timings path'] = timings
+if '${LEAN_RUN:-0}' == '1':
+    cfg['lean run'] = True
+if '${KEEP_MEMBER_OUTPUTS:-0}' == '1':
+    cfg['keep member outputs'] = True
 json.dump(cfg, open('$TMP_CONFIG', 'w'), indent=2)
 print('wrote', '$TMP_CONFIG  (run name: $RUN_NAME, calib:', calib, ', timings:', timings or '<none>', ')')
 "
@@ -111,7 +123,7 @@ rc=$?
 # dataset h5 whenever it is missing (see code/prune_old_archive.py) -- and at
 # ~236 kB per frame it is over half of everything a prediction leaves behind.
 # Only reached on success: under `set -e` a failed predict has already exited.
-if [ "${DROP_BOX_CACHE:-0}" = "1" ] && [ -d "$MOVIE_DIR/saved_box_dir" ]; then
+if { [ "${DROP_BOX_CACHE:-0}" = "1" ] || [ "${LEAN_RUN:-0}" = "1" ]; } && [ -d "$MOVIE_DIR/saved_box_dir" ]; then
     echo "dropping box cache: $MOVIE_DIR/saved_box_dir" \
          "($(du -sh --apparent-size "$MOVIE_DIR/saved_box_dir" | cut -f1))"
     rm -rf "$MOVIE_DIR/saved_box_dir"
