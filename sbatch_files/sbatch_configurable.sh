@@ -6,7 +6,6 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=16:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 #SBATCH --mail-type=END,FAIL
 
 # usage: sbatch -J <JOB_NAME> <THIS_SBATCH_FILE_PATH> <PYTHON_SCRIPT_PATH> [ARGS...]
@@ -37,6 +36,11 @@ echo "started"
 # unset, it is the lab's copy as always.
 cd "${POSE_PROJECT:-/cs/labs/tsevi/lior.kotlar/pose-estimation-torch}"
 source .env/bin/activate
+# Since the 2026-10 cluster upgrade the GPU nodes' library cache lacks the NVIDIA driver library,
+# so torch reports "no NVIDIA driver" unless it is told where libcuda.so.1 is.
+if [ -d /etc/lib64/nvidia ]; then
+    export LD_LIBRARY_PATH="/etc/lib64/nvidia${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 echo "Job started on $(hostname)"
 echo "Job Name: $SLURM_JOB_NAME"

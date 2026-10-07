@@ -44,7 +44,7 @@ The keeper is what lets the PC be switched off once a round is uploaded. It is a
 that does, every few minutes, what the PC's own watching does on the cluster's side: a GPU task
 that failed is retried (once), a prep that never started -- a node without the lab's disk -- is
 submitted again. It ends when nothing more can happen on the cluster and then has slurm email the
-owner, through a mail-only job named predictions_<run>_ready (or ..._needs_the_PC, when a prep
+owner, through a mail-only job named predictions_<run>_<n>_of_<total>_ready (or ..._needs_the_PC, when a prep
 crashed or the round is stuck, which only the PC can mend). While a keeper runs the PC leaves
 those actions to it and only brings movies home; a lock and idempotent verbs keep the two from
 ever acting twice on one failure.
@@ -118,7 +118,6 @@ KEEPER_SBATCH = ["--partition=glacier", "--gres=gpu:0", "--mem=1g", "--cpus-per-
 KEEPER_MAX_MINUTES = 6 * 24 * 60
 # hand over to a successor this long before the keeper's own time runs out
 HANDOVER_SECONDS = 900
-SBATCH_CONFIGURABLE = os.path.join(PROJECT, "sbatch_files", "sbatch_configurable.sh")
 LOCK = ".lock"
 # touched whenever a PC asks how the round is going: a PC that is watching mends a crashed prep
 # itself, so the keeper does not email it that the round needs it
@@ -261,6 +260,63 @@ def slurm_environment():
     return env
 
 
+# The predict array's time limit grows with the unit's longest movie. Measured on catfish's L4s
+# with 12 CPUs: 754 frames took 1.1 h, 3879 frames 6.3 h, and 5891 frames ran out of 8 h (its
+# eight members took ~4 h, then the ensemble step was still running). A movie whose task timed
+# out anyway is retried with twice the time.
+PREDICT_MINUTES_BASE, PREDICT_MINUTES_PER_1000_FRAMES = 60, 120
+PREDICT_MAX_MINUTES = 6 * 24 * 60
+
+
+def predict_minutes(spec, longer=False):
+    frames = max([int((m or {}).get("frames") or 0) for m in spec["movies"].values()] or [0])
+    minutes = PREDICT_MINUTES_BASE + PREDICT_MINUTES_PER_1000_FRAMES * frames / 1000.0
+    return int(min(PREDICT_MAX_MINUTES, minutes * (2 if longer else 1)))
+
+
+def task_entries(attempts, index, slurm):
+    """(attempt, task id, slurm's entry) for every array that ran this manifest line, oldest
+    first."""
+    found = []
+    for attempt in attempts:
+        if attempt["indices"] is None or index in attempt["indices"]:
+            task_id = "%s_%d" % (attempt["array_id"], index)
+            found.append((attempt, task_id, (slurm or {}).get(task_id)))
+    return found
+
+
+def died_instantly(run_name, task_id, entry):
+    """A task that ended within seconds without a log never ran: its node did not have the lab's
+    disk mounted."""
+    return (bool(entry) and not busy(entry) and entry.get("state") != "COMPLETED"
+            and (entry.get("elapsed") or 0) <= INSTANT_SECONDS
+            and not os.path.isfile(os.path.join(PROJECT, "logs",
+                                                "%s_%s.out" % (run_name, task_id))))
+
+
+def retry_budget(attempts, index, slurm, run_name):
+    """(retries that ran, retries that never started, timed out before) for one movie. Only the
+    first use up MAX_RETRIES; a retry lost to a bad node counts against MAX_RESUBMITS instead."""
+    ran = lost = 0
+    timed_out = False
+    for attempt, task_id, entry in task_entries(attempts, index, slurm):
+        if entry and entry.get("state") == "TIMEOUT":
+            timed_out = True
+        if attempt["indices"] is None or attempt.get("initial"):
+            continue                       # the movie's first array is not a retry
+        if died_instantly(run_name, task_id, entry):
+            lost += 1
+        elif entry is not None and not busy(entry):
+            ran += 1
+    return ran, lost, timed_out
+
+
+def may_retry(run_name, task_id, entry, ran, lost, max_retries=MAX_RETRIES):
+    if died_instantly(run_name, task_id, entry):
+        return lost < MAX_RESUBMITS
+    return ran < max_retries
+
+
 def predict_environment(job_path, unit, spec):
     """What a unit's prep and predict jobs need in their environment. sbatch passes it on, and
     pipeline.sh hands it to the predict array it submits."""
@@ -270,7 +326,8 @@ def predict_environment(job_path, unit, spec):
                 PIPELINE_RUN_NAME=spec["run_name"],
                 PIPELINE_MANIFEST=paths["manifest"],
                 PIPELINE_ARRAY_ID_FILE=paths["array_id"],
-                PREDICT_SBATCH_ARGS=" ".join(PREDICT_SBATCH),
+                PREDICT_SBATCH_ARGS=" ".join(PREDICT_SBATCH
+                                             + ["--time=%d" % predict_minutes(spec)]),
                 DROP_BOX_CACHE="1",
                 RENDER_BOX_DIR=paths["render"])
 
@@ -490,8 +547,8 @@ def unit_report(path, unit, slurm):
             continue
         if movie_dir in lines:
             index = lines.index(movie_dir)
-            row["retries"] = sum(1 for a in state.get("attempts") or []
-                                 if index in a["indices"] and not a.get("initial"))
+            ran, lost, timed_out = retry_budget(array_ids, index, slurm, spec["run_name"])
+            row["retries"] = ran
             task_id = None
             for attempt in array_ids:
                 if attempt["indices"] is None or index in attempt["indices"]:
@@ -500,7 +557,7 @@ def unit_report(path, unit, slurm):
             output = os.path.join(paths["output"], spec["run_name"], stem)
             analysed = os.path.isfile(os.path.join(output, stem + ANALYSIS_SUFFIX))
             if task_id is None:
-                row.update(state="failed", no_array=True,
+                row.update(state="failed", no_array=True, retryable=True,
                            reason="prep passed it, but no predict array was submitted")
             elif busy(task):
                 row["state"] = "predicting" if task["state"] == "RUNNING" else "queued"
@@ -518,6 +575,8 @@ def unit_report(path, unit, slurm):
                 instant = ((task.get("elapsed") or 0) <= INSTANT_SECONDS
                            and not os.path.isfile(log))
                 row.update(state="failed", task=task_id, instant=instant,
+                           timed_out=timed_out,
+                           retryable=may_retry(spec["run_name"], task_id, task, ran, lost),
                            reason="predict task %s %s%s" % (
                                task_id, task["state"],
                                " within %ss with no log (an unmounted node)" % task.get("elapsed")
@@ -620,15 +679,14 @@ def _retry(path, keys, max_retries):
         attempts = ([{"array_id": i, "indices": None} for i in manifest_lines(paths["array_id"])[:1]]
                     + (state.get("attempts") or []))
         slurm = slurm_states([a["array_id"] for a in attempts]) or {}
-        indices, initial = [], True
+        indices, initial, longer = [], True, False
         for name in names:
             key = "%s/%s" % (unit, name)
             movie_dir = os.path.join(spec["input_dir"], name)
             if movie_dir not in lines:
                 raise ValueError("%s was never passed on to prediction" % key)
             index = lines.index(movie_dir)
-            tries = sum(1 for a in state.get("attempts") or []
-                        if index in a["indices"] and not a.get("initial"))
+            ran, lost, timed_out = retry_budget(attempts, index, slurm, spec["run_name"])
             latest = None
             for attempt in attempts:
                 if attempt["indices"] is None or index in attempt["indices"]:
@@ -638,8 +696,9 @@ def _retry(path, keys, max_retries):
             partial = os.path.join(paths["output"], spec["run_name"], stem)
             analysed = bool(stem) and os.path.isfile(os.path.join(partial,
                                                                   stem + ANALYSIS_SUFFIX))
-            if tries >= max_retries:
-                skipped[key] = "tried %d time(s) already" % (tries + 1)
+            if latest is not None and task is not None and not busy(task) and not \
+                    may_retry(spec["run_name"], latest, task, ran, lost, max_retries):
+                skipped[key] = "retried already (%d ran, %d lost to a bad node)" % (ran, lost)
                 continue
             # no task at all is fine when no array was ever submitted for it (pipeline.sh could
             # not); an array that slurm does not know yet, or a task still going, is not failed
@@ -649,6 +708,7 @@ def _retry(path, keys, max_retries):
                 continue
             indices.append(index)
             initial = initial and latest is None
+            longer = longer or timed_out
             # a re-run into a folder that holds a failed attempt's members would pool them
             if stem and os.path.isdir(partial):
                 aside = os.path.join(path, "failed_attempts", "%s_%s" % (stem, stamp))
@@ -660,7 +720,8 @@ def _retry(path, keys, max_retries):
             "sbatch", "--parsable", "-J", spec["run_name"],
             "--array=%s%%%d" % (",".join(str(i) for i in sorted(indices)),
                                 state.get("throttle") or DEFAULT_THROTTLE),
-            *PREDICT_SBATCH, PREDICT_ARRAY, paths["manifest"],
+            *PREDICT_SBATCH, "--time=%d" % predict_minutes(spec, longer),
+            PREDICT_ARRAY, paths["manifest"],
             os.path.join(path, "predict_config.json"),
             os.path.join(spec["input_dir"], "pipeline_timings.csv"),
             env=predict_environment(path, unit, spec))
@@ -933,29 +994,18 @@ def predict_keeper(job, mail=True, successor=False):
             pass
         save_json(os.path.join(path, KEEPER_FILE),
                   {"job_id": job_id, "name": name, "mail": bool(mail),
+                   "successor": bool(successor),
                    "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")})
     return {"ok": True, "keeper_job_id": job_id, "name": name}
 
 
-def owner_mail():
-    """The address the project's sbatch scripts mail (sbatch_configurable.sh), or ''."""
-    try:
-        with open(SBATCH_CONFIGURABLE) as f:
-            for line in f:
-                m = re.match(r"#SBATCH\s+--mail-user=(\S+)", line)
-                if m:
-                    return m.group(1)
-    except OSError:
-        pass
-    return ""
-
-
 def notify(path, job, needs_pc):
-    """Have slurm email the owner that the round is over, by a job that does nothing but end --
-    slurm's own mail, so nothing on the cluster has to send mail itself. Its name is the message."""
+    """Have slurm email the round's owner that it is over, by a job that does nothing but end --
+    slurm's own mail, since compute nodes cannot send mail. Its name is the message. No
+    --mail-user: since the 2026-10 upgrade slurm mails only the submitting account, and refuses
+    a job that names an address."""
     record = load_json(os.path.join(path, KEEPER_FILE), {}) or {}
-    address = owner_mail()
-    if not record.get("mail", True) or not address:
+    if not record.get("mail", True):
         return
     rows = predict_status(job)["movies"] if os.path.isdir(path) else {}
     done = sum(1 for r in rows.values() if r["state"] in ("predicted", "released"))
@@ -964,8 +1014,8 @@ def notify(path, job, needs_pc):
     try:
         base.slurm("sbatch", "-J", name, "--partition=glacier", "--gres=gpu:0", "--mem=100m",
                    "--cpus-per-task=1", "--time=5", "--output=/dev/null",
-                   "--mail-type=END", "--mail-user=%s" % address, "--wrap", "true")
-        print("  emailing %s: %s" % (address, name), flush=True)
+                   "--mail-type=END", "--wrap", "true")
+        print("  emailing the owner: %s" % name, flush=True)
     except ValueError as e:
         print("  could not send the email: %s" % e, flush=True)
 
@@ -988,8 +1038,7 @@ def settled(row, unit):
     if state in SETTLED:
         return True
     if state == "failed":
-        return row.get("retries", 0) >= MAX_RETRIES or not (row.get("task")
-                                                              or row.get("no_array"))
+        return not row.get("retryable")
     if state == "prep_crashed":
         return not row.get("instant") or unit.get("prep_resubmits", 0) >= MAX_RESUBMITS
     return False
@@ -999,9 +1048,7 @@ def keep_once(job, status):
     """One look: retry what failed, resubmit what never started. Returns what it did."""
     rows, units = status["movies"], status["units"]
     done = []
-    retry = sorted(k for k, r in rows.items()
-                   if r["state"] == "failed" and (r.get("task") or r.get("no_array"))
-                   and r.get("retries", 0) < MAX_RETRIES)
+    retry = sorted(k for k, r in rows.items() if r["state"] == "failed" and r.get("retryable"))
     if retry:
         answer = predict_retry(job, retry)
         if answer["submitted"]:
@@ -1036,7 +1083,8 @@ def predict_keep(job, interval=KEEP_INTERVAL):
     last, idle = None, 0
     # only a keeper that watched something happen emails: one that finds the round already over
     # was started by a PC that is on, and its owner is looking
-    saw_work = False
+    # ...but a successor carries on its predecessor's watch, which saw the round under way
+    saw_work = bool((load_json(os.path.join(path, KEEPER_FILE), {}) or {}).get("successor"))
     while True:
         if ends and time.time() > ends - HANDOVER_SECONDS and os.path.isdir(path):
             # out of time (a maintenance window, or the 6 days): a successor carries on, and

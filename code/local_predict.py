@@ -680,6 +680,8 @@ def watch(settings, state, args):
         def waits_for_retry(key):
             row = rows.get(key, {})
             if row.get('state') == 'failed':
+                if 'retryable' in row:        # the server's own judgement, when it gives one
+                    return bool(row['retryable'])
                 return (bool(row.get('task') or row.get('no_array'))
                         and row.get('retries', 0) < RETRIES)
             if row.get('state') == 'prep_crashed' and row.get('instant'):

@@ -9,7 +9,6 @@
 #SBATCH --mem=32g
 #SBATCH --cpus-per-task=8
 #SBATCH --time=08:00:00
-#SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 #SBATCH --mail-type=FAIL,END
 
 # Rebuild specific movies' dataset h5 with the MATLAB builder.

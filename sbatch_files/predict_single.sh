@@ -7,7 +7,6 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --time=04:00:00
 #SBATCH --gres=gpu:l40s:1
-#SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 #SBATCH --mail-type=FAIL,END
 
 # Predict ONE movie with the current prediction_models/ ensemble.
@@ -35,6 +34,11 @@ CALIB_ARG="${3:-}"
 
 cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch
 source .env/bin/activate
+# Since the 2026-10 cluster upgrade the GPU nodes' library cache lacks the NVIDIA driver library,
+# so torch reports "no NVIDIA driver" unless it is told where libcuda.so.1 is.
+if [ -d /etc/lib64/nvidia ]; then
+    export LD_LIBRARY_PATH="/etc/lib64/nvidia${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 MOV_NAME=$(basename "$MOVIE_DIR")
 RUN_NAME="${SLURM_JOB_NAME:-predict_single}"

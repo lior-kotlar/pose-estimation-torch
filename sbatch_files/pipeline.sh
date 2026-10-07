@@ -49,7 +49,6 @@
 #SBATCH --mem=64g
 #SBATCH --cpus-per-task=4
 #SBATCH --time=12:00:00
-#SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 #SBATCH --mail-type=FAIL
 
 set -eo pipefail
