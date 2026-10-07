@@ -562,6 +562,17 @@ measurements are joined, and nothing shorter than a wingbeat or two is
 resolved. Don't read a peak roll acceleration during a perturbation pulse as a
 measured value.
 
+**Known issue (logged 2026-10-07, not fixed): absolute roll can be off by whole
+turns.** `get_roll_from_euler` unwraps roll from wherever its first frames fall
+and corrects only a start at or above +180 deg, so in some movies the whole
+`roll_angle` trace sits one turn low: roni_dark 2023_08_09_60ms mov_73_8_6211
+reads -353 deg where the fly is at +7 deg, in every frame. 116 of the 981
+analysis h5s on the cluster (2026-10-07) have roll outside (-180, 180], nearly
+all as such a smooth whole-turn offset. Changes in roll, `roll_dot` and `p` are
+unaffected. Anything that uses ABSOLUTE roll -- a corpus statistic, a
+histogram, `average_roll_angle`, `body_roll_deg` in the CSV -- must first
+shift each trace by whole turns into (-180, 180].
+
 ---
 
 ## 4. Quick sanity checks & standalone tools
