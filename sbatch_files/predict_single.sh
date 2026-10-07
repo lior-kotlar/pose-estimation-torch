@@ -7,7 +7,6 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --time=04:00:00
 #SBATCH --gres=gpu:l40s:1
-#SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 #SBATCH --mail-type=FAIL,END
 
 # Predict ONE movie with the current prediction_models/ ensemble.

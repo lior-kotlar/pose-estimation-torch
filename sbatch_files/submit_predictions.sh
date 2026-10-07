@@ -6,7 +6,6 @@
 #SBATCH --mem=8g
 #SBATCH --cpus-per-task=2
 #SBATCH --time=00:30:00
-#SBATCH --mail-user=lior.kotlar@mail.huji.ac.il
 # END as well as FAIL: this job is the step that actually queues the GPU array,
 # so "it finished" is the thing worth knowing -- typically nobody is watching a
 # terminal by the time a multi-hour rebuild has chained into it.
