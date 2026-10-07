@@ -34,6 +34,11 @@ fi
 echo "started"
 cd /cs/labs/tsevi/lior.kotlar/pose-estimation-torch
 source .env/bin/activate
+# Since the 2026-10 cluster upgrade the GPU nodes' library cache lacks the NVIDIA driver library,
+# so torch reports "no NVIDIA driver" unless it is told where libcuda.so.1 is.
+if [ -d /etc/lib64/nvidia ]; then
+    export LD_LIBRARY_PATH="/etc/lib64/nvidia${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 echo "Job started on $(hostname)"
 echo "Job Name: $SLURM_JOB_NAME"
