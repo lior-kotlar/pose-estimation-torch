@@ -97,6 +97,7 @@ from utils import load_perturbation, stamp_declaration, get_trigger_frame_info, 
 from plot_flight_viewer import (make_viewer as make_flight_viewer,
                                 OUT_SUFFIX as VIEWER_SUFFIX)
 import dataset_paths
+import lean_run
 
 POINTS_NAME = 'points_3D_smoothed_ensemble_best_method.npy'
 PROVENANCE_KEYS = ("experiment", "movie_dir", "source_movie_dir", "box_h5")
@@ -772,7 +773,8 @@ def is_current(movie_dir, code_fp, decl_fp):
 
     The stamp is written only after the last product, so an interrupted movie never matches;
     a product removed by hand afterwards makes the movie stale again too, and so do new 3D
-    points -- a stamp from before points_fingerprint existed records none and never matches."""
+    points -- a stamp from before points_fingerprint existed records none and never matches.
+    A lean run (code/lean_run.py) has no viewer to look for."""
     stamp = read_analysis_stamp(movie_dir)
     if stamp.get('code_fingerprint') != code_fp or stamp.get('declaration_fingerprint') != decl_fp:
         return False
@@ -781,7 +783,7 @@ def is_current(movie_dir, code_fp, decl_fp):
     names = os.listdir(movie_dir)
     return (any(f.endswith('_analysis_smoothed.h5') for f in names)
             and any(f.endswith('_analysis_smoothed.csv') for f in names)
-            and any(f.endswith(VIEWER_SUFFIX) for f in names)
+            and (lean_run.is_lean(movie_dir) or any(f.endswith(VIEWER_SUFFIX) for f in names))
             and all(f in names for f in FIGURE_NAMES))
 
 
@@ -888,8 +890,11 @@ def compare_with_previous(archive_dir, h5_path):
 
 def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=False,
               pert_source='auto', path_maps=(), allow_no_trigger=False, only_stale=False,
-              code_fp=None, commit='unknown', dataset_roots=()):
-    """Re-analyse one movie; returns its row for the run report."""
+              code_fp=None, commit='unknown', dataset_roots=(), with_viewers=False):
+    """Re-analyse one movie; returns its row for the run report.
+
+    A lean run (code/lean_run.py) gets its viewer and HTML pages only when it already had them
+    or with_viewers asks for them."""
     points_path = os.path.join(movie_dir, POINTS_NAME)
     movie = os.path.basename(movie_dir.rstrip(os.sep))
     ctx = resolve_context(movie_dir, pert_source, path_maps, dataset_roots)
@@ -913,6 +918,8 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
     if only_stale and is_current(movie_dir, code_fp, decl_fp):
         print("  current: already made by this code and this declaration, skipped", flush=True)
         return {**row, 'status': 'current'}
+    pages = (with_viewers or not lean_run.is_lean(movie_dir)
+             or any(f.endswith(VIEWER_SUFFIX) for f in os.listdir(movie_dir)))
 
     # build the analysis first, so a movie that fails keeps the products it already had
     analysis = FlightAnalysis(points_3D_path=points_path, find_auto_correlation=True,
@@ -924,7 +931,7 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
                                           analysis_object=analysis,
                                           trigger_offset=trigger_offset,
                                           frame_rate=frame_rate, source=ctx['source'],
-                                          perturbation=perturbation)
+                                          perturbation=perturbation, pages=pages)
     stamps = {'analysis_code_fingerprint': code_fp, 'analysis_git_commit': commit,
               'analysed_at': analysed_at, 'points_fingerprint': points_fp,
               # the points the analysis produced, which the overlay video is reprojected from:
@@ -937,7 +944,8 @@ def reanalyse(movie_dir, stamp, archive=True, with_video=False, force_video=Fals
     export_analysis_csv(analysis, h5_path.replace('.h5', '.csv'), trigger_offset, frame_rate,
                         perturbation=perturbation)
     plot_movie_figures(h5_path, units="frames")
-    make_flight_viewer(h5_path)
+    if pages:
+        make_flight_viewer(h5_path)
     stamp_declaration(movie_dir, perturbation)
 
     video = None
@@ -1137,6 +1145,9 @@ def main():
                              'overlay mp4. needs the source box h5 and the calibration, both '
                              'read from the saved member config; movies whose source movie is '
                              'no longer on disk keep their old video and are reported')
+    parser.add_argument('--with-viewers', action='store_true',
+                        help='a lean run (code/lean_run.py) gets the flight viewer and the two HTML '
+                             'pages too; every other run always does')
     parser.add_argument('--perturbation-source', choices=('auto', 'json', 'h5'), default='auto',
                         help="where the declaration (pulse window + lighting) comes from: "
                              "'json' the experiment's live perturbation.json, 'h5' what the "
@@ -1199,7 +1210,7 @@ def main():
                 force_video=args.force_mp4, pert_source=args.perturbation_source,
                 path_maps=path_maps, allow_no_trigger=args.allow_no_trigger,
                 only_stale=args.only_stale, code_fp=code_fp, commit=commit,
-                dataset_roots=dataset_roots)
+                dataset_roots=dataset_roots, with_viewers=args.with_viewers)
     rows = run_movies(movie_dirs, stamp, opts, args.jobs)
 
     report = args.report

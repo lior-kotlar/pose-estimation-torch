@@ -96,6 +96,8 @@ echo "  cam         : $CAM"
 echo "  predict cfg : $PRED_CONFIG"
 echo "  timings     : $TIMINGS_PATH"
 echo "  drop cache  : ${DROP_BOX_CACHE:-0}  (1 = predict tasks delete saved_box_dir on success)"
+echo "  lean run    : ${LEAN_RUN:-0}  (1 = no video or HTML pages, scores compressed; code/lean_run.py)"
+echo "  keep members: ${KEEP_MEMBER_OUTPUTS:-0}  (1 = keep every ensemble member's outputs; by default all but one crop record go)"
 echo "==========================================="
 
 # Step 1 — data prep. Per-movie timings get appended to TIMINGS_PATH.

@@ -117,6 +117,8 @@ Two environment variables tune the predict array without editing any script
 | `RENDER_BOX_DIR=<dir>` | each predict task also writes `<dir>/<movie>_render.h5`: the box reduced to the channels the overlay video reads (`code/dataset_paths.py reduce-movie`). Predict never reads a `*_render.h5`. |
 | `PIPELINE_RUN_NAME`, `PIPELINE_MANIFEST`, `PIPELINE_ARRAY_ID_FILE` | the run name when `-J` is something else; where prep writes the manifest (the default `good_movies_<basename>.txt` is shared by every experiment's `1to20` batch); a file to record the predict array's job id in. Used by the PC's predict rounds (section 2d), which submit every prep as `-J pose_prep --dependency=singleton` so they run one at a time. |
 | `POSE_PROJECT` | the checkout the scripts `cd` into (default: the lab's copy) — e.g. a branch's worktree. |
+| `KEEP_MEMBER_OUTPUTS=1` | keep every ensemble member's own outputs. By default, once a movie's ensemble and analysis are written, each member's `points_3D_all.npy`, `points_3D.npy` and `points_3D_smoothed.npy` and all but one member's `predicted_points_and_box.h5` are deleted (`code/lean_run.py`, recorded in `member_outputs.json`): about half of a run, read by nothing afterwards except `code/realign_ensemble.py`. |
+| `LEAN_RUN=1` | a lean run: as above, and no overlay video, no HTML pages, the scores compressed (`all_frames_scores.json.gz`), the box cache dropped -- about 20 kB/frame. Off by default. `code/reanalyse_movies.py <movie> --with-viewers --with-mp4` makes a lean movie's video and pages later. |
 
 Prep itself needs little memory (peak ~1.8 GB) but can run long: builds are
 serial across experiments (concurrent prep jobs stall each other on MATLAB), so
@@ -578,6 +580,14 @@ dataset and hold the opposite sign. The plotting tools here flip those on read;
 the CSV and any other direct reader do not, so re-run `code/reanalyse_movies.py`
 on them.
 
+Full wingbeats (`left_full_wingbits`, `right_full_wingbits` in the h5) are cut where the wing
+is furthest back: each runs from one maximum of the stroke angle phi -- the dorsal reversal, where
+the downstroke begins -- to the next, so every wingbeat is a downstroke followed by an upstroke in
+every movie. Half-strokes before the first such point, and a last unpaired one, belong to no full
+wingbeat. The h5 records this as `wingbeat_anchor = dorsal reversal`; analyses written before
+2026-10 lack it and paired the half-strokes from whichever turning point came first, so in some
+movies their wingbeats ran from the forward reversal instead.
+
 Body roll -- `roll_angle` and `roll_dot` in the h5, `body_roll_deg` in the CSV --
 is measured only once per wingbeat (about every 73 frames): when both wings are
 spread sideways, the plane of the wing tips gives the fly's left-right axis
@@ -589,6 +599,17 @@ measured: about half of the roll acceleration's size depends on how the
 measurements are joined, and nothing shorter than a wingbeat or two is
 resolved. Don't read a peak roll acceleration during a perturbation pulse as a
 measured value.
+
+**Known issue (logged 2026-10-07, not fixed): absolute roll can be off by whole
+turns.** `get_roll_from_euler` unwraps roll from wherever its first frames fall
+and corrects only a start at or above +180 deg, so in some movies the whole
+`roll_angle` trace sits one turn low: roni_dark 2023_08_09_60ms mov_73_8_6211
+reads -353 deg where the fly is at +7 deg, in every frame. 116 of the 981
+analysis h5s on the cluster (2026-10-07) have roll outside (-180, 180], nearly
+all as such a smooth whole-turn offset. Changes in roll, `roll_dot` and `p` are
+unaffected. Anything that uses ABSOLUTE roll -- a corpus statistic, a
+histogram, `average_roll_angle`, `body_roll_deg` in the CSV -- must first
+shift each trace by whole turns into (-180, 180].
 
 ---
 

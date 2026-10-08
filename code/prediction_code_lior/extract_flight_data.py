@@ -408,6 +408,9 @@ class FlightAnalysis:
         try:
             self.left_amplitudes, self.right_amplitudes, self.left_half_wingbits, self.right_half_wingbits = self.get_half_wingbits_objects()
             self.left_full_wingbits, self.right_full_wingbits = self.get_full_wingbits_objects()
+            # stored in the h5, so a reader can tell these wingbeats from the ones the analysis
+            # made before 2026-10, which were paired from whichever half-wingbeat came first
+            self.wingbeat_anchor = "dorsal reversal"
         except:
             self.left_amplitudes, self.right_amplitudes, self.left_half_wingbits, self.right_half_wingbits = nans_array = np.full(
                 (4, 1), np.nan)
@@ -946,6 +949,13 @@ class FlightAnalysis:
         return roll_dot
 
     def get_full_wingbits_objects(self):
+        """Each wing's full wingbeats, every one anchored at the dorsal reversal: from the top
+        of the stroke, where phi peaks and the downstroke begins, to the next one -- a half with
+        phi falling (the downstroke) followed by a half with phi rising (the upstroke). Halves
+        before the movie's first dorsal reversal, and a last half with no partner, belong to no
+        wingbeat. Pairing from whichever half came first instead set every movie's phase by
+        where its first peak happened to fall, so a wingbeat average mixed two phases across
+        movies."""
         all_half_wingbits_objects = [self.left_half_wingbits, self.right_half_wingbits]
         phi_wings = [self.wings_phi_left, self.wings_phi_right]
         theta_wings = [self.wings_theta_left, self.wings_theta_right]
@@ -953,38 +963,23 @@ class FlightAnalysis:
         full_wingbits_objects = [[], []]
         for wing in range(2):
             half_wingbits = all_half_wingbits_objects[wing]
-            for i in range(0, len(half_wingbits), 2):
-                first_half = half_wingbits[i]
-                if i + 1 < len(half_wingbits):
-                    second_half = half_wingbits[i + 1]
-                    start = first_half.start
-                    end = second_half.end
-                    frames = np.unique(np.concatenate((first_half.frames, second_half.frames)))
-                    wingbit_phi = phi_wings[wing][frames - self.first_analysed_frame]
-                    wingbit_theta = theta_wings[wing][frames - self.first_analysed_frame]
-                    wingbit_psi = psi_wings[wing][frames - self.first_analysed_frame]
-                    full_wingbit = FullWingBit(start=start,
-                                               end=end,
-                                               frames=frames,
-                                               phi_vals=wingbit_phi,
-                                               theta_vals=wingbit_theta,
-                                               psi_vals=wingbit_psi)
-                    full_wingbits_objects[wing].append(full_wingbit)
-                else:
-                    # Handle the case where there is no second half
-                    start = first_half.start
-                    end = first_half.end
-                    frames = first_half.frames
-                    wingbit_phi = phi_wings[wing][frames - self.first_analysed_frame]
-                    wingbit_theta = theta_wings[wing][frames - self.first_analysed_frame]
-                    wingbit_psi = psi_wings[wing][frames - self.first_analysed_frame]
-                    full_wingbit = FullWingBit(start=start,
-                                               end=end,
-                                               frames=frames,
-                                               phi_vals=wingbit_phi,
-                                               theta_vals=wingbit_theta,
-                                               psi_vals=wingbit_psi)
-                    full_wingbits_objects[wing].append(full_wingbit)
+            i = 0
+            while i + 1 < len(half_wingbits):
+                first_half, second_half = half_wingbits[i], half_wingbits[i + 1]
+                downstroke = first_half.start_peak_val > first_half.end_peak_val
+                upstroke = second_half.end_peak_val > second_half.start_peak_val
+                if not (downstroke and upstroke):
+                    i += 1
+                    continue
+                frames = np.unique(np.concatenate((first_half.frames, second_half.frames)))
+                full_wingbits_objects[wing].append(
+                    FullWingBit(start=first_half.start,
+                                end=second_half.end,
+                                frames=frames,
+                                phi_vals=phi_wings[wing][frames - self.first_analysed_frame],
+                                theta_vals=theta_wings[wing][frames - self.first_analysed_frame],
+                                psi_vals=psi_wings[wing][frames - self.first_analysed_frame]))
+                i += 2
 
         left_full_wingbits, right_full_wingbits = full_wingbits_objects
         return left_full_wingbits, right_full_wingbits
@@ -2473,7 +2468,7 @@ def write_lighting_datasets(hdf, frame_index, pert, trigger_relative=True):
 
 def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_object=None,
                              trigger_offset=None, frame_rate=None, source=None,
-                             perturbation=None):
+                             perturbation=None, pages=True):
     if analysis_object is None:
         # movie_html.html is written below, from the finished h5, so that it can
         # carry the declared pulse and lighting; building it here would write a
@@ -2564,6 +2559,9 @@ def create_movie_analysis_h5(movie, movie_dir, points_3D_path, smooth, analysis_
         # written under the old nose-up convention, which readers flip on load.
         hdf.create_dataset(PITCH_CONVENTION_KEY, data=_h5_text(PITCH_CONVENTION))
     print(f"Data saved for {movie} in {movie_hdf5_path}")
+    # pages=False (a lean run, code/lean_run.py) makes neither HTML page
+    if not pages:
+        return movie_hdf5_path, FA
     Visualizer.plot_all_body_data(movie_hdf5_path)
     # The 3D trajectory page, with the landmarks the declaration in the h5 names
     # (light-off, pulse onset/end) and a title stating both. A failure costs
