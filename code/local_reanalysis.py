@@ -77,7 +77,7 @@ BUNDLE_PATHS = ('code', 'local_reanalysis', 'requirements-analysis.txt', 'LOCAL_
 
 DEFAULT_SETTINGS = {
     'server_user': '',
-    'server_host': 'moriah-gw-01.cs.huji.ac.il',
+    'server_host': 'moriah-gw.cs.huji.ac.il',
     'server_project': '/cs/labs/tsevi/lior.kotlar/pose-estimation-torch',
     # empty: <server_project>/collected_h5
     'upload_to': '',

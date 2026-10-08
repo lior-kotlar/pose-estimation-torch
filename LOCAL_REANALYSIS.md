@@ -32,7 +32,7 @@ same setup. See [LOCAL_PREDICT.md](LOCAL_PREDICT.md).
 - A Windows 10 or 11 PC.
 - The predicted movie folders on a disk. The folder you give can be one experiment, or a folder
   holding many experiments, at any depth.
-- An account on the lab server (`moriah-gw-01.cs.huji.ac.il`).
+- An account on the lab server (`moriah-gw.cs.huji.ac.il`).
 - **Only for rebuilding videos:** the source datasets those movies were built from — the folder
   holding each experiment's box h5 files and its `calibration.h5`. Setup asks where it is. Without
   it everything else still works, and the movies whose video cannot be rebuilt are named.
@@ -57,7 +57,7 @@ Open **Command Prompt** (Start menu → type `cmd`). Paste these four lines, rep
 
 ```bat
 mkdir C:\pose-reanalysis
-ssh YOUR_USERNAME@moriah-gw-01.cs.huji.ac.il "SLURM_CONF=/vol/slurm/moriah/slurm.conf /vol/slurm/moriah/bindir/bin/srun --ntasks=1 --mem=2g --time=0:10:00 --gres=gpu:0 --chdir=/tmp --job-name=pose_setup git -C /cs/labs/tsevi/lior.kotlar/pose-estimation-torch -c safe.directory='*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md LOCAL_PREDICT.md" > C:\pose-reanalysis\download.tar
+ssh YOUR_USERNAME@moriah-gw.cs.huji.ac.il "SLURM_CONF=/vol/slurm/moriah/slurm.conf /vol/slurm/moriah/bindir/bin/srun --ntasks=1 --mem=2g --time=0:10:00 --gres=gpu:0 --chdir=/tmp --job-name=pose_setup git -C /cs/labs/tsevi/lior.kotlar/pose-estimation-torch -c safe.directory='*' archive --format=tar HEAD code local_reanalysis requirements-analysis.txt LOCAL_REANALYSIS.md LOCAL_PREDICT.md" > C:\pose-reanalysis\download.tar
 tar -xf C:\pose-reanalysis\download.tar -C C:\pose-reanalysis
 del C:\pose-reanalysis\download.tar
 ```
@@ -65,7 +65,7 @@ del C:\pose-reanalysis\download.tar
 The first time you connect, ssh asks `Are you sure you want to continue connecting`: type
 `yes`. Then type your server password. Nothing shows while you type; that's normal.
 
-`srun` in there is deliberate: `moriah-gw-01` is only the way in, and nothing may run on it, so
+`srun` in there is deliberate: `moriah-gw` is only the way in, and nothing may run on it, so
 every command is handed to the cluster's scheduler and runs on a compute node. The scheduler is
 named in full, with its configuration file, because the shell you land in on the gateway has
 neither on hand. You may see
@@ -395,7 +395,7 @@ round is deleted from the cluster when the files are safely home; `--keep-on-ser
 there. Its state lives in `C:\pose-reanalysis\realign_jobs\<round>.json`, which is what lets a
 round be picked up again.
 
-**Nothing runs on the gateway.** `moriah-gw-01` is a login gateway, not a workplace, so the tool
+**Nothing runs on the gateway.** `moriah-gw` is a login gateway, not a workplace, so the tool
 never does anything there: every command it sends — fetching the declarations, checking a file,
 receiving an upload, downloading the code, running the repair helper — is wrapped in `srun`, and
 slurm runs it on whichever compute node is free. The heavy realignment itself is a separate array
